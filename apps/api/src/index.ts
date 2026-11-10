@@ -14,7 +14,7 @@ import {
 	writeWorkspace,
 } from "./bd-serve.ts";
 import { boardRoutes, doltBoardSource } from "./board/routes.ts";
-import { runDispatch } from "./dispatch/start.ts";
+import { type DispatchNats, runDispatch } from "./dispatch/start.ts";
 import {
 	ensureBackup,
 	hasBeadsSchema,
@@ -109,24 +109,6 @@ const board = boardRoutes(deps.dolt ? doltBoardSource(deps.dolt) : null, {
 	onError: (error) => console.error(`board: ${error}`),
 });
 
-// Dispatcher on NATS: off unless DISPATCH_NATS_URL (ws/wss) is set; needs Dolt and bd serve.
-const hub = board.hub;
-const dispatch =
-	env.DISPATCH_NATS_URL && deps.dolt && deps.bdUrl
-		? runDispatch({
-				natsUrl: env.DISPATCH_NATS_URL,
-				user: env.DISPATCH_NATS_USER,
-				pass: env.DISPATCH_NATS_PASSWORD,
-				bdUrl: deps.bdUrl,
-				dolt: deps.dolt,
-				events: hub
-					? (listener) => hub.subscribe(listener).unsubscribe
-					: undefined,
-				onError: (error) => console.error(`dispatch: ${error}`),
-			})
-		: null;
-deps.nats = dispatch ? () => dispatch.probe() : null;
-
 // Auth (NATS auth callout + /api/auth/*): off unless NATS_WS_URL (ws/wss), the issuer seed and the auth password are set.
 const port = Number(env.PORT ?? 3000);
 const auth =
@@ -143,6 +125,32 @@ const auth =
 				publicNatsUrl: env.NATS_PUBLIC_WS_URL,
 			})
 		: null;
+
+// Dispatcher on NATS, on auth's APP connection; without auth, on DISPATCH_NATS_URL (ws/wss, local dev).
+// Off when neither is set; needs Dolt and bd serve.
+const hub = board.hub;
+const dispatchNats: DispatchNats | null = auth
+	? { connection: auth.ready.then((service) => service.app) }
+	: env.DISPATCH_NATS_URL
+		? {
+				url: env.DISPATCH_NATS_URL,
+				user: env.DISPATCH_NATS_USER,
+				pass: env.DISPATCH_NATS_PASSWORD,
+			}
+		: null;
+const dispatch =
+	dispatchNats && deps.dolt && deps.bdUrl
+		? runDispatch({
+				nats: dispatchNats,
+				bdUrl: deps.bdUrl,
+				dolt: deps.dolt,
+				events: hub
+					? (listener) => hub.subscribe(listener).unsubscribe
+					: undefined,
+				onError: (error) => console.error(`dispatch: ${error}`),
+			})
+		: null;
+deps.nats = dispatch ? () => dispatch.probe() : null;
 
 const server = Bun.serve({
 	port,
