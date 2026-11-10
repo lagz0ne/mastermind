@@ -490,4 +490,53 @@ describe("named environments", () => {
 		expect(dispatch?.bead.labels).not.toContain(ENV_TRIAGE_LABEL);
 		expect(work.beads.get("mm-1")?.labels).not.toContain(ENV_TRIAGE_LABEL);
 	});
+
+	test("a runner that lists its environments is offered only those", async () => {
+		const { d, work } = envSetup();
+		work.add({ id: "mm-1", labels: ["env:scratch"] }, "build");
+		const other = await d.next(
+			"alice",
+			"build",
+			runner("a", { environments: ["docs"] }),
+		);
+		expect(other.dispatch).toBeNull();
+		expect(work.beads.get("mm-1")?.status).toBe("open");
+		const bound = await d.next(
+			"alice",
+			"build",
+			runner("b", { environments: ["scratch"] }),
+		);
+		expect(bound.dispatch?.bead.id).toBe("mm-1");
+	});
+
+	test("a waiting runner without the environment is not woken for it", async () => {
+		const clock = new Date("2026-11-10T08:00:00Z");
+		const work = fakeWork(() => clock);
+		const d = new Dispatcher({
+			work,
+			now: () => clock,
+			waitMs: 200,
+			resolveEnv: () => ({ ok: true, env: { ...scratch } }),
+		});
+		const waiting = d.next(
+			"alice",
+			"build",
+			runner("a", { environments: ["docs"] }),
+		);
+		await Bun.sleep(10);
+		work.add({ id: "mm-1", labels: ["env:scratch"] }, "build");
+		await d.ready("build");
+		expect((await waiting).dispatch).toBeNull();
+		expect(work.beads.get("mm-1")?.status).toBe("open");
+	});
+
+	test("environments must be a list of names", async () => {
+		const { d } = envSetup();
+		const bad = runner("a", {
+			environments: "scratch" as unknown as string[],
+		});
+		await expect(d.next("alice", "build", bad)).rejects.toThrow(
+			"runner is missing or malformed",
+		);
+	});
 });

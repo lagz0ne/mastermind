@@ -22,6 +22,7 @@ import {
 	columnOf,
 	type Dispatch,
 	type DispatchEnv,
+	envNameOf,
 	type HeartbeatReply,
 	type HeartbeatRequest,
 	isAgentActor,
@@ -121,6 +122,8 @@ export function withInstructions(prompt: string, env: DispatchEnv): string {
 }
 
 type Waiter = RunnerState & {
+	/** The runner's bound environments; absent: any. */
+	environments?: string[];
 	actor: string;
 	queue: string;
 	resolve: (reply: NextReply) => void;
@@ -141,7 +144,8 @@ export function checkRunner(account: string, req: NextRequest): RunnerInfo {
 		typeof r.account !== "string" ||
 		typeof r.serviceAccount !== "string" ||
 		!strings(r.providers) ||
-		!strings(r.capabilities)
+		!strings(r.capabilities) ||
+		(r.environments !== undefined && !strings(r.environments))
 	) {
 		throw new BusError("bad_request", "runner is missing or malformed");
 	}
@@ -223,16 +227,16 @@ export class Dispatcher {
 		const state = this.#state(runner, actor, queue);
 		let wait: Promise<NextReply> | null = null;
 		const reply = await this.#lock(queue, async () => {
-			const ready = await this.#dispatchable(
-				queue,
-				await this.#work.ready(queue),
-			);
+			const ready = (
+				await this.#dispatchable(queue, await this.#work.ready(queue))
+			).filter((b) => this.#bound(runner.environments, b, queue));
 			const dispatch = await this.#take(state, actor, queue, ready);
 			if (dispatch || this.#stopped || this.#waitMs <= 0) return { dispatch };
 			// Registered under the lock: a ready signal cannot slip in between.
 			wait = new Promise<NextReply>((resolve) => {
 				const waiter: Waiter = {
 					...state,
+					...(runner.environments ? { environments: runner.environments } : {}),
 					actor,
 					queue,
 					resolve,
@@ -263,7 +267,10 @@ export class Dispatcher {
 			for (const bead of ready) {
 				const current = this.#waiting.get(queue) ?? [];
 				if (current.length === 0) break;
-				const waiter = selectWaiter(bead, current);
+				const waiter = selectWaiter(
+					bead,
+					current.filter((w) => this.#bound(w.environments, bead, queue)),
+				);
 				if (!waiter) continue;
 				const dispatch = await this.#claim(bead, waiter.actor, queue);
 				if (!dispatch) continue;
@@ -467,6 +474,18 @@ export class Dispatcher {
 			env,
 			prompt: withInstructions(promptOf(held, await this.#notes(bead.id)), env),
 		};
+	}
+
+	/** May a runner with these bound environments take `bead`? */
+	#bound(
+		environments: string[] | undefined,
+		bead: Bead,
+		queue: string,
+	): boolean {
+		if (!environments) return true;
+		const r = this.#opts.resolveEnv?.(bead, queue);
+		const name = r ? (r.ok ? r.env.name : undefined) : envNameOf(bead);
+		return !name || environments.includes(name);
 	}
 
 	/** Resolution is pure: the claim resolves again rather than carry state. */

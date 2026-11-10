@@ -127,6 +127,11 @@ export type RunnerInfo = {
 	queues?: string[];
 	/** Runner software version. */
 	version?: string;
+	/**
+	 * Environment names bound on this runner. Absent: a legacy runner that
+	 * takes any environment. Present: it is offered only these.
+	 */
+	environments?: string[];
 };
 
 /** Ask for the next bead on a queue. */
