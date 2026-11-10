@@ -7,7 +7,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { probe } from "./smoke.ts";
 
-// biome-ignore lint/suspicious/noUndeclaredEnvVars: local-only test, not a turbo task
 const bin = process.env.NATS_SERVER ?? Bun.which("nats-server");
 const PASSWORD = "test-secret";
 // Any valid account public nkey works: no callout service runs in this test.
