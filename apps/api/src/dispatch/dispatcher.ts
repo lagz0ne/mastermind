@@ -346,11 +346,18 @@ export class Dispatcher {
 			return;
 		}
 		if (bead.status !== "open") return;
-		const target = route(bead, this.#opts.rules?.() ?? []);
+		const rules = this.#opts.rules?.() ?? [];
+		if (!route(bead, rules)) return;
+		// The event's bead may be stale: a label change journals steps (old
+		// queue removed, then new one added). Decide on the bead as it is now,
+		// or a manual move to another queue gets undone.
+		const current = await this.#work.get(bead.id);
+		if (current.status !== "open" || queueOf(current)) return;
+		const target = route(current, rules);
 		if (!target) return;
 		// The label change is a new journal event; that one wakes the waiters.
 		await this.#work.setLabels(bead.id, this.#actor, [
-			...bead.labels,
+			...current.labels,
 			queueLabel(target),
 		]);
 	}

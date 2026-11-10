@@ -275,6 +275,22 @@ describe("routing on journal events", () => {
 		expect(work.beads.get("mm-2")?.labels).toEqual([]);
 	});
 
+	test("a stale event does not undo a manual queue", async () => {
+		const { d, work } = setup();
+		const bug = work.add({ id: "mm-1", type: "bug" });
+		// Somebody moved the bead to 'web' after this event was journaled.
+		work.beads.set("mm-1", { ...bug, labels: ["queue:web"] });
+		await d.onEvent({
+			seq: 1,
+			at: "",
+			op: "update",
+			beadId: "mm-1",
+			actor: "x",
+			bead: bug,
+		});
+		expect(work.beads.get("mm-1")?.labels).toEqual(["queue:web"]);
+	});
+
 	test("a ready bead on a queue announces the queue; others do not", async () => {
 		const { d, work, notices } = setup();
 		const ready = work.add({ id: "mm-1" }, "build");
