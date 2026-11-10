@@ -1,5 +1,10 @@
 // GET /api/board (snapshot) and GET /api/events (SSE), both read from Dolt.
-import { DoltReader, type JournalSource, type SqlTag } from "@mastermind/beads";
+import {
+	DoltReader,
+	iso,
+	type JournalSource,
+	type SqlTag,
+} from "@mastermind/beads";
 import {
 	type Bead,
 	type BeadEvent,
@@ -8,13 +13,15 @@ import {
 } from "@mastermind/core";
 import type { Server } from "bun";
 import { type HubOptions, JournalHub } from "./hub.ts";
+import { type LeaseChange, type LeaseSource, LeaseWatch } from "./leases.ts";
 
 /** What the board routes read. {@link doltBoardSource} in production. */
-export type BoardSource = JournalSource & {
-	board(): Promise<Bead[]>;
-	/** Highest journal seq, 0 when the journal is empty. */
-	head(): Promise<number>;
-};
+export type BoardSource = JournalSource &
+	Partial<LeaseSource> & {
+		board(): Promise<Bead[]>;
+		/** Highest journal seq, 0 when the journal is empty. */
+		head(): Promise<number>;
+	};
 
 export function doltBoardSource(sql: SqlTag): BoardSource {
 	const reader = new DoltReader(sql);
@@ -27,12 +34,30 @@ export function doltBoardSource(sql: SqlTag): BoardSource {
 			`) as { head: number | bigint | string }[];
 			return Number(rows[0]?.head ?? 0);
 		},
+		async leases() {
+			const rows = (await sql`
+				select issue_id, lease_expires_at, heartbeat_at from leases
+			`) as {
+				issue_id: string;
+				lease_expires_at: Date | string;
+				heartbeat_at: Date | string | null;
+			}[];
+			return rows.map((r) => ({
+				beadId: r.issue_id,
+				lease: {
+					expiresAt: iso(r.lease_expires_at),
+					heartbeatAt: iso(r.heartbeat_at ?? r.lease_expires_at),
+				},
+			}));
+		},
 	};
 }
 
 export type BoardRoutesOptions = Omit<HubOptions, "head"> & {
 	/** SSE comment sent this often so proxies keep the stream open. Default 8 s. */
 	keepAliveMs?: number;
+	/** Poll interval of the leases table (heartbeats). Default 2 s. */
+	leaseIntervalMs?: number;
 };
 
 type Handler = (req: Request, server?: Server<unknown>) => Promise<Response>;
@@ -73,6 +98,11 @@ export function sseFrame(event: BeadEvent): Uint8Array {
 	);
 }
 
+/** A lease change: no id, so it never moves the client's Last-Event-ID. */
+export function leaseFrame(change: LeaseChange): Uint8Array {
+	return encoder.encode(`event: lease\ndata: ${JSON.stringify(change)}\n\n`);
+}
+
 /**
  * Routes for Bun.serve. With a null source (no DOLT_URL) both answer 503 and
  * nothing else changes, so the app stays deployable without Dolt.
@@ -92,8 +122,15 @@ export function boardRoutes(
 		};
 	}
 	const src = source;
-	const { keepAliveMs = 8_000, ...hubOptions } = options;
+	const { keepAliveMs = 8_000, leaseIntervalMs, ...hubOptions } = options;
 	const hub = new JournalHub(src, { ...hubOptions, head: () => src.head() });
+	const leasesOf = src.leases?.bind(src);
+	const leases = leasesOf
+		? new LeaseWatch(
+				{ leases: leasesOf },
+				{ intervalMs: leaseIntervalMs, onError: hubOptions.onError },
+			)
+		: null;
 
 	async function board(req: Request): Promise<Response> {
 		try {
@@ -150,6 +187,9 @@ export function boardRoutes(
 					if (pending) pending.push(event);
 					else send(event);
 				});
+				const unwatch = leases?.subscribe((change) => {
+					if (!closed) controller.enqueue(leaseFrame(change));
+				});
 				const keepAlive = setInterval(() => {
 					if (!closed) controller.enqueue(encoder.encode(": ka\n\n"));
 				}, keepAliveMs);
@@ -158,6 +198,7 @@ export function boardRoutes(
 					closed = true;
 					clearInterval(keepAlive);
 					subscription.unsubscribe();
+					unwatch?.();
 				};
 				req.signal.addEventListener("abort", close);
 				controller.enqueue(encoder.encode("retry: 2000\n\n"));
@@ -203,6 +244,9 @@ export function boardRoutes(
 	return {
 		routes: { "/api/board": board, "/api/events": events },
 		hub,
-		stop: () => hub.stop(),
+		stop: () => {
+			hub.stop();
+			leases?.stop();
+		},
 	};
 }

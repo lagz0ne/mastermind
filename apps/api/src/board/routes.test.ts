@@ -225,3 +225,34 @@ describe("GET /api/events", () => {
 		expect(board.hub?.listeners).toBe(0);
 	});
 });
+
+describe("lease frames (heartbeats are not in the journal)", () => {
+	test("a renewed lease reaches the stream as event: lease, without an id", async () => {
+		const source = new FakeSource();
+		let hb = "2026-11-10T08:00:00.000Z";
+		const fake = source as FakeSource & BoardSource;
+		fake.leases = async () => [
+			{ beadId: "mm-1", lease: { heartbeatAt: hb, expiresAt: hb } },
+		];
+		const board = boardRoutes(source, {
+			intervalMs: 5,
+			retryMs: 5,
+			leaseIntervalMs: 5,
+		});
+		open.push(board);
+		const res = await board.routes["/api/events"](get("/api/events?since=0"));
+		const reader = (res.body as ReadableStream<Uint8Array>).getReader();
+		await Bun.sleep(20);
+		hb = "2026-11-10T08:01:00.000Z";
+		let text = "";
+		while (!text.includes("event: lease")) {
+			const { value } = await reader.read();
+			text += new TextDecoder().decode(value);
+		}
+		const frame = text.slice(text.indexOf("event: lease")).split("\n\n")[0];
+		expect(frame).not.toContain("id:");
+		expect(frame).toContain('"beadId":"mm-1"');
+		expect(frame).toContain(hb);
+		await reader.cancel();
+	});
+});
