@@ -10,7 +10,7 @@
 set -euo pipefail
 die() { echo "spawn: $*" >&2; exit 1; }
 
-provider="${SPAWN_PROVIDER:-claude/claude-opus-5-5}" mode="${SPAWN_MODE:-}" extra=""
+provider="${SPAWN_PROVIDER:-claude/claude-opus-5-5}" mode="${SPAWN_MODE:-auto}" extra=""
 while getopts "p:m:x:" o; do
   case "$o" in
     p) provider="$OPTARG" ;;
