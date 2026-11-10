@@ -2,7 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { NotFound } from "@mastermind/beads";
 import { BusError, type StoreEntry } from "@mastermind/bus";
 import type { Bead } from "@mastermind/core";
-import { explain, queuesOf, ROUTING_KEY, validate } from "./model.ts";
+import {
+	defaultEnvironment,
+	explain,
+	queuesOf,
+	ROUTING_KEY,
+	validate,
+} from "./model.ts";
 import { type RoutingBeads, routingRoutes } from "./routes.ts";
 import { type RoutingKv, RoutingStore, StaleRevision } from "./store.ts";
 
@@ -322,5 +328,40 @@ describe("routing routes", () => {
 
 	test("the document lives at one key", () => {
 		expect(ROUTING_KEY).toBe("routing");
+	});
+});
+
+describe("default environment", () => {
+	const v = validate({
+		queues: [
+			{ name: "backend", members: [], environment: "mastermind" },
+			{ name: "web", members: [] },
+		],
+		rules: [
+			{ match: { labels: ["docs"] }, queue: "backend", environment: "docs" },
+			{ match: {}, queue: "web" },
+		],
+	});
+	if (!v.ok) throw new Error(v.errors.join("; "));
+
+	test("a matching rule to the queue wins, then the queue's default", () => {
+		expect(
+			defaultEnvironment(v.doc, bead({ labels: ["docs"] }), "backend"),
+		).toBe("docs");
+		expect(defaultEnvironment(v.doc, bead(), "backend")).toBe("mastermind");
+		expect(defaultEnvironment(v.doc, bead(), "web")).toBeNull();
+	});
+
+	test("the environment must be a name", () => {
+		const bad = validate({
+			queues: [{ name: "a", members: [], environment: "a b" }],
+			rules: [{ match: {}, queue: "a", environment: "x.y" }],
+		});
+		expect(bad.ok).toBe(false);
+		if (!bad.ok)
+			expect(bad.errors).toEqual([
+				"a: environment must be an environment name",
+				"rule 1: environment must be an environment name",
+			]);
 	});
 });

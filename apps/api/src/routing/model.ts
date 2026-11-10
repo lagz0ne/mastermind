@@ -21,6 +21,8 @@ export type Queue = {
 	members: string[];
 	/** At most this many beads of this queue held at once by one account. */
 	maxPerAccount?: number;
+	/** Default environment of its beads, when no env: label or rule names one. */
+	environment?: string;
 };
 
 export type RoutingDoc = { queues: Queue[]; rules: RoutingRule[] };
@@ -89,6 +91,9 @@ export function validate(
 		) {
 			errors.push(`${q.name}: maxPerAccount must be a whole number, 1 or more`);
 		}
+		const env = q.environment;
+		if (env !== undefined && env !== null && env !== "" && !isQueueName(env))
+			errors.push(`${q.name}: environment must be an environment name`);
 		queues.push({
 			name: q.name,
 			description: typeof description === "string" ? description : "",
@@ -96,6 +101,7 @@ export function validate(
 				? [...new Set(members.filter((m) => typeof m === "string"))]
 				: [],
 			...(typeof max === "number" ? { maxPerAccount: max } : {}),
+			...(isQueueName(env) ? { environment: env } : {}),
 		});
 	}
 
@@ -140,7 +146,14 @@ export function validate(
 				errors.push(`${at}: idPrefix must be text`);
 			else match.idPrefix = m.idPrefix;
 		}
-		rules.push({ match, queue: String(r.queue) });
+		const env = r.environment;
+		if (env !== undefined && env !== null && env !== "" && !isQueueName(env))
+			errors.push(`${at}: environment must be an environment name`);
+		rules.push({
+			match,
+			queue: String(r.queue),
+			...(isQueueName(env) ? { environment: env } : {}),
+		});
 	}
 
 	return errors.length
@@ -196,6 +209,21 @@ export function explain(bead: RoutableBead, doc: RoutingDoc): RouteExplanation {
 		ruleIndex: i,
 		why: `rule ${i + 1} (${describe(rule.match)}) is the first that matches`,
 	};
+}
+
+/**
+ * The default environment of a bead on `queue`: the first matching rule that
+ * routes to this queue and names one, else the queue's own. Null: none.
+ */
+export function defaultEnvironment(
+	doc: RoutingDoc,
+	bead: RoutableBead,
+	queue: string,
+): string | null {
+	const rule = doc.rules.find(
+		(r) => r.queue === queue && r.environment && matches(bead, r.match),
+	);
+	return rule?.environment ?? queueNamed(doc, queue)?.environment ?? null;
 }
 
 /** Queues that `account` is a member of. */

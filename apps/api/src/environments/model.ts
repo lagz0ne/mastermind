@@ -170,25 +170,37 @@ function labelValue(bead: Pick<Bead, "labels">, prefix: string) {
 	return label?.slice(prefix.length);
 }
 
+/** How {@link resolveEnv} treats a bead that names no environment. */
+export type ResolveOptions = {
+	/** The default from routing (rule, then queue); used without an env: label. */
+	fallback?: string | null;
+	/**
+	 * Nothing saved yet (revision 0): a bead without a name dispatches the old
+	 * way, from its labels, as before environments existed.
+	 */
+	open?: boolean;
+};
+
 /**
- * The environment of a dispatch. The bead's `env:<name>` label wins, else
- * `fallback` (a default from routing). A per-bead `ref:` label overrides the
- * ref; `req:` labels add requirements; a `provider:` label is kept. A bead
- * with no name but the old `repo:` label is read the old way. Unknown or
- * missing: not dispatched, with the reason.
+ * The environment of a dispatch. The bead's `env:<name>` label wins, else the
+ * routing default. A per-bead `ref:` label overrides the ref; `req:` labels
+ * add requirements; a `provider:` label is kept. A bead with no name but the
+ * old `repo:` label is read the old way. Unknown or missing: not dispatched,
+ * with the reason.
  */
 export function resolveEnv(
 	bead: Pick<Bead, "labels">,
 	doc: EnvironmentsDoc,
-	fallback: string | null = null,
+	opts: ResolveOptions = {},
 ): EnvResolution {
-	const name = envNameOf(bead) ?? fallback;
+	const name = envNameOf(bead) ?? opts.fallback ?? null;
 	if (!name) {
-		if (labelValue(bead, REPO_LABEL_PREFIX))
+		if (opts.open || labelValue(bead, REPO_LABEL_PREFIX))
 			return { ok: true, env: envOf(bead) };
 		return {
 			ok: false,
-			reason: "no environment: add the label env:<name>",
+			reason:
+				"no environment: add the label env:<name>, or give its queue a default environment",
 		};
 	}
 	const def = environmentNamed(doc, name);

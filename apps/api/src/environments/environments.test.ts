@@ -112,8 +112,12 @@ describe("resolveEnv", () => {
 	});
 
 	test("the label wins over the routing default; the default applies without a label", () => {
-		expect(resolveEnv({ labels: [] }, doc, "scratch").ok).toBe(true);
-		const r = resolveEnv({ labels: ["env:other"] }, doc, "scratch");
+		expect(resolveEnv({ labels: [] }, doc, { fallback: "scratch" }).ok).toBe(
+			true,
+		);
+		const r = resolveEnv({ labels: ["env:other"] }, doc, {
+			fallback: "scratch",
+		});
 		expect(r).toEqual({
 			ok: false,
 			reason: "environment other is not defined (see /environments)",
@@ -127,6 +131,11 @@ describe("resolveEnv", () => {
 			env: { repo: "https://x/y.git", ref: "main", requires: [] },
 		});
 		expect(resolveEnv({ labels: ["queue:a"] }, doc).ok).toBe(false);
+		// Before the first save, a bead without a name dispatches as before.
+		expect(resolveEnv({ labels: ["queue:a"] }, doc, { open: true })).toEqual({
+			ok: true,
+			env: { repo: "", ref: "main", requires: [] },
+		});
 	});
 });
 

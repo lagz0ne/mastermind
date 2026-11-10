@@ -69,6 +69,12 @@ export type DispatcherOptions = {
 	/** The environment of a dispatch. Default: {@link defaultEnv}. */
 	env?: (bead: Bead, queue: string) => DispatchEnv;
 	/**
+	 * Resolve the environment before a claim (named environments). A bead
+	 * that does not resolve is not dispatched: it gets the label
+	 * {@link ENV_TRIAGE_LABEL} and a note with the reason. Wins over `env`.
+	 */
+	resolveEnv?: (bead: Bead, queue: string) => EnvResolution;
+	/**
 	 * Long-poll wait. Adapters must use a request timeout longer than this, or a
 	 * bead claimed for them is lost until its lease dies.
 	 */
@@ -78,6 +84,13 @@ export type DispatcherOptions = {
 	now?: () => Date;
 	onError?: (error: unknown) => void;
 };
+
+export type EnvResolution =
+	| { ok: true; env: DispatchEnv }
+	| { ok: false; reason: string };
+
+/** Marks a bead that is not dispatched because its environment does not resolve. */
+export const ENV_TRIAGE_LABEL = "triage:env";
 
 /** Read from the bead's labels: repo:, ref:, provider:, req: (see beads/env.ts). */
 export function defaultEnv(bead: Bead): DispatchEnv {
@@ -98,6 +111,13 @@ export function promptOf(
 		);
 	}
 	return parts.join("\n\n");
+}
+
+/** The prompt with the environment's instructions, if it has any. */
+export function withInstructions(prompt: string, env: DispatchEnv): string {
+	return env.instructions
+		? `${prompt}\n\nEnvironment ${env.name ?? ""} instructions:\n${env.instructions}`
+		: prompt;
 }
 
 type Waiter = RunnerState & {
@@ -203,7 +223,10 @@ export class Dispatcher {
 		const state = this.#state(runner, actor, queue);
 		let wait: Promise<NextReply> | null = null;
 		const reply = await this.#lock(queue, async () => {
-			const ready = await this.#work.ready(queue);
+			const ready = await this.#dispatchable(
+				queue,
+				await this.#work.ready(queue),
+			);
 			const dispatch = await this.#take(state, actor, queue, ready);
 			if (dispatch || this.#stopped || this.#waitMs <= 0) return { dispatch };
 			// Registered under the lock: a ready signal cannot slip in between.
@@ -233,8 +256,9 @@ export class Dispatcher {
 		await this.#lock(queue, async () => {
 			const waiters = this.#waiting.get(queue);
 			if (!waiters?.length) return;
-			const ready = (await this.#work.ready(queue)).filter(
-				(b) => queueOf(b) === queue,
+			const ready = await this.#dispatchable(
+				queue,
+				(await this.#work.ready(queue)).filter((b) => queueOf(b) === queue),
 			);
 			for (const bead of ready) {
 				const current = this.#waiting.get(queue) ?? [];
@@ -433,15 +457,61 @@ export class Dispatcher {
 			lease: claimed.lease,
 			updatedAt: claimed.updatedAt,
 		};
+		const env = this.#envOf(held, queue);
 		return {
 			bead: held,
 			queue,
 			actor,
 			lease: claimed.lease,
 			stage: "work",
-			env: (this.#opts.env ?? defaultEnv)(held, queue),
-			prompt: promptOf(held, await this.#notes(bead.id)),
+			env,
+			prompt: withInstructions(promptOf(held, await this.#notes(bead.id)), env),
 		};
+	}
+
+	/** Resolution is pure: the claim resolves again rather than carry state. */
+	#envOf(bead: Bead, queue: string): DispatchEnv {
+		const r = this.#opts.resolveEnv?.(bead, queue);
+		if (r?.ok) return r.env;
+		return (this.#opts.env ?? defaultEnv)(bead, queue);
+	}
+
+	/**
+	 * The beads of `ready` whose environment resolves. The others are marked
+	 * once (label + note with the reason); a mark is removed when it resolves.
+	 */
+	async #dispatchable(queue: string, ready: Bead[]): Promise<Bead[]> {
+		const resolve = this.#opts.resolveEnv;
+		if (!resolve) return ready;
+		const ok: Bead[] = [];
+		for (const bead of ready) {
+			const r = resolve(bead, queue);
+			const marked = bead.labels.includes(ENV_TRIAGE_LABEL);
+			try {
+				if (r.ok) {
+					if (!marked) {
+						ok.push(bead);
+						continue;
+					}
+					const labels = bead.labels.filter((l) => l !== ENV_TRIAGE_LABEL);
+					await this.#work.setLabels(bead.id, this.#actor, labels);
+					ok.push({ ...bead, labels });
+				} else if (!marked) {
+					await this.#work.comment(
+						bead.id,
+						this.#actor,
+						`not dispatched: ${r.reason}`,
+					);
+					await this.#work.setLabels(bead.id, this.#actor, [
+						...bead.labels,
+						ENV_TRIAGE_LABEL,
+					]);
+				}
+			} catch (error) {
+				this.#opts.onError?.(error);
+			}
+		}
+		return ok;
 	}
 
 	/** Notes humans left on a bead (not runner reports); none when unreadable. */

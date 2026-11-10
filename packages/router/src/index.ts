@@ -20,7 +20,12 @@ export type RuleMatch = {
 	idPrefix?: string;
 };
 
-export type RoutingRule = { match: RuleMatch; queue: string };
+export type RoutingRule = {
+	match: RuleMatch;
+	queue: string;
+	/** Default environment for the beads this rule routes (no env: label). */
+	environment?: string;
+};
 
 /** A runner that pulls work, as Mastermind sees it at decision time. */
 export type RunnerState = {

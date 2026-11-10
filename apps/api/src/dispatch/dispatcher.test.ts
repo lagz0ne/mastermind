@@ -6,6 +6,7 @@ import {
 	checkRunner,
 	Dispatcher,
 	type DispatchSeen,
+	ENV_TRIAGE_LABEL,
 } from "./dispatcher.ts";
 import { fakeWork, LEASE_MS } from "./fake-work.ts";
 
@@ -419,5 +420,74 @@ describe("dispatch envelope from the bead (mm-210.26)", () => {
 		expect(dispatch?.prompt).toBe(
 			"mm-9\n\ndo it\n\nAcceptance:\ntests pass\n\nNotes:\n- duke (t1): use bun",
 		);
+	});
+});
+
+describe("named environments", () => {
+	const scratch = {
+		name: "scratch",
+		repo: "https://github.com/acme/scratch.git",
+		ref: "main",
+		requires: [],
+		setup: ["bun install"],
+		check: ["bun test"],
+		instructions: "Keep commits small.",
+	};
+	function envSetup() {
+		const clock = new Date("2026-11-10T08:00:00Z");
+		const work = fakeWork(() => clock);
+		const d = new Dispatcher({
+			work,
+			now: () => clock,
+			waitMs: 0,
+			resolveEnv: (bead) =>
+				bead.labels.includes("env:scratch")
+					? { ok: true, env: scratch }
+					: { ok: false, reason: "environment nope is not defined" },
+		});
+		return { d, work };
+	}
+
+	test("the envelope carries the resolved environment; instructions go into the prompt", async () => {
+		const { d, work } = envSetup();
+		work.add({ id: "mm-1", labels: ["env:scratch"] }, "build");
+		const { dispatch } = await d.next("alice", "build", runner("laptop"));
+		expect(dispatch?.env).toEqual(scratch);
+		expect(dispatch?.prompt).toEndWith(
+			"Environment scratch instructions:\nKeep commits small.",
+		);
+	});
+
+	test("an unknown environment is not dispatched; the bead is marked once with the reason", async () => {
+		const { d, work } = envSetup();
+		work.add({ id: "mm-1", priority: 0, labels: ["env:nope"] }, "build");
+		work.add({ id: "mm-2", priority: 2, labels: ["env:scratch"] }, "build");
+		const first = await d.next("alice", "build", runner("a"));
+		expect(first.dispatch?.bead.id).toBe("mm-2");
+		const held = work.beads.get("mm-1");
+		expect(held?.status).toBe("open");
+		expect(held?.labels).toContain(ENV_TRIAGE_LABEL);
+		expect(work.comments.filter((c) => c.id === "mm-1")).toEqual([
+			{
+				id: "mm-1",
+				actor: "mastermind",
+				text: "not dispatched: environment nope is not defined",
+			},
+		]);
+		// Asked again: still not dispatched, no second note.
+		const again = await d.next("alice", "build", runner("b"));
+		expect(again.dispatch).toBeNull();
+		expect(work.comments.filter((c) => c.id === "mm-1")).toHaveLength(1);
+	});
+
+	test("the mark is removed when the environment resolves", async () => {
+		const { d, work } = envSetup();
+		work.add(
+			{ id: "mm-1", labels: ["env:scratch", ENV_TRIAGE_LABEL] },
+			"build",
+		);
+		const { dispatch } = await d.next("alice", "build", runner("a"));
+		expect(dispatch?.bead.labels).not.toContain(ENV_TRIAGE_LABEL);
+		expect(work.beads.get("mm-1")?.labels).not.toContain(ENV_TRIAGE_LABEL);
 	});
 });

@@ -15,9 +15,17 @@ import {
 } from "@mastermind/bus";
 import type { BeadEvent, NextReply, NextRequest } from "@mastermind/core";
 import type { Msg, NatsConnection, Subscription } from "@nats-io/nats-core";
+import {
+	EMPTY_ENVIRONMENTS,
+	ENVIRONMENTS_KEY,
+	type EnvironmentsState,
+	parseStored as parseEnvironments,
+	resolveEnv,
+} from "../environments/model.ts";
 import { admit, reroute } from "../routing/enforce.ts";
 import {
 	CONFIG_BUCKET,
+	defaultEnvironment,
 	EMPTY_ROUTING,
 	parseStored,
 	ROUTING_KEY,
@@ -29,7 +37,7 @@ export { CONFIG_BUCKET, ROUTING_KEY };
 
 export type DispatchServiceOptions = Omit<
 	DispatcherOptions,
-	"notify" | "rules"
+	"notify" | "rules" | "resolveEnv"
 > & {
 	/** Sweep dead leases this often. Default 30 s; 0 turns it off. */
 	sweepMs?: number;
@@ -41,6 +49,12 @@ export type DispatchServiceOptions = Omit<
 	 * open beads that have no queue. Default true.
 	 */
 	kvRules?: boolean;
+	/**
+	 * Resolve named environments (KV key `environments`; defaults from
+	 * routing). Before the first save, beads without env:<name> dispatch the
+	 * old way. Default true.
+	 */
+	kvEnvironments?: boolean;
 };
 
 export type DispatchService = {
@@ -77,11 +91,36 @@ async function watchRouting(
 	return { get: () => state, stop: () => watch.stop() };
 }
 
+/** Watch the environments document in KV; `get` is always the latest value. */
+async function watchEnvironments(nc: NatsConnection) {
+	const store = await Store.open<unknown>(nc, CONFIG_BUCKET);
+	const first = await store.get(ENVIRONMENTS_KEY);
+	let state: EnvironmentsState = first
+		? { doc: parseEnvironments(first.value), revision: first.revision }
+		: { doc: EMPTY_ENVIRONMENTS, revision: 0 };
+	const watch = await store.watch(ENVIRONMENTS_KEY);
+	void (async () => {
+		for await (const e of watch) {
+			state =
+				e.op === "put"
+					? { doc: parseEnvironments(e.value), revision: e.revision }
+					: { doc: EMPTY_ENVIRONMENTS, revision: 0 };
+		}
+	})().catch(() => {});
+	return { get: () => state, stop: () => watch.stop() };
+}
+
 export async function startDispatch(
 	nc: NatsConnection,
 	options: DispatchServiceOptions,
 ): Promise<DispatchService> {
-	const { sweepMs = 30_000, events, kvRules = true, ...rest } = options;
+	const {
+		sweepMs = 30_000,
+		events,
+		kvRules = true,
+		kvEnvironments = true,
+		...rest
+	} = options;
 	const onError = rest.onError;
 	const { work } = rest;
 	const actor = rest.actor ?? "mastermind";
@@ -94,9 +133,22 @@ export async function startDispatch(
 				);
 			})
 		: null;
+	const environments = kvEnvironments ? await watchEnvironments(nc) : null;
 	const dispatcher = new Dispatcher({
 		...rest,
 		...(routing ? { rules: () => routing.get()?.doc.rules ?? [] } : {}),
+		...(environments
+			? {
+					resolveEnv: (bead, queue) => {
+						const envs = environments.get();
+						const doc = routing?.get()?.doc;
+						return resolveEnv(bead, envs.doc, {
+							fallback: doc ? defaultEnvironment(doc, bead, queue) : null,
+							open: envs.revision === 0,
+						});
+					},
+				}
+			: {}),
 		notify: (notice) => publish(nc, subjects.ready(notice.queue), notice),
 	});
 
@@ -169,6 +221,7 @@ export async function startDispatch(
 			if (sweeper) clearInterval(sweeper);
 			unsubscribe?.();
 			routing?.stop();
+			environments?.stop();
 			dispatcher.stop();
 			for (const sub of subs) sub.unsubscribe();
 		},

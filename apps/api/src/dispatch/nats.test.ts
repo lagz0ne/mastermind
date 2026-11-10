@@ -292,6 +292,53 @@ describe.skipIf(!bin)("dispatcher over NATS", () => {
 		expect(ok.dispatch?.bead.id).toBe("mm-70");
 	});
 
+	test("named environments: env:<name> dispatches the definition; an unknown one stays with a reason", async () => {
+		await config.put("environments", {
+			environments: [
+				{
+					name: "scratch",
+					repo: "https://github.com/acme/scratch.git",
+					ref: "main",
+					setup: ["bun install"],
+					check: ["bun test"],
+				},
+			],
+		});
+		try {
+			work.add({ id: "mm-80", priority: 0, labels: ["env:nope"] }, "build");
+			work.add({ id: "mm-81", priority: 1, labels: ["env:scratch"] }, "build");
+			// The watch delivers the put asynchronously: until then the
+			// environments are open and mm-80 would be dispatched the old way.
+			await Bun.sleep(100);
+			const { dispatch } = await request<NextRequest, NextReply>(
+				runner,
+				subjects.next("alice", "build"),
+				next("alice", "env1"),
+				{ timeout: 5_000 },
+			);
+			expect(dispatch?.bead.id).toBe("mm-81");
+			expect(dispatch?.env).toEqual({
+				name: "scratch",
+				repo: "https://github.com/acme/scratch.git",
+				ref: "main",
+				requires: [],
+				setup: ["bun install"],
+				check: ["bun test"],
+				secrets: [],
+			});
+			expect(work.beads.get("mm-80")?.status).toBe("open");
+			expect(work.beads.get("mm-80")?.labels).toContain("triage:env");
+			expect(work.comments).toContainEqual({
+				id: "mm-80",
+				actor: "mastermind",
+				text: "not dispatched: environment nope is not defined (see /environments)",
+			});
+		} finally {
+			await config.delete("environments");
+			work.beads.delete("mm-80");
+		}
+	});
+
 	test("probe is up while connected", async () => {
 		expect(await services[0]?.probe()).toBe("up");
 		expect(errors).toEqual([]);
