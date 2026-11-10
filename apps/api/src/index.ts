@@ -27,6 +27,8 @@ import {
 	syncBackup,
 } from "./dolt.ts";
 import { downloadRoutes } from "./download/routes.ts";
+import { environmentRoutes } from "./environments/routes.ts";
+import { startEnvironmentsInBackground } from "./environments/start.ts";
 import { RunnerRegistry } from "./people/registry.ts";
 import { peopleRoutes } from "./people/routes.ts";
 import { runnerScript } from "./people/runner-script.ts";
@@ -201,6 +203,16 @@ const routingApi = routingRoutes({
 	onError: (error) => console.error(`routing: ${error}`),
 });
 
+// Environments (named repo/ref/setup/check definitions) in NATS KV, next to routing.
+const environments = dispatchNats
+	? startEnvironmentsInBackground(dispatchNats)
+	: null;
+const environmentsApi = environmentRoutes({
+	store: () => environments?.store() ?? null,
+	requireAccount,
+	onError: (error) => console.error(`environments: ${error}`),
+});
+
 // Work from the UI: /api/beads (create, detail with timeline, notes, reopen, close) and /api/activity.
 const beads = beadsRoutes(
 	deps.dolt && deps.bdUrl
@@ -223,6 +235,7 @@ const server = Bun.serve({
 			...board.routes,
 			...people,
 			...routingApi,
+			...environmentsApi,
 			...beads,
 			// Public: /install.sh and the runner binaries of this commit.
 			...downloadRoutes({
@@ -245,6 +258,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 		if (backupTimer) clearInterval(backupTimer);
 		await dispatch?.stop();
 		await routing?.stop();
+		await environments?.stop();
 		await auth?.stop();
 		board.stop();
 		await server.stop();
