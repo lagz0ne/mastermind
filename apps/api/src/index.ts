@@ -1,5 +1,6 @@
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { browserIngest, telemetryFromEnv, traced } from "@mastermind/telemetry";
 import index from "@mastermind/web/index.html";
 import { SQL } from "bun";
 import { type Deps, health } from "./app.ts";
@@ -25,6 +26,15 @@ import {
 const env = process.env;
 const version = env.GIT_SHA ?? "dev";
 const bdPort = Number(env.BD_SERVE_PORT ?? 3010);
+// OTLP logs, traces and metrics: no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set.
+const telemetry = telemetryFromEnv(env, {
+	serviceName: env.OTEL_SERVICE_NAME || "mastermind",
+	serviceVersion: version,
+});
+const webTelemetry = telemetryFromEnv(env, {
+	serviceName: "mastermind-web",
+	serviceVersion: version,
+});
 
 const deps: Deps = {
 	db: env.DATABASE_URL ? new SQL(env.DATABASE_URL) : null,
@@ -137,14 +147,20 @@ const auth =
 const server = Bun.serve({
 	port,
 	development: env.NODE_ENV !== "production",
-	routes: {
-		"/api/health": () => health(deps, version),
-		...board.routes,
-		// Empty when auth is off; the cast only keeps the route keys typed.
-		...(auth?.routes ?? ({} as NonNullable<typeof auth>["routes"])),
-		"/api/*": () => Response.json({ error: "not found" }, { status: 404 }),
-		"/*": index,
-	},
+	routes: traced(
+		telemetry,
+		{
+			"/api/health": () => health(deps, version),
+			...board.routes,
+			// Empty when auth is off; the cast only keeps the route keys typed.
+			...(auth?.routes ?? ({} as NonNullable<typeof auth>["routes"])),
+			// Browser vitals, errors and route timings, forwarded as mastermind-web.
+			"/api/telemetry": { POST: browserIngest(webTelemetry) },
+			"/api/*": () => Response.json({ error: "not found" }, { status: 404 }),
+			"/*": index,
+		},
+		{ skip: ["/api/telemetry"] },
+	),
 });
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
@@ -157,8 +173,11 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 		await bd?.stop();
 		await deps.db?.close();
 		await deps.dolt?.close();
+		await Promise.all([telemetry.shutdown(), webTelemetry.shutdown()]);
 		process.exit(0);
 	});
 }
 
-console.log(`mastermind ${version} listening on ${server.url}`);
+console.log(
+	`mastermind ${version} listening on ${server.url}${telemetry.enabled ? ` (otlp ${env.OTEL_EXPORTER_OTLP_ENDPOINT})` : ""}`,
+);
