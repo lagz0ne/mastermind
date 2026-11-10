@@ -58,6 +58,9 @@ export function envLabel(name: string): string {
 	return `${ENV_LABEL_PREFIX}${name}`;
 }
 
+/** Marks a bead the dispatcher holds back: its environment does not resolve. */
+export const ENV_TRIAGE_LABEL = "triage:env";
+
 /** The environment name a bead points to, or null. */
 export function envNameOf(bead: Pick<Bead, "labels">): string | null {
 	const label = bead.labels.find(

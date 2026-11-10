@@ -1,8 +1,9 @@
-import type { NewWork, Priority } from "@mastermind/core";
+import { envLabel, type NewWork, type Priority } from "@mastermind/core";
 import * as Dialog from "@radix-ui/react-dialog";
 import { useNavigate } from "@tanstack/react-router";
 import { type FormEvent, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { getEnvironments } from "../environments/environments.ts";
 import { api } from "./api.ts";
 
 export const WORK_TYPES = ["task", "bug", "feature", "chore"] as const;
@@ -14,6 +15,8 @@ export type WorkForm = {
 	type: string;
 	priority: Priority;
 	labels: string;
+	/** A named environment (label env:<name>); empty: repo and ref below. */
+	environment: string;
 	repo: string;
 	ref: string;
 };
@@ -25,6 +28,7 @@ export const emptyForm: WorkForm = {
 	type: "task",
 	priority: 2,
 	labels: "",
+	environment: "",
 	repo: "",
 	ref: "",
 };
@@ -39,7 +43,14 @@ export function toNewWork(form: WorkForm): NewWork {
 	};
 	if (form.description.trim()) work.description = form.description.trim();
 	if (form.acceptance.trim()) work.acceptance = form.acceptance.trim();
-	if (form.repo.trim()) {
+	if (form.environment) {
+		// The environment gives repo and ref; a ref typed here overrides it.
+		work.labels = [
+			...(work.labels ?? []).filter((l) => !l.startsWith("env:")),
+			envLabel(form.environment),
+			...(form.ref.trim() ? [`ref:${form.ref.trim()}`] : []),
+		];
+	} else if (form.repo.trim()) {
 		work.env = { repo: form.repo.trim() };
 		if (form.ref.trim()) work.env.ref = form.ref.trim();
 	}
@@ -66,6 +77,14 @@ export function NewWorkButton() {
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const navigate = useNavigate();
+	// Environment names for the select; none when the list cannot be read.
+	const [envNames, setEnvNames] = useState<string[]>([]);
+	useEffect(() => {
+		if (!open) return;
+		getEnvironments()
+			.then((e) => setEnvNames(e.environments.map((x) => x.name)))
+			.catch(() => setEnvNames([]));
+	}, [open]);
 
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent) => {
@@ -191,23 +210,47 @@ export function NewWorkButton() {
 								placeholder="api req:bun"
 							/>
 						</label>
+						{envNames.length > 0 && (
+							<label className="col-span-2 flex flex-col gap-1">
+								<span className={label}>Environment</span>
+								<select
+									value={form.environment}
+									onChange={(e) => set("environment")(e.target.value)}
+									className={field}
+								>
+									<option value="">none: repo and ref below</option>
+									{envNames.map((n) => (
+										<option key={n} value={n}>
+											{n}
+										</option>
+									))}
+								</select>
+							</label>
+						)}
 						<label className="flex flex-col gap-1">
 							<span className={label}>Repo (optional)</span>
 							<input
-								value={form.repo}
+								value={form.environment ? "" : form.repo}
 								onChange={(e) => set("repo")(e.target.value)}
 								className={`${field} font-mono`}
-								placeholder="https://github.com/org/repo.git"
+								placeholder={
+									form.environment
+										? "from the environment"
+										: "https://github.com/org/repo.git"
+								}
+								disabled={!!form.environment}
 							/>
 						</label>
 						<label className="flex flex-col gap-1">
-							<span className={label}>Ref</span>
+							<span className={label}>
+								{form.environment ? "Ref (overrides)" : "Ref"}
+							</span>
 							<input
 								value={form.ref}
 								onChange={(e) => set("ref")(e.target.value)}
 								className={`${field} font-mono`}
 								placeholder="main"
-								disabled={!form.repo.trim()}
+								disabled={!form.repo.trim() && !form.environment}
 							/>
 						</label>
 						<div className="col-span-2 mt-1 flex items-center gap-2">

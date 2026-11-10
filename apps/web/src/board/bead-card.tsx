@@ -1,4 +1,9 @@
-import { type Bead, queueOf } from "@mastermind/core";
+import {
+	type Bead,
+	ENV_TRIAGE_LABEL,
+	envNameOf,
+	queueOf,
+} from "@mastermind/core";
 import { Link } from "@tanstack/react-router";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
@@ -51,8 +56,30 @@ export function LeaseMark({ lease }: Pick<Bead, "lease">) {
 	);
 }
 
+/** The bead's environment; red when the dispatcher holds it back. */
+export function EnvMark({ bead }: { bead: Pick<Bead, "labels"> }) {
+	const name = envNameOf(bead);
+	const held = bead.labels.includes(ENV_TRIAGE_LABEL);
+	if (!name && !held) return null;
+	return (
+		<span
+			data-env={name ?? ""}
+			data-env-held={held || undefined}
+			title={
+				held
+					? "Not dispatched: the environment does not resolve (see the notes)"
+					: `Environment ${name}`
+			}
+			className={cn("truncate font-mono", held && "text-signal line-through")}
+		>
+			{name ?? "no env"}
+		</span>
+	);
+}
+
 export function BeadCard({ bead }: { bead: Bead }) {
 	const queue = queueOf(bead);
+	const env = envNameOf(bead) || bead.labels.includes(ENV_TRIAGE_LABEL);
 	return (
 		<Link
 			to="/board/$beadId"
@@ -76,8 +103,9 @@ export function BeadCard({ bead }: { bead: Bead }) {
 					)}
 				</CardHeader>
 				<CardTitle>{bead.title}</CardTitle>
-				{(bead.assignee || bead.lease) && (
+				{(bead.assignee || bead.lease || env) && (
 					<CardFooter className="text-[11px] text-muted-foreground">
+						<EnvMark bead={bead} />
 						{bead.assignee && <span className="truncate">{bead.assignee}</span>}
 						<span className="ml-auto">
 							<LeaseMark lease={bead.lease} />

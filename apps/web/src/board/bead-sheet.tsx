@@ -1,4 +1,10 @@
-import { type Bead, columnOf, queueOf } from "@mastermind/core";
+import {
+	type Bead,
+	columnOf,
+	ENV_TRIAGE_LABEL,
+	envNameOf,
+	queueOf,
+} from "@mastermind/core";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { type FormEvent, useState } from "react";
 import { Badge } from "@/components/ui/badge";
@@ -82,6 +88,18 @@ function StateLine({ bead }: { bead: Bead }) {
 			</dd>
 			<dt className="text-muted-foreground">Stage</dt>
 			<dd>{stage}</dd>
+			<dt className="text-muted-foreground">Environment</dt>
+			<dd className="truncate">
+				{bead.labels.includes(ENV_TRIAGE_LABEL) ? (
+					<span className="text-signal">
+						{envNameOf(bead) ?? "none"} · not dispatched (see the notes)
+					</span>
+				) : (
+					<span className="font-mono text-[13px]">
+						{envNameOf(bead) ?? "—"}
+					</span>
+				)}
+			</dd>
 		</dl>
 	);
 }

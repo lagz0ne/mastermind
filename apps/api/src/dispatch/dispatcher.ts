@@ -22,6 +22,7 @@ import {
 	columnOf,
 	type Dispatch,
 	type DispatchEnv,
+	ENV_TRIAGE_LABEL,
 	envNameOf,
 	type HeartbeatReply,
 	type HeartbeatRequest,
@@ -90,8 +91,7 @@ export type EnvResolution =
 	| { ok: true; env: DispatchEnv }
 	| { ok: false; reason: string };
 
-/** Marks a bead that is not dispatched because its environment does not resolve. */
-export const ENV_TRIAGE_LABEL = "triage:env";
+export { ENV_TRIAGE_LABEL };
 
 /** Read from the bead's labels: repo:, ref:, provider:, req: (see beads/env.ts). */
 export function defaultEnv(bead: Bead): DispatchEnv {
