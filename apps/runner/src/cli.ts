@@ -158,14 +158,11 @@ export function applyFlags(
 	return s;
 }
 
-/** RunnerInfo plus the environments bound here, so Mastermind can skip this runner. */
-export type RunnerInfoWithEnvs = RunnerInfo & { environments?: string[] };
-
 export function runnerInfo(
 	cfg: RunnerConfig,
 	s: RunnerSettings,
 	routing?: Routing,
-): RunnerInfoWithEnvs {
+): RunnerInfo {
 	return {
 		id: s.id,
 		account: cfg.account,
