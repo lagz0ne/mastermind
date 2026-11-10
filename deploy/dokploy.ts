@@ -461,15 +461,15 @@ async function release(ref = "") {
 		throw new Error(`app '${cfg.app}' not found in project '${cfg.project}'`);
 	const app = await api<App>("application.one", { applicationId });
 	const image = pinImage(app.dockerImage ?? "", ref);
-	if (app.dockerImage !== image) {
-		await api("application.saveDockerProvider", {
+	const saveImage = (dockerImage: string) =>
+		api("application.saveDockerProvider", {
 			applicationId,
-			dockerImage: image,
+			dockerImage,
 			username: app.username ?? null,
 			password: app.password ?? null,
 			registryUrl: app.registryUrl ?? null,
 		});
-	}
+	if (app.dockerImage !== image) await saveImage(image);
 	log(`app: image ${image}`);
 	const title = releaseTitle(ref);
 	const askedAt = Date.now();
@@ -487,28 +487,41 @@ async function release(ref = "") {
 		said = line;
 	};
 	let ours: Deployment | undefined;
-	while (Date.now() < deadline) {
-		ours = findOurs(
-			await api<Deployment[]>("deployment.all", { applicationId }),
-			title,
-			askedAt,
-		);
-		if (ours?.status === "error") {
-			log(await deploymentLog(ours.deploymentId, 60));
-			throw new Error(
-				`Dokploy deployment ${ours.deploymentId} failed${ours.errorMessage ? `: ${ours.errorMessage}` : ""}`,
-			);
+	// The pin lives only until Dokploy has started OUR deployment (it reads the image first, then
+	// writes the record). A pin left behind makes every later hook deploy redeploy this commit.
+	const latest = pinImage(image, "latest");
+	try {
+		await waitForOurs(applicationId);
+	} finally {
+		if (image !== latest) {
+			await saveImage(latest);
+			log(`app: image back to ${latest} (the hook deploys :latest)`);
 		}
-		if (ours?.status === "done") break;
-		say(
-			ours
-				? `dokploy: ${ours.status} (${ours.deploymentId})`
-				: describeQueue(
-						await api<QueueJob[]>("deployment.queueList").catch(() => []),
-						applicationId,
-					),
-		);
-		await sleep(5000);
+	}
+	async function waitForOurs(appId: string) {
+		while (Date.now() < deadline) {
+			ours = findOurs(
+				await api<Deployment[]>("deployment.all", { applicationId: appId }),
+				title,
+				askedAt,
+			);
+			if (ours?.status === "error") {
+				log(await deploymentLog(ours.deploymentId, 60));
+				throw new Error(
+					`Dokploy deployment ${ours.deploymentId} failed${ours.errorMessage ? `: ${ours.errorMessage}` : ""}`,
+				);
+			}
+			if (ours?.status === "done") break;
+			say(
+				ours
+					? `dokploy: ${ours.status} (${ours.deploymentId})`
+					: describeQueue(
+							await api<QueueJob[]>("deployment.queueList").catch(() => []),
+							appId,
+						),
+			);
+			await sleep(5000);
+		}
 	}
 	if (ours?.status !== "done")
 		throw new Error(

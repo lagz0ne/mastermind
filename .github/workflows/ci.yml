@@ -136,7 +136,7 @@ jobs:
             echo "waiting ($i): ${health:-no answer}"
             sleep 5
           done
-          echo "::error::production does not serve $GITHUB_SHA with ok=true after 15 minutes. Dokploy runs one deployment at a time for all projects; check its queue. If the app image is pinned to a sha tag (bun deploy/dokploy.ts release), the hook redeploys that pin: run 'bun deploy/dokploy.ts release latest' or add DOKPLOY_API_KEY to the environment."
+          echo "::error::production does not serve $GITHUB_SHA with ok=true after 15 minutes. Dokploy runs one deployment at a time for all projects; check its queue. Without DOKPLOY_API_KEY in the environment this job cannot show the Dokploy status or log."
           exit 1
       - name: The public NATS WebSocket answers and refuses unauthenticated clients
         run: |

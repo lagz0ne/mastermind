@@ -11,7 +11,7 @@ bun deploy/dokploy.ts apply           # create or update Dolt, NATS and the app 
 bun deploy/dokploy.ts secrets         # redeploy hooks + PUBLIC_URL into the GitHub environment
 bun deploy/dokploy.ts login-approve <code> --account <name>   # approve a login code shown on /login
 bun deploy/dokploy.ts release <sha>   # deploy the image of one commit (sha-<sha> tag), show queue/status/log
-bun deploy/dokploy.ts release latest  # unpin: back to :latest (what the app hook deploys)
+bun deploy/dokploy.ts release latest  # deploy :latest (what the app hook deploys)
 ```
 
 `apply` is safe to run again: it keeps existing secrets, changes only what differs, and ends with a
@@ -57,12 +57,12 @@ behind other projects' builds, and a `:latest` deployment record does not say wh
 So the app deploy has two modes:
 
 - **`DOKPLOY_API_KEY` is a secret of the GitHub environment**: CI runs `bun deploy/dokploy.ts release
-  <sha>`. It pins the image to `sha-<sha>` (the tag CI published), deploys it, prints the Dokploy queue
+  <sha>`. It pins the image to `sha-<sha>` (the tag CI published), deploys it, sets the image back to
+  `:latest` as soon as Dokploy has started that deployment (so no pin stays behind), prints the Dokploy queue
   while ours waits, fails with the deployment log tail on error, and with the app log when health does
   not reach the commit.
 - **No key** (hooks only): CI posts the app hook (`:latest`), posts it once more after 5 minutes if the
-  commit is not live, and fails after 15 minutes. It cannot see the queue or the log. If someone ran
-  `release <sha>` by hand, the hook keeps deploying that pin: run `release latest` to undo it.
+  commit is not live, and fails after 15 minutes. It cannot see the queue or the log.
 
 `GET /api/health` reports `version` (the commit) and one probe per dependency: `db`, `dolt`, `bd`.
 Each is `up`, `down` or `unconfigured`; any `down` makes it a 503.
