@@ -75,3 +75,5 @@ sync:
     remote: "git+https://github.com/lagz0ne/mastermind.git"
 agent:
     profile: team-maintainer
+dolt:
+    shared-server: true
