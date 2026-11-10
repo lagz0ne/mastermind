@@ -238,12 +238,12 @@ function RuleRow({
 									: (Number(e.target.value) as 0 | 1 | 2 | 3 | 4),
 						})
 					}
-					className={cn(input, "h-5 w-[86px] px-0.5 text-[11px]")}
+					className={cn(input, "h-5 w-[92px] px-0.5 text-[11px]")}
 				>
-					<option value="">any priority</option>
+					<option value="">any P</option>
 					{[0, 1, 2, 3, 4].map((p) => (
 						<option key={p} value={p}>
-							P{p} or more urgent
+							{p === 0 ? "P0" : `P0–P${p}`}
 						</option>
 					))}
 				</select>
@@ -254,7 +254,7 @@ function RuleRow({
 					onChange={(e) =>
 						set({ idPrefix: e.target.value.trim() || undefined })
 					}
-					className={cn(input, "h-5 w-20 text-[11px]")}
+					className={cn(input, "h-5 w-16 text-[11px]")}
 				/>
 			</div>
 			<span className="text-muted-foreground">→</span>
@@ -328,7 +328,7 @@ function LabelsInput({
 			onChange={(e) => setText(e.target.value)}
 			onBlur={commit}
 			onKeyDown={(e) => e.key === "Enter" && commit()}
-			className={cn(input, "h-5 w-32 text-[11px]")}
+			className={cn(input, "h-5 w-28 text-[11px]")}
 		/>
 	);
 }

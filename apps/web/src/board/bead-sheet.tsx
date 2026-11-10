@@ -10,6 +10,7 @@ import {
 	SheetTitle,
 } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
+import { QueuePicker } from "../routing/queue-picker.tsx";
 import { api } from "../work/api.ts";
 import { useBeadDetail } from "../work/detail.ts";
 import { ago, leaseView, useNow } from "../work/lease.ts";
@@ -56,7 +57,9 @@ function StateLine({ bead }: { bead: Bead }) {
 	return (
 		<dl className="grid grid-cols-[5.5rem_1fr] gap-x-3 gap-y-1 text-sm sm:grid-cols-[5.5rem_1fr_5.5rem_1fr]">
 			<dt className="text-muted-foreground">Queue</dt>
-			<dd>{queueOf(bead) ?? "unrouted"}</dd>
+			<dd>
+				<QueuePicker beadId={bead.id} queue={queueOf(bead)} />
+			</dd>
 			<dt className="text-muted-foreground">Column</dt>
 			<dd>{column ? COLUMN_LABELS[column] : "parked"}</dd>
 			<dt className="text-muted-foreground">Holder</dt>

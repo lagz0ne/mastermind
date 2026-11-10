@@ -1,9 +1,17 @@
 import { BOARD_COLUMNS } from "@mastermind/core";
 import { Outlet } from "@tanstack/react-router";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { cn } from "@/lib/utils";
 import { BeadCard } from "./bead-card.tsx";
-import { COLUMN_LABELS, groupByColumn } from "./group.ts";
+import {
+	ALL,
+	COLUMN_LABELS,
+	filterByQueue,
+	groupByColumn,
+	type QueueFilter,
+	queueCounts,
+} from "./group.ts";
 import {
 	type LiveBoard,
 	LiveBoardContext,
@@ -29,9 +37,66 @@ function boardNotice(board: LiveBoard): string | null {
 	}
 }
 
+const same = (a: QueueFilter, b: QueueFilter) =>
+	a.kind === b.kind &&
+	(a.kind !== "queue" || (b.kind === "queue" && a.name === b.name));
+
+/** All · unrouted · one chip per queue on the board, with counts. */
+function QueueBar({
+	beads,
+	filter,
+	onChange,
+}: {
+	beads: LiveBoard["beads"];
+	filter: QueueFilter;
+	onChange: (f: QueueFilter) => void;
+}) {
+	const { queues, unrouted } = useMemo(() => queueCounts(beads), [beads]);
+	const chips: { f: QueueFilter; label: string; count?: number }[] = [
+		{ f: ALL, label: "All queues" },
+		...queues.map((q) => ({
+			f: { kind: "queue", name: q.name } as QueueFilter,
+			label: q.name,
+			count: q.count,
+		})),
+		{ f: { kind: "unrouted" }, label: "unrouted", count: unrouted },
+	];
+	return (
+		<nav
+			aria-label="Filter by queue"
+			className="flex gap-1 overflow-x-auto px-4 pt-2 text-[12px]"
+		>
+			{chips.map(({ f, label, count }) => (
+				<button
+					key={label}
+					type="button"
+					aria-pressed={same(f, filter)}
+					onClick={() => onChange(f)}
+					className={cn(
+						"inline-flex h-6 shrink-0 items-center gap-1.5 rounded-[var(--radius)] border px-2",
+						same(f, filter)
+							? "border-foreground bg-foreground text-background"
+							: "text-muted-foreground hover:text-foreground",
+						f.kind === "unrouted" && "border-dashed",
+					)}
+				>
+					{label}
+					{count !== undefined && (
+						<span className="tabular-nums opacity-70">{count}</span>
+					)}
+				</button>
+			))}
+		</nav>
+	);
+}
+
 export function BoardPage() {
 	const live = useLiveBoardSource();
-	const board = useMemo(() => groupByColumn(live.beads), [live.beads]);
+	const [filter, setFilter] = useState<QueueFilter>(ALL);
+	const board = useMemo(
+		() => groupByColumn(filterByQueue(live.beads, filter)),
+		[live.beads, filter],
+	);
 	const notice = boardNotice(live);
 
 	return (
@@ -45,6 +110,7 @@ export function BoardPage() {
 						{notice}
 					</p>
 				)}
+				<QueueBar beads={live.beads} filter={filter} onChange={setFilter} />
 				<div className="flex min-h-0 flex-1 snap-x snap-mandatory scroll-px-4 gap-3 overflow-x-auto px-4 py-3 md:grid md:snap-none md:grid-cols-4 md:overflow-x-visible">
 					{BOARD_COLUMNS.map((column) => (
 						<section

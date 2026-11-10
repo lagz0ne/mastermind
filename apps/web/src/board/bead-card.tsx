@@ -63,7 +63,17 @@ export function BeadCard({ bead }: { bead: Bead }) {
 				<CardHeader className="text-[11px] text-muted-foreground">
 					<span className="font-mono">{bead.id}</span>
 					<PriorityBadge priority={bead.priority} />
-					<span className="ml-auto">{queue ?? "unrouted"}</span>
+					{queue ? (
+						<span className="ml-auto">{queue}</span>
+					) : (
+						<span
+							data-unrouted
+							title="No rule matched: nobody takes this bead until it gets a queue"
+							className="ml-auto rounded-[var(--radius)] border border-dashed px-1"
+						>
+							unrouted
+						</span>
+					)}
 				</CardHeader>
 				<CardTitle>{bead.title}</CardTitle>
 				{(bead.assignee || bead.lease) && (

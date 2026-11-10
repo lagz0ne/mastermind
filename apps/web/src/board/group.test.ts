@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Bead } from "@mastermind/core";
 import { fixtureBeads } from "./fixture.ts";
-import { groupByColumn } from "./group.ts";
+import { ALL, filterByQueue, groupByColumn, queueCounts } from "./group.ts";
 
 const bead = (over: Partial<Bead> & Pick<Bead, "id">): Bead => ({
 	title: over.id,
@@ -61,5 +61,30 @@ describe("groupByColumn", () => {
 		}
 		const placed = Object.values(board).flat().length;
 		expect(placed).toBe(beads.length - 1);
+	});
+});
+
+describe("queue filter", () => {
+	const beads = [
+		bead({ id: "a", labels: ["queue:web"] }),
+		bead({ id: "b", labels: ["queue:backend"] }),
+		bead({ id: "c" }),
+		bead({ id: "d", labels: ["queue:web"], status: "deferred" }),
+	];
+	test("all, unrouted, one queue", () => {
+		expect(filterByQueue(beads, ALL)).toBe(beads);
+		expect(ids([...filterByQueue(beads, { kind: "unrouted" })])).toEqual(["c"]);
+		expect(
+			ids([...filterByQueue(beads, { kind: "queue", name: "web" })]),
+		).toEqual(["a", "d"]);
+	});
+	test("counts skip parked beads and sort queues by name", () => {
+		expect(queueCounts(beads)).toEqual({
+			queues: [
+				{ name: "backend", count: 1 },
+				{ name: "web", count: 1 },
+			],
+			unrouted: 1,
+		});
 	});
 });
