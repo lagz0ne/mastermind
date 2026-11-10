@@ -28,6 +28,10 @@ env does not persist between tool calls):
 BEADS_ACTOR=claude-<short-task>-<4 random chars>   # e.g. claude-auth-k3f9
 ```
 
+Keep bd output small: use `bd -q ...` (errors only) for writes, and `--json` when you parse results.
+The bd **git hooks are intentionally uninstalled.** They could block commits for up to 300s
+on the shared DB lock, and ship.sh calls bd explicitly anyway. Do not run `bd hooks install`.
+
 ## 1. Orient (session start, and before every new task)
 
 ```bash
