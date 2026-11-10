@@ -117,7 +117,6 @@ for attempt in 1 2 3; do
   if err="$(git push -q -u origin main 2>&1)"; then
     reverted=0
     bd merge-slot release --holder "$actor" >/dev/null 2>&1 || true; held=0
-    bd dolt push >/dev/null 2>&1 || log "warn: bd dolt push failed (git push succeeded)"
     log "shipped $(git rev-parse --short HEAD) → origin/main"
     exit 0
   fi

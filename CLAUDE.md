@@ -7,6 +7,13 @@ Multiple agents share this working directory: no branches, no worktrees, no stas
 
 Start every session with `scripts/status.sh`. Delegate with `scripts/spawn.sh <bead|"title">` (Paseo agent, same checkout).
 
+## Beads: local only (machine policy, owned by the hub)
+
+This section overrides the Beads block below. Issues live only in the shared Dolt server on this machine (`127.0.0.1:3308`, db `mm`). There is **no Dolt remote**, by the human's decision on 2026-11-10:
+- Never run `bd dolt push`, `bd dolt pull`, `bd dolt remote add` or `bd sync`, and skip any sync/push step the block below lists. `git push` (via `scripts/ship.sh`) is unaffected.
+- Don't re-add `sync.remote` or drop `dolt.local-only` in `.beads/config.yaml`.
+- The Dolt server, backups and telemetry settings belong to the hub (`~/work`). If `bd` fails with "connection refused", file it with `hubq`. Never start or stop Dolt yourself (`bd dolt start|stop` takes it down for every project).
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:46cd31e7 -->
 ## Beads Issue Tracker
 

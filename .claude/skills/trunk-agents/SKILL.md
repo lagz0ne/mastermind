@@ -69,7 +69,7 @@ scripts/ship.sh -m "feat(core): add x parser" -i <id> -- <your paths...>
 
 `ship.sh` takes the merge slot, fast-forwards to origin/main (it never stashes or rebases),
 builds a snapshot of **HEAD + only your paths**, runs `bun run check` on it, commits only those
-paths, pushes, releases the slot and runs `bd dolt push`. If trunk moved while it was checking, it
+paths, pushes and releases the slot (beads are local only: no `bd dolt push`). If trunk moved while it was checking, it
 undoes the commit and re-verifies on the new trunk. If it fails, nothing stays committed and the
 failure is in **your** change. Paths are relative to where you run it.
 

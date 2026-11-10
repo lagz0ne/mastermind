@@ -76,4 +76,5 @@ sync:
 agent:
     profile: team-maintainer
 dolt:
+    local-only: true
     shared-server: true
