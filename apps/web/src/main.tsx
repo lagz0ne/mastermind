@@ -1,6 +1,7 @@
+import { RouterProvider } from "@tanstack/react-router";
 import { createRoot } from "react-dom/client";
-import { App } from "./app.tsx";
+import { router } from "./router.tsx";
 
 const root = document.getElementById("root");
 if (!root) throw new Error("#root not found");
-createRoot(root).render(<App />);
+createRoot(root).render(<RouterProvider router={router} />);

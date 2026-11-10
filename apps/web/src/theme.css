@@ -1,0 +1,58 @@
+/*
+ * Theme tokens: the only place colours, type and radius are defined.
+ * The doop design system (mm-210.5) replaces these values; components only
+ * reference the tokens (bg-background, text-muted-foreground, ...).
+ */
+:root {
+	color-scheme: light;
+	--typeface:
+		"Helvetica Neue", Helvetica, Arial, ui-sans-serif, system-ui, sans-serif;
+	--radius: 2px;
+
+	--background: #ffffff;
+	--foreground: #111111;
+	--card: #ffffff;
+	--card-foreground: #111111;
+	--popover: #ffffff;
+	--popover-foreground: #111111;
+	--primary: #111111;
+	--primary-foreground: #ffffff;
+	--secondary: #f2f2f2;
+	--secondary-foreground: #111111;
+	--muted: #f2f2f2;
+	--muted-foreground: #6b6b6b;
+	--accent: #e8e8e8;
+	--accent-foreground: #111111;
+	--destructive: #d4281c;
+	--signal: #d4281c;
+	--live: #1a7f37;
+	--border: #e2e2e2;
+	--input: #e2e2e2;
+	--ring: #111111;
+}
+
+@media (prefers-color-scheme: dark) {
+	:root {
+		color-scheme: dark;
+		--background: #0e0e0e;
+		--foreground: #f2f2f2;
+		--card: #151515;
+		--card-foreground: #f2f2f2;
+		--popover: #151515;
+		--popover-foreground: #f2f2f2;
+		--primary: #f2f2f2;
+		--primary-foreground: #0e0e0e;
+		--secondary: #1e1e1e;
+		--secondary-foreground: #f2f2f2;
+		--muted: #1e1e1e;
+		--muted-foreground: #9a9a9a;
+		--accent: #262626;
+		--accent-foreground: #f2f2f2;
+		--destructive: #ff5a4e;
+		--signal: #ff5a4e;
+		--live: #4cc26a;
+		--border: #2a2a2a;
+		--input: #2a2a2a;
+		--ring: #f2f2f2;
+	}
+}

@@ -1,7 +1,7 @@
 import type { Health } from "@mastermind/core";
 import { useEffect, useState } from "react";
 
-export function App() {
+export function HealthFooter() {
 	const [health, setHealth] = useState<Health | null>(null);
 	const [failed, setFailed] = useState(false);
 
@@ -13,15 +13,12 @@ export function App() {
 	}, []);
 
 	return (
-		<main>
-			<h1>mastermind</h1>
-			<p className="status">
-				{failed
-					? "api unreachable"
-					: health
-						? `api ${health.ok ? "ok" : "degraded"} · db ${health.db} · ${health.version.slice(0, 7)}`
-						: "…"}
-			</p>
-		</main>
+		<footer className="border-t px-4 py-1.5 font-mono text-[11px] text-muted-foreground">
+			{failed
+				? "api unreachable"
+				: health
+					? `api ${health.ok ? "ok" : "degraded"} · db ${health.db} · ${health.version.slice(0, 7)}`
+					: "…"}
+		</footer>
 	);
 }

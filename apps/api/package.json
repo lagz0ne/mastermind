@@ -6,12 +6,15 @@
 	"scripts": {
 		"dev": "bun --watch src/index.ts",
 		"start": "bun src/index.ts",
-		"build": "bun build src/index.ts --target bun --outdir dist --public-path / --production",
+		"build": "bun build.ts",
 		"typecheck": "tsc --noEmit",
 		"test": "bun test"
 	},
 	"dependencies": {
 		"@mastermind/core": "workspace:*",
 		"@mastermind/web": "workspace:*"
+	},
+	"devDependencies": {
+		"bun-plugin-tailwind": "^0.1.2"
 	}
 }

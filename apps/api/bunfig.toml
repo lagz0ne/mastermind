@@ -1,0 +1,5 @@
+# Read when bun runs from apps/api (bun run dev): Bun.serve bundles the UI
+# (HTML import + HMR) with Tailwind v4. The production build loads the same
+# plugin in build.ts.
+[serve.static]
+plugins = ["bun-plugin-tailwind"]
