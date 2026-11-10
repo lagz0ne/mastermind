@@ -8,9 +8,10 @@ import { useMe } from "../session/session.ts";
 import {
 	type AccountGroup,
 	ago,
+	approveLogin,
 	enrolToken,
 	groupByAccount,
-	invite,
+	type LoginApproval,
 	outdated,
 	type People,
 	RUNNER_BIN,
@@ -27,7 +28,7 @@ function errorText(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-/** A one-time secret (URL or command) with a copy button. */
+/** A one-time secret (a command) with a copy button. */
 function Secret({ label, value }: { label: string; value: string }) {
 	const [copied, setCopied] = useState(false);
 	return (
@@ -57,48 +58,85 @@ function Secret({ label, value }: { label: string; value: string }) {
 	);
 }
 
-function InvitePanel({ onDone }: { onDone: () => void }) {
+/**
+ * Approve a login: the person opens /login and reads out the code. My own
+ * account name logs in another device of mine; a new name makes that account.
+ */
+function ApproveLoginPanel({
+	me,
+	onDone,
+}: {
+	me: string | null;
+	onDone: () => void;
+}) {
+	const [code, setCode] = useState("");
 	const [account, setAccount] = useState("");
-	const [url, setUrl] = useState<string | null>(null);
+	const [result, setResult] = useState<LoginApproval | null>(null);
 	const [error, setError] = useState<string | null>(null);
 	const [busy, setBusy] = useState(false);
 	const submit = (e: FormEvent) => {
 		e.preventDefault();
+		if (!code.trim()) return setError("the code is required");
 		if (!ID.test(account)) return setError(`account id: ${ID_HINT}`);
 		setBusy(true);
 		setError(null);
-		invite(account)
-			.then((u) => {
-				setUrl(u);
+		approveLogin(code, account)
+			.then((r) => {
+				setResult(r);
 				onDone();
 			})
 			.catch((err) => setError(errorText(err)))
 			.finally(() => setBusy(false));
 	};
-	if (url)
+	if (result)
 		return (
-			<Secret
-				label={`Login link for ${account}. Send it to them.`}
-				value={url}
-			/>
+			<div className="flex flex-col gap-1 text-sm" role="status">
+				<span>
+					Approved for <b>{result.account}</b>
+					{result.created ? " (new account)" : ""}. That browser logs in within
+					a few seconds.
+				</span>
+				<span className="text-muted-foreground text-xs">
+					The code was made {result.ageSeconds}s ago by:{" "}
+					{result.userAgent || "(no user agent)"}
+				</span>
+			</div>
 		);
 	return (
-		<form onSubmit={submit} className="flex flex-wrap items-center gap-2">
-			<label htmlFor="invite-account" className="text-sm">
-				New account id
-			</label>
-			<input
-				id="invite-account"
-				value={account}
-				onChange={(e) => setAccount(e.target.value.trim().toLowerCase())}
-				placeholder="minh"
-				autoComplete="off"
-				className="h-7 w-40 border bg-background px-2 font-mono text-sm"
-			/>
-			<Button size="sm" type="submit" disabled={busy}>
-				Create login link
-			</Button>
-			{error && <span className="text-signal text-xs">{error}</span>}
+		<form onSubmit={submit} className="flex flex-col gap-2">
+			<span className="text-muted-foreground text-xs">
+				The person opens /login and reads you the code. Your own id
+				{me ? ` (${me})` : ""} logs in another device of yours; a new id makes
+				that account.
+			</span>
+			<div className="flex flex-wrap items-center gap-2">
+				<label htmlFor="approve-code" className="text-sm">
+					Code
+				</label>
+				<input
+					id="approve-code"
+					value={code}
+					onChange={(e) => setCode(e.target.value.toUpperCase())}
+					placeholder="ABCD-EFGH"
+					autoComplete="off"
+					className="h-7 w-32 border bg-background px-2 font-mono text-sm uppercase"
+				/>
+				<label htmlFor="approve-account" className="text-sm">
+					Account id
+				</label>
+				<input
+					id="approve-account"
+					value={account}
+					onChange={(e) => setAccount(e.target.value.trim().toLowerCase())}
+					placeholder="minh"
+					autoComplete="off"
+					className="h-7 w-40 border bg-background px-2 font-mono text-sm"
+				/>
+				<Button size="sm" type="submit" disabled={busy}>
+					Approve
+				</Button>
+				{error && <span className="text-signal text-xs">{error}</span>}
+			</div>
 		</form>
 	);
 }
@@ -383,7 +421,7 @@ function notice(p: People): string | null {
 export function PeoplePage() {
 	const people = usePeople();
 	const me = useMe();
-	const [panel, setPanel] = useState<"invite" | "runner" | null>(null);
+	const [panel, setPanel] = useState<"approve" | "runner" | null>(null);
 	const [now, setNow] = useState(() => Date.now());
 	useEffect(() => {
 		const t = setInterval(() => setNow(Date.now()), 5_000);
@@ -396,7 +434,7 @@ export function PeoplePage() {
 	const stats = statsOf(groups);
 	const authOff = me?.auth === "off";
 	const line = notice(people);
-	const toggle = (p: "invite" | "runner") =>
+	const toggle = (p: "approve" | "runner") =>
 		setPanel((cur) => (cur === p ? null : p));
 
 	return (
@@ -430,12 +468,12 @@ export function PeoplePage() {
 				<div className="flex gap-2">
 					<Button
 						size="sm"
-						variant={panel === "invite" ? "default" : "outline"}
-						onClick={() => toggle("invite")}
+						variant={panel === "approve" ? "default" : "outline"}
+						onClick={() => toggle("approve")}
 						disabled={authOff}
 						title={authOff ? "Auth is off (AUTH_DISABLED=1)" : undefined}
 					>
-						Invite
+						Approve a login
 					</Button>
 					<Button
 						size="sm"
@@ -450,8 +488,12 @@ export function PeoplePage() {
 			</div>
 			{panel && (
 				<div className="mx-4 mb-3 border-foreground border-t-2 pt-3">
-					{panel === "invite" ? (
-						<InvitePanel key="invite" onDone={people.reload} />
+					{panel === "approve" ? (
+						<ApproveLoginPanel
+							key="approve"
+							me={me?.account ?? null}
+							onDone={people.reload}
+						/>
 					) : (
 						<AddRunnerPanel key="runner" onDone={people.reload} />
 					)}

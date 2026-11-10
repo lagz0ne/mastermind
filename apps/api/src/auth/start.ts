@@ -24,12 +24,10 @@ export type AuthConfig = {
 	authPassword: string;
 	/** Seed (SA...) of the account key that signs callout responses. */
 	issuerSeed: string;
-	/** Public origin of the UI, for login links. */
+	/** Public origin of the UI (secure cookies when https). */
 	publicUrl: string;
 	/** Public NATS WebSocket URL for runner adapters. */
 	publicNatsUrl?: string;
-	/** Id of the first account. Default `admin`. */
-	firstAccount?: string;
 	/**
 	 * MASTERMIND_OPERATOR_KEY: the operator approves login codes with it
 	 * (`bun deploy/dokploy.ts login-approve`). Unset: only accounts approve.
@@ -114,7 +112,6 @@ export async function startAuth(cfg: AuthConfig): Promise<AuthService> {
 			}),
 		};
 		const ready = new Auth(stores, {
-			firstAccount: cfg.firstAccount,
 			onRevoke: async (sa) => {
 				const user = serviceAccountUser(sa);
 				const n = await kick(sys, user).catch((error) => {

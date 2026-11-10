@@ -7,6 +7,7 @@ import {
 	SESSION_COOKIE,
 } from "./routes.ts";
 import { Auth } from "./service.ts";
+import { loginAs } from "./test-login.ts";
 
 const URL_BASE = "https://mm.example";
 
@@ -34,80 +35,36 @@ const post = (body: unknown, headers: Record<string, string> = {}) =>
 
 async function login() {
 	const s = setup();
-	const token = (await s.auth.bootstrap()) as string;
-	const res = await s.routes["/api/auth/login"].POST(post({ token }));
-	const cookie = (res.headers.get("set-cookie") ?? "").split(";")[0] as string;
+	const sessionId = await loginAs(s.auth, "admin");
+	const cookie = `${SESSION_COOKIE}=${sessionId}`;
 	const me = await s.routes["/api/auth/me"].GET(
 		new Request(`${URL_BASE}/x`, { headers: { cookie } }),
 	);
 	const { csrf } = (await me.json()) as { csrf: string };
-	return { ...s, token, res, cookie, csrf };
+	return { ...s, cookie, csrf };
 }
 
 describe("auth routes", () => {
-	test("login sets a secure HttpOnly session cookie, once", async () => {
-		const { res, token, routes } = await login();
-		expect(res.status).toBe(200);
-		expect(await res.json()).toEqual({ account: "admin" });
-		const set = res.headers.get("set-cookie") ?? "";
-		expect(set).toStartWith(`${SESSION_COOKIE}=`);
-		expect(set).toContain("HttpOnly");
-		expect(set).toContain("Secure");
-		expect(set).toContain("SameSite=Lax");
-		const again = await routes["/api/auth/login"].POST(post({ token }));
-		expect(again.status).toBe(401);
-	});
-
-	test("login needs a JSON body with a token", async () => {
-		const { routes } = setup();
-		expect((await routes["/api/auth/login"].POST(post({}))).status).toBe(400);
-		const form = new Request(`${URL_BASE}/x`, {
-			method: "POST",
-			body: "token=x",
-		});
-		expect((await routes["/api/auth/login"].POST(form)).status).toBe(400);
-	});
-
 	test("me needs a session", async () => {
 		const { routes } = setup();
 		const res = await routes["/api/auth/me"].GET(new Request(`${URL_BASE}/x`));
 		expect(res.status).toBe(401);
 	});
 
-	test("minting tokens needs the CSRF header", async () => {
+	test("minting tokens needs the CSRF header; only enrol tokens are left", async () => {
 		const { routes, cookie, csrf } = await login();
 		const tokens = routes["/api/auth/tokens"].POST;
-		expect((await tokens(post({ kind: "login" }, { cookie }))).status).toBe(
-			403,
-		);
+		const enrol = { kind: "enrol", name: "laptop" };
+		expect((await tokens(post(enrol, { cookie }))).status).toBe(403);
 		expect(
-			(await tokens(post({ kind: "login" }, { cookie, [CSRF_HEADER]: "bad" })))
-				.status,
+			(await tokens(post(enrol, { cookie, [CSRF_HEADER]: "bad" }))).status,
 		).toBe(403);
-		const ok = await tokens(
-			post({ kind: "login" }, { cookie, [CSRF_HEADER]: csrf }),
-		);
-		expect(ok.status).toBe(201);
-		const { url } = (await ok.json()) as { url: string };
-		expect(url).toStartWith(`${URL_BASE}/login#mml_`);
-	});
-
-	test("invite: 201 with a login URL; taken id: 409; bad kind: 400", async () => {
-		const { routes, cookie, csrf } = await login();
 		const h = { cookie, [CSRF_HEADER]: csrf };
-		const tokens = routes["/api/auth/tokens"].POST;
-		const res = await tokens(post({ kind: "invite", account: "bob" }, h));
-		expect(res.status).toBe(201);
-		expect(((await res.json()) as { url: string }).url).toContain(
-			"/login#mml_",
-		);
-		expect(
-			(await tokens(post({ kind: "invite", account: "admin" }, h))).status,
-		).toBe(409);
-		expect(
-			(await tokens(post({ kind: "invite", account: "B B" }, h))).status,
-		).toBe(400);
-		expect((await tokens(post({ kind: "x" }, h))).status).toBe(400);
+		expect((await tokens(post(enrol, h))).status).toBe(201);
+		for (const kind of ["login", "invite", "x"])
+			expect((await tokens(post({ kind, account: "bob" }, h))).status).toBe(
+				400,
+			);
 	});
 
 	test("enrol, list, revoke a service account", async () => {
@@ -176,7 +133,7 @@ test("routes answer 503 until auth is ready", async () => {
 		publicUrl: URL_BASE,
 		csrfSecret: "s",
 	});
-	const res = await routes["/api/auth/login"].POST(post({ token: "mml_x" }));
+	const res = await routes["/api/auth/login/start"].POST(post({}));
 	expect(res.status).toBe(503);
 });
 

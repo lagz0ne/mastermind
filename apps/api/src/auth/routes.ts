@@ -15,10 +15,9 @@ import {
  *   POST   /api/auth/login/start           -> {code, expiresAt} + pending-login cookie
  *   POST   /api/auth/login/approve         {code, account}; operator (Bearer key) or a session
  *   GET    /api/auth/login/poll            pending-login cookie -> {status}; session cookie once approved
- *   POST   /api/auth/login                 {token} -> session cookie
  *   POST   /api/auth/logout
  *   GET    /api/auth/me                    -> {account, csrf}
- *   POST   /api/auth/tokens                {kind: "invite", account} | {kind: "login"} | {kind: "enrol", name}
+ *   POST   /api/auth/tokens                {kind: "enrol", name} -> single-use enrol token
  *   POST   /api/auth/enrol                 {token} -> service account credential (runner adapters)
  *   GET    /api/auth/service-accounts
  *   DELETE /api/auth/service-accounts/:id  revoke
@@ -32,7 +31,7 @@ export const CSRF_HEADER = "x-csrf-token";
 export const LOGIN_COOKIE = "mm_login";
 
 export type AuthRoutesOptions = {
-	/** Public origin of the UI, for login links (`https://host`). */
+	/** Public origin of the UI (`https://host`); https means secure cookies. */
 	publicUrl: string;
 	/** Secret for Bun.CSRF tokens. */
 	csrfSecret: string;
@@ -92,7 +91,6 @@ export function authRoutes(
 	const current = typeof source === "function" ? source : () => source;
 	const secure = opts.publicUrl.startsWith("https:");
 	const maxAge = Math.floor(BUCKETS.sessions.ttlMs / 1000);
-	const loginUrl = (token: string) => `${opts.publicUrl}/login#${token}`;
 
 	const cookieOf = (req: Request, name: string) =>
 		new Bun.CookieMap(req.headers.get("cookie") ?? "").get(name);
@@ -205,17 +203,6 @@ export function authRoutes(
 				);
 			}),
 		},
-		"/api/auth/login": {
-			POST: handle(async (req, auth) => {
-				const token = (await body(req))?.token;
-				if (typeof token !== "string") return fail(400, "token required");
-				const res = await auth.login(token);
-				if (!res) return fail(401, "token is invalid or used");
-				return json({ account: res.account }, 200, {
-					"set-cookie": sessionCookie(res.sessionId, secure, maxAge),
-				});
-			}),
-		},
 		"/api/auth/logout": {
 			POST: handle(async (req, auth) => {
 				const s = sessionOf(req);
@@ -241,20 +228,12 @@ export function authRoutes(
 			POST: withAccount(async (req, account, auth) => {
 				const b = await body(req);
 				switch (b?.kind) {
-					case "invite": {
-						const token = await auth.invite(account, String(b.account ?? ""));
-						return json({ token, url: loginUrl(token) }, 201);
-					}
-					case "login": {
-						const token = await auth.loginToken(account);
-						return json({ token, url: loginUrl(token) }, 201);
-					}
 					case "enrol": {
 						const token = await auth.enrolToken(account, String(b.name ?? ""));
 						return json({ token }, 201);
 					}
 					default:
-						return fail(400, "kind must be invite, login or enrol");
+						return fail(400, "kind must be enrol");
 				}
 			}),
 		},

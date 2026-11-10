@@ -18,8 +18,9 @@ import {
  *   service account  a non-human identity owned by one account. A runner
  *                    adapter connects to NATS with its credential.
  *
- * Both start from single-use tokens. A login token gives a browser session
- * (and creates the account on first use). An enrol token gives a runner a
+ * A browser logs in with a single-use code that an approver approves (the
+ * operator, or a logged-in account); the first login of a new name creates
+ * the account. A single-use enrol token gives a runner a
  * service account credential. Tokens, sessions and credentials are stored
  * only as sha256 hashes.
  */
@@ -48,8 +49,6 @@ export type ServiceAccount = {
 export type ServiceAccountView = Omit<ServiceAccount, "secretHash">;
 
 export type TokenRecord =
-	/** `create`: the account does not exist yet; the first login creates it. */
-	| { kind: "login"; account: string; create: boolean; by: string | null }
 	| { kind: "enrol"; account: string; name: string }
 	/**
 	 * A login started in a browser (login by code). Key: hash of the code.
@@ -62,14 +61,8 @@ export type TokenRecord =
 			createdAt: string;
 			userAgent: string;
 			approved: Approval | null;
-	  }
-	/**
-	 * Points at the current first-start token (`key`: its token key). Older
-	 * markers have no key.
-	 */
-	| { kind: "bootstrap"; key?: string };
+	  };
 
-/** Who approved a pending login, for which account. `by` null = the operator. */
 export type Approval = { account: string; create: boolean; by: string | null };
 
 export type Approver =
@@ -125,83 +118,28 @@ export class AuthError extends Error {
 	}
 }
 
-const BOOTSTRAP_KEY = "bootstrap";
 const pendingKey = (code: string) => `pending.${sha256(code)}`;
 /** One answer for a wrong, used and expired code: never say which. */
 const noSuchCode = () => new AuthError("not_found", "no such code");
-const tokenKey = (kind: "login" | "enrol", token: string) =>
-	`${kind}.${sha256(token)}`;
+const tokenKey = (kind: "enrol", token: string) => `${kind}.${sha256(token)}`;
 const saKey = (account: string, id: string) => `${account}.${id}`;
 const isConflict = (err: unknown) =>
 	err instanceof BusError && err.code === "conflict";
 
 export type AuthOptions = {
-	/** Id of the first account. Default `admin`. */
-	firstAccount?: string;
 	/** Called after a service account is deleted: disconnect its clients. */
 	onRevoke?: (sa: ServiceAccountView) => Promise<void>;
 	now?: () => Date;
 };
 
 export class Auth {
-	private readonly firstAccount: string;
 	private readonly now: () => Date;
 
 	constructor(
 		private readonly stores: AuthStores,
 		private readonly opts: AuthOptions = {},
 	) {
-		this.firstAccount = opts.firstAccount ?? "admin";
 		this.now = opts.now ?? (() => new Date());
-		if (!isAccountId(this.firstAccount))
-			throw new AuthError("bad_request", "bad first account id");
-	}
-
-	/**
-	 * First start: while no account exists, EVERY start mints a new login
-	 * token for the first account and returns it (the caller logs the URL).
-	 * The token of the previous start stops working. Of many replicas that
-	 * start together, one wins (compare-and-set on the marker). Returns null
-	 * when an account exists or another replica won.
-	 */
-	async bootstrap(): Promise<string | null> {
-		if ((await this.stores.accounts.list()).length > 0) return null;
-		const old = await this.stores.tokens.get(BOOTSTRAP_KEY);
-		// Mint first, then point the marker at it: a token that loses the race
-		// is deleted again, and a winner's token is never deleted by a loser.
-		const token = await this.mintLogin({
-			account: this.firstAccount,
-			create: true,
-			by: null,
-		});
-		const marker: TokenRecord = {
-			kind: "bootstrap",
-			key: tokenKey("login", token),
-		};
-		try {
-			if (old)
-				await this.stores.tokens.update(BOOTSTRAP_KEY, marker, old.revision);
-			else await this.stores.tokens.create(BOOTSTRAP_KEY, marker);
-		} catch (err) {
-			await this.stores.tokens.delete(tokenKey("login", token));
-			if (isConflict(err)) return null;
-			throw err;
-		}
-		if (old?.value.kind === "bootstrap") {
-			if (old.value.key) await this.stores.tokens.delete(old.value.key);
-			else await this.dropFirstStartTokens(tokenKey("login", token));
-		}
-		return token;
-	}
-
-	/** Older markers do not name their token: delete every first-start token but `keep`. */
-	private async dropFirstStartTokens(keep: string): Promise<void> {
-		for (const key of await this.stores.tokens.list("login.*")) {
-			if (key === keep) continue;
-			const e = await this.stores.tokens.get(key);
-			if (e?.value.kind === "login" && e.value.create && e.value.by === null)
-				await this.stores.tokens.delete(key, e.revision).catch(() => {});
-		}
 	}
 
 	/**
@@ -351,66 +289,6 @@ export class Auth {
 
 	private expired(p: { createdAt: string }): boolean {
 		return this.now().getTime() - Date.parse(p.createdAt) >= LOGIN_CODE_TTL_MS;
-	}
-
-	/** A logged-in account invites a new account: a login token that creates it. */
-	async invite(by: string, account: string): Promise<string> {
-		if (!isAccountId(account))
-			throw new AuthError("bad_request", "bad account id");
-		if (await this.stores.accounts.get(account))
-			throw new AuthError("conflict", `account ${account} exists`);
-		return this.mintLogin({ account, create: true, by });
-	}
-
-	/** A login token for an existing account (for example a second device). */
-	async loginToken(account: string): Promise<string> {
-		if (!(await this.stores.accounts.get(account)))
-			throw new AuthError("not_found", `no account ${account}`);
-		return this.mintLogin({ account, create: false, by: account });
-	}
-
-	private async mintLogin(
-		record: Omit<Extract<TokenRecord, { kind: "login" }>, "kind">,
-	): Promise<string> {
-		const token = `mml_${randomSecret()}`;
-		await this.stores.tokens.create(tokenKey("login", token), {
-			kind: "login",
-			...record,
-		});
-		return token;
-	}
-
-	/**
-	 * Spend a login token. Of many concurrent calls with the same token, at
-	 * most one gets a session; the rest get null.
-	 */
-	async login(
-		token: string,
-	): Promise<{ account: string; sessionId: string } | null> {
-		if (!token.startsWith("mml_")) return null;
-		const rec = await this.stores.tokens.consume(tokenKey("login", token));
-		if (rec?.kind !== "login") return null;
-		if (rec.create) {
-			try {
-				await this.stores.accounts.create(rec.account, {
-					id: rec.account,
-					createdAt: this.now().toISOString(),
-					invitedBy: rec.by,
-				});
-			} catch (err) {
-				if (isConflict(err))
-					throw new AuthError("conflict", `account ${rec.account} exists`);
-				throw err;
-			}
-		} else if (!(await this.stores.accounts.get(rec.account))) {
-			return null;
-		}
-		const sessionId = randomSecret();
-		await this.stores.sessions.create(sha256(sessionId), {
-			account: rec.account,
-			createdAt: this.now().toISOString(),
-		});
-		return { account: rec.account, sessionId };
 	}
 
 	/** The account behind a session cookie, or null. */

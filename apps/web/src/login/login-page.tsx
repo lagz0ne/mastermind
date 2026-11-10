@@ -5,12 +5,9 @@ import { loadSetup, setMe } from "../session/session.ts";
 import {
 	type CodeStart,
 	clock,
-	type LoginResult,
-	login,
 	pollCode,
 	secondsLeft,
 	startCode,
-	tokenFromHash,
 } from "./login.ts";
 
 type Phase =
@@ -25,7 +22,6 @@ const POLL_MS = 1500;
 export function LoginPage() {
 	const navigate = useNavigate();
 	const [phase, setPhase] = useState<Phase>({ kind: "starting" });
-	const [legacy, setLegacy] = useState<LoginResult | null>(null);
 	const [setup, setSetup] = useState<PeopleSetup | null>(null);
 	const started = useRef(false);
 
@@ -43,27 +39,16 @@ export function LoginPage() {
 	}, []);
 
 	useEffect(() => {
-		// Strict mode runs effects twice; a code and a link are single use.
+		// Strict mode runs effects twice; one code per page load.
 		if (started.current) return;
 		started.current = true;
-		const token = tokenFromHash(window.location.hash);
-		if (token) {
-			// An older login link: take it out of the address bar and the history.
-			window.history.replaceState(null, "", window.location.pathname);
-			setPhase({ kind: "skip" });
-			void login(token).then((r) => {
-				setLegacy(r);
-				if (r.kind === "ok") done(r.account);
-			});
-			return;
-		}
 		void loadSetup().then((s) => {
 			setSetup(s);
 			if (s?.auth === "off" || s?.auth === "unconfigured")
 				setPhase({ kind: "skip" });
 			else void newCode();
 		});
-	}, [done, newCode]);
+	}, [newCode]);
 
 	// Poll while a code is shown.
 	useEffect(() => {
@@ -86,17 +71,9 @@ export function LoginPage() {
 	return (
 		<div className="mx-auto max-w-sm px-4 py-10">
 			<h1 className="font-bold text-lg">Log in</h1>
-			{legacy ? (
-				<p className="mt-2 text-muted-foreground text-sm" role="status">
-					{legacyMessage(legacy)}
-				</p>
-			) : (
-				<CodePanel phase={phase} onNewCode={newCode} />
-			)}
-			{phase.kind === "ok" || legacy?.kind === "ok" ? null : (
-				<SetupHint setup={setup} />
-			)}
-			{phase.kind === "skip" && legacy?.kind !== "ok" ? (
+			<CodePanel phase={phase} onNewCode={newCode} />
+			{phase.kind === "ok" ? null : <SetupHint setup={setup} />}
+			{phase.kind === "skip" ? (
 				<p className="mt-4 text-sm">
 					<Link to="/board" className="underline">
 						Go to the board
@@ -194,19 +171,6 @@ function NewCode({ onClick }: { onClick: () => void }) {
 			New code
 		</button>
 	);
-}
-
-function legacyMessage(r: LoginResult): string {
-	switch (r.kind) {
-		case "no-token":
-			return "";
-		case "ok":
-			return `Logged in as ${r.account}.`;
-		case "refused":
-			return "This login link is used or expired. Open /login to get a code.";
-		case "error":
-			return `Login failed: ${r.message}`;
-	}
 }
 
 /** Auth off or not configured, or no account yet. */

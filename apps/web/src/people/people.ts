@@ -1,5 +1,5 @@
 /**
- * /people data: accounts, the live runner list, and the writes (invite, add a
+ * /people data: accounts, the live runner list, and the writes (approve a login, add a
  * runner, revoke) that go to /api/auth.
  */
 import type {
@@ -184,13 +184,26 @@ export function outdated(r: RunnerView, serverVersion?: string): boolean {
 	return Boolean(r.runner && serverVersion && r.version !== serverVersion);
 }
 
-/** POST /api/auth/tokens {kind: invite}: the single-use login URL for a new account. */
-export async function invite(account: string): Promise<string> {
-	const r = await send<{ url: string }>("POST", "/api/auth/tokens", {
-		kind: "invite",
+/** What the approver sees after an approval, to spot a stranger's code. */
+export type LoginApproval = {
+	account: string;
+	created: boolean;
+	ageSeconds: number;
+	userAgent: string;
+};
+
+/**
+ * POST /api/auth/login/approve: approve the code that a browser shows on
+ * /login, for my own account (another device) or a new account (an invite).
+ */
+export function approveLogin(
+	code: string,
+	account: string,
+): Promise<LoginApproval> {
+	return send<LoginApproval>("POST", "/api/auth/login/approve", {
+		code,
 		account,
 	});
-	return r.url;
 }
 
 /** POST /api/auth/tokens {kind: enrol}: a single-use enrol token for a new runner. */

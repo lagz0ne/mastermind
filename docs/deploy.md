@@ -174,7 +174,8 @@ A login is a single-use code. Nothing secret goes to a log or a URL.
      It reads `MASTERMIND_OPERATOR_KEY` from the app env through the Dokploy API (never printed)
      and calls `POST /api/auth/login/approve`. The account is made if it does not exist. The reply
      shows how old the code is and the browser's user agent: refuse a code that you do not expect.
-   - a logged-in account: for itself (another device) or for a new account name (an invite).
+   - a logged-in account, on `/people` → "Approve a login": for itself (another device) or for a
+     new account name (an invite).
 3. The page polls and logs in within a few seconds. The code works once. Another browser that
    knows the code gets nothing.
 

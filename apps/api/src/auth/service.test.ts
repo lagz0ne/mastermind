@@ -11,6 +11,7 @@ import {
 	type Session,
 	type TokenRecord,
 } from "./service.ts";
+import { inviteAs, loginAs } from "./test-login.ts";
 
 function setup(onRevoke?: (sa: ServiceAccountView) => Promise<void>) {
 	const stores = {
@@ -24,98 +25,31 @@ function setup(onRevoke?: (sa: ServiceAccountView) => Promise<void>) {
 
 async function loggedIn() {
 	const s = setup();
-	const token = await s.auth.bootstrap();
-	if (!token) throw new Error("no bootstrap token");
-	const login = await s.auth.login(token);
-	if (!login) throw new Error("login failed");
-	return { ...s, sessionId: login.sessionId };
+	const sessionId = await loginAs(s.auth, "admin");
+	return { ...s, sessionId };
 }
 
-describe("bootstrap", () => {
-	test("mints a login token when there is no account", async () => {
-		const { auth } = setup();
-		expect(await auth.bootstrap()).toStartWith("mml_");
-	});
-
-	test("every start rotates: the previous token is refused", async () => {
+describe("sessions", () => {
+	test("stores only hashes of codes and sessions", async () => {
 		const { auth, stores } = setup();
-		const first = (await auth.bootstrap()) as string;
-		const second = (await auth.bootstrap()) as string;
-		expect(second).toStartWith("mml_");
-		expect(second).not.toBe(first);
-		expect(await auth.login(first)).toBeNull();
-		expect((await auth.login(second))?.account).toBe("admin");
-		// Only the marker is left; the account now exists, so no more tokens.
-		expect(await stores.tokens.list()).toEqual(["bootstrap"]);
-		expect(await auth.bootstrap()).toBeNull();
-	});
-
-	test("of many replicas, one mints and no loser token stays valid", async () => {
-		const { auth, stores } = setup();
-		const tokens = await Promise.all(
-			Array.from({ length: 5 }, () => auth.bootstrap()),
+		const { code, cookie } = await auth.startLogin("a");
+		expect(await stores.tokens.list()).toEqual([`pending.${sha256(code)}`]);
+		expect(JSON.stringify(await stores.tokens.list())).not.toContain(
+			cookie.split(".")[1] as string,
 		);
-		expect(tokens.filter(Boolean)).toHaveLength(1);
-		expect(await stores.tokens.list("login.*")).toHaveLength(1);
+		await auth.approveLogin(code, "admin", { kind: "operator" });
+		const r = await auth.pollLogin(cookie);
+		if (r.status !== "approved") throw new Error(r.status);
+		expect(await stores.sessions.list()).toEqual([sha256(r.sessionId)]);
 	});
 
-	test("rotation from an older marker without a key drops its token", async () => {
-		const { auth, stores } = setup();
-		const old = (await auth.bootstrap()) as string;
-		await stores.tokens.put("bootstrap", { kind: "bootstrap" });
-		const fresh = (await auth.bootstrap()) as string;
-		expect(await auth.login(old)).toBeNull();
-		expect(await auth.login(fresh)).not.toBeNull();
-	});
-
-	test("does nothing when an account exists", async () => {
-		const { stores, auth } = setup();
-		await stores.accounts.create("alice", {
-			id: "alice",
-			createdAt: "",
-			invitedBy: null,
-		});
-		expect(await auth.bootstrap()).toBeNull();
-		expect(await stores.tokens.list()).toEqual([]);
-	});
-});
-
-describe("login", () => {
-	test("the first-start token works exactly once", async () => {
-		const { auth, stores } = setup();
-		const token = (await auth.bootstrap()) as string;
-		const first = await auth.login(token);
-		expect(first?.account).toBe("admin");
-		expect(await auth.session(first?.sessionId)).toBe("admin");
-		expect(await auth.login(token)).toBeNull();
-		expect((await stores.accounts.get("admin"))?.value.invitedBy).toBeNull();
-	});
-
-	test("N parallel logins with one token: one winner", async () => {
-		const { auth } = setup();
-		const token = (await auth.bootstrap()) as string;
-		const results = await Promise.all(
-			Array.from({ length: 20 }, () => auth.login(token)),
-		);
-		expect(results.filter(Boolean)).toHaveLength(1);
-	});
-
-	test("stores only hashes of tokens and sessions", async () => {
-		const { auth, stores } = setup();
-		const token = (await auth.bootstrap()) as string;
-		expect(await stores.tokens.list()).toContain(`login.${sha256(token)}`);
-		const { sessionId } = (await auth.login(token)) as { sessionId: string };
-		expect(await stores.sessions.list()).toEqual([sha256(sessionId)]);
-	});
-
-	test("unknown, malformed and enrol tokens are refused", async () => {
-		const { auth, sessionId } = await loggedIn();
-		const account = (await auth.session(sessionId)) as string;
-		const enrol = await auth.enrolToken(account, "laptop");
-		expect(await auth.login("mml_nope")).toBeNull();
-		expect(await auth.login("garbage")).toBeNull();
-		expect(await auth.login(enrol)).toBeNull();
-		// The enrol token is not burnt by the wrong use.
+	test("enrol tokens do not log in", async () => {
+		const { auth } = await loggedIn();
+		const enrol = await auth.enrolToken("admin", "laptop");
+		await expect(
+			auth.approveLogin(enrol, "admin", { kind: "operator" }),
+		).rejects.toThrow("no such code");
+		expect(await auth.pollLogin(enrol)).toEqual({ status: "expired" });
 		expect(await auth.enrol(enrol)).not.toBeNull();
 	});
 
@@ -125,38 +59,16 @@ describe("login", () => {
 		expect(await auth.session(sessionId)).toBeNull();
 		expect(await auth.session(null)).toBeNull();
 	});
-});
 
-describe("invite and login links", () => {
-	test("an account invites a new account; the token creates it once", async () => {
-		const { auth, stores } = await loggedIn();
-		const token = await auth.invite("admin", "bob");
-		const res = await auth.login(token);
-		expect(res?.account).toBe("bob");
-		expect((await stores.accounts.get("bob"))?.value.invitedBy).toBe("admin");
-		expect(await auth.login(token)).toBeNull();
-	});
-
-	test("refuses bad and taken account ids", async () => {
+	test("a second invite of the same name loses when it is collected", async () => {
 		const { auth } = await loggedIn();
-		await expect(auth.invite("admin", "Bob.x")).rejects.toThrow(AuthError);
-		await expect(auth.invite("admin", "admin")).rejects.toThrow("exists");
-	});
-
-	test("a second invite for the same id loses at login", async () => {
-		const { auth } = await loggedIn();
-		const a = await auth.invite("admin", "carol");
-		const b = await auth.invite("admin", "carol");
-		expect((await auth.login(a))?.account).toBe("carol");
-		await expect(auth.login(b)).rejects.toThrow("exists");
-	});
-
-	test("a login token for an existing account gives a second session", async () => {
-		const { auth, sessionId } = await loggedIn();
-		const res = await auth.login(await auth.loginToken("admin"));
-		expect(res?.account).toBe("admin");
-		expect(res?.sessionId).not.toBe(sessionId);
-		await expect(auth.loginToken("ghost")).rejects.toThrow("no account");
+		const a = await auth.startLogin("a");
+		const b = await auth.startLogin("b");
+		const by = { kind: "account", account: "admin" } as const;
+		await auth.approveLogin(a.code, "carol", by);
+		await auth.approveLogin(b.code, "carol", by);
+		expect(await auth.pollLogin(a.cookie)).toMatchObject({ account: "carol" });
+		await expect(auth.pollLogin(b.cookie)).rejects.toThrow("exists");
 	});
 });
 
@@ -216,8 +128,7 @@ describe("service accounts", () => {
 		const s = setup(async (sa) => {
 			revoked.push(sa);
 		});
-		const token = (await s.auth.bootstrap()) as string;
-		await s.auth.login(token);
+		await loginAs(s.auth, "admin");
 		const res = await s.auth.enrol(await s.auth.enrolToken("admin", "laptop"));
 		const sa = res?.serviceAccount as ServiceAccountView;
 		expect(await s.auth.revoke("bob", sa.id)).toBe(false);
@@ -229,7 +140,7 @@ describe("service accounts", () => {
 
 	test("lists only the account's own service accounts", async () => {
 		const { auth } = await loggedIn();
-		await auth.login(await auth.invite("admin", "bob"));
+		await inviteAs(auth, "admin", "bob");
 		await auth.enrol(await auth.enrolToken("admin", "a1"));
 		await auth.enrol(await auth.enrolToken("bob", "b1"));
 		expect((await auth.serviceAccounts("admin")).map((s) => s.name)).toEqual([
@@ -245,8 +156,8 @@ describe("listing", () => {
 		const auth = new Auth(s.stores, {
 			now: () => new Date(Date.UTC(2026, 10, 10, 8, 0, t++)),
 		});
-		await auth.login((await auth.bootstrap()) as string);
-		await auth.login(await auth.invite("admin", "bob"));
+		await loginAs(auth, "admin");
+		await inviteAs(auth, "admin", "bob");
 		await auth.enrol(await auth.enrolToken("admin", "a1"));
 		await auth.enrol(await auth.enrolToken("bob", "b1"));
 		const names = (await auth.serviceAccounts()).map((x) => x.name).sort();

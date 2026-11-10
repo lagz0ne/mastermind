@@ -7,6 +7,7 @@ import {
 	LOCAL_ACCOUNT,
 	requireAccountFromEnv,
 } from "./session.ts";
+import { loginAs } from "./test-login.ts";
 
 const SECRET = "test-secret";
 
@@ -17,8 +18,7 @@ async function setup() {
 		tokens: new MemoryKv(),
 		sessions: new MemoryKv(),
 	});
-	const token = (await auth.bootstrap()) as string;
-	const { sessionId } = (await auth.login(token)) as { sessionId: string };
+	const sessionId = await loginAs(auth, "admin");
 	const cookie = `${SESSION_COOKIE}=${sessionId}`;
 	return { auth, cookie, guard: accountGuard(auth, SECRET) };
 }

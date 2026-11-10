@@ -12,6 +12,7 @@ import type {
 import { MemoryKv } from "../auth/memory-kv.ts";
 import { Auth } from "../auth/service.ts";
 import { accountGuard, type RequireAccount } from "../auth/session.ts";
+import { inviteAs, loginAs } from "../auth/test-login.ts";
 import { Dispatcher } from "../dispatch/dispatcher.ts";
 import { fakeWork } from "../dispatch/fake-work.ts";
 import { RunnerRegistry } from "./registry.ts";
@@ -171,9 +172,7 @@ async function setup(
 
 async function loggedIn() {
 	const s = await setup();
-	const first = (await s.auth.bootstrap()) as string;
-	const login = await s.auth.login(first);
-	const cookie = `mm_session=${login?.sessionId}`;
+	const cookie = `mm_session=${await loginAs(s.auth, "admin")}`;
 	const get = (path: string) =>
 		new Request(`https://mm.example${path}`, { headers: { cookie } });
 	return { ...s, get };
@@ -185,7 +184,7 @@ describe("routes", () => {
 		const setupOf = async () =>
 			(await (await routes["/api/people/setup"].GET()).json()) as PeopleSetup;
 		expect(await setupOf()).toEqual({ auth: "on", firstLogin: true });
-		await auth.login((await auth.bootstrap()) as string);
+		await loginAs(auth, "admin");
 		expect(await setupOf()).toEqual({ auth: "on", firstLogin: false });
 	});
 
@@ -204,7 +203,7 @@ describe("routes", () => {
 
 	test("me, accounts with inviter, runners joined with service accounts", async () => {
 		const { auth, registry, routes, get } = await loggedIn();
-		await auth.login(await auth.invite("admin", "bob"));
+		await inviteAs(auth, "admin", "bob");
 		const enrolled = await auth.enrol(await auth.enrolToken("admin", "laptop"));
 		const saId = enrolled?.serviceAccount.id as string;
 		const me = (await (

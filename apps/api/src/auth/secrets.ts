@@ -4,7 +4,6 @@ import { timingSafeEqual } from "node:crypto";
  * Secret strings that Mastermind hands out. The prefix tells the kind, so a
  * token of one kind never matches a lookup of another kind.
  *
- *   mml_<secret>                      login token (single use)
  *   mme_<secret>                      enrol token (single use)
  *   mms_<account>_<id>_<secret>       service account credential (long-lived)
  *   mmi_<hmac>                        Mastermind's own NATS connections
