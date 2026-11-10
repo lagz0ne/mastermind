@@ -37,12 +37,25 @@ export type Bead = {
 	/** The actor that holds the bead, as `<account>/<agent>` for dispatched work. */
 	assignee?: string;
 	labels: string[];
+	/** What "done" means for this bead (bd acceptance criteria). */
+	acceptance?: string;
 	/** True when an open dependency blocks the bead, whatever its status says. */
 	blocked: boolean;
 	lease?: Lease;
 	createdAt: string;
 	updatedAt: string;
 	closedAt?: string;
+	/** Why it was closed; for completed work, the agent's result. */
+	closeReason?: string;
+};
+
+/** A comment on a bead: a runner's report or a human note. */
+export type BeadComment = {
+	id: string;
+	beadId: string;
+	author: string;
+	text: string;
+	createdAt: string;
 };
 
 /** One row of the bd events journal: an ordered, replayable mutation. */
@@ -56,6 +69,8 @@ export type BeadEvent = {
 	actor: string;
 	/** The bead after the mutation. Absent for a delete. */
 	bead?: Bead;
+	/** The comment that op `comment` added. */
+	comment?: BeadComment;
 };
 
 /** Kanban columns, left to right. */

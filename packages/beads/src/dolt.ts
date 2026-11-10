@@ -1,5 +1,13 @@
-import type { Bead, BeadEvent } from "@mastermind/core";
-import { iso, toBead, toPriority, toStatus, type WireIssue } from "./wire.ts";
+import type { Bead, BeadComment, BeadEvent } from "@mastermind/core";
+import {
+	iso,
+	toBead,
+	toEventComment,
+	toPriority,
+	toStatus,
+	type WireEventComment,
+	type WireIssue,
+} from "./wire.ts";
 
 /**
  * The part of a Bun `SQL` instance the reader uses: the tagged template.
@@ -39,6 +47,17 @@ export type JournalRow = {
 	actor: string | null;
 	/** The bead after the mutation, as bd serializes it. Null for a delete. */
 	issue_json: string | null;
+	/** Op `comment`: the comment it added. Absent from older recordings. */
+	comment_json?: string | null;
+};
+
+/** A row of the `comments` table. */
+export type CommentRow = {
+	id: string;
+	issue_id: string;
+	author: string;
+	text: string;
+	created_at: Date | string;
 };
 
 /**
@@ -78,13 +97,61 @@ export class DoltReader {
 	/** Journal records with seq greater than `seq`, in seq order. */
 	async journalSince(seq: number, limit = 500): Promise<BeadEvent[]> {
 		const rows = (await this.#sql`
-			select seq, ts, op, issue_id, actor, issue_json
+			select seq, ts, op, issue_id, actor, issue_json, comment_json
 			from bd_events_journal
 			where seq > ${seq}
 			order by seq
 			limit ${limit}
 		`) as JournalRow[];
 		return rows.map(journalRowToEvent);
+	}
+
+	/** The journal of one bead, in seq order (its history, for a timeline). */
+	async journalOf(beadId: string, limit = 2_000): Promise<BeadEvent[]> {
+		const rows = (await this.#sql`
+			select seq, ts, op, issue_id, actor, issue_json, comment_json
+			from bd_events_journal
+			where issue_id = ${beadId}
+			order by seq
+			limit ${limit}
+		`) as JournalRow[];
+		return rows.map(journalRowToEvent);
+	}
+
+	/** The newest journal records, newest first, with seq below `before` when given. */
+	async journalRecent(limit = 200, before?: number): Promise<BeadEvent[]> {
+		const rows = (await (before === undefined
+			? this.#sql`
+				select seq, ts, op, issue_id, actor, issue_json, comment_json
+				from bd_events_journal
+				order by seq desc
+				limit ${limit}
+			`
+			: this.#sql`
+				select seq, ts, op, issue_id, actor, issue_json, comment_json
+				from bd_events_journal
+				where seq < ${before}
+				order by seq desc
+				limit ${limit}
+			`)) as JournalRow[];
+		return rows.map(journalRowToEvent);
+	}
+
+	/** Comments of one bead, oldest first. */
+	async comments(beadId: string): Promise<BeadComment[]> {
+		const rows = (await this.#sql`
+			select id, issue_id, author, text, created_at
+			from comments
+			where issue_id = ${beadId}
+			order by created_at, id
+		`) as CommentRow[];
+		return rows.map((r) => ({
+			id: r.id,
+			beadId: r.issue_id,
+			author: r.author,
+			text: r.text,
+			createdAt: iso(r.created_at),
+		}));
 	}
 }
 
@@ -129,5 +196,11 @@ export function journalRowToEvent(r: JournalRow): BeadEvent {
 		actor: r.actor ?? "",
 	};
 	if (r.issue_json) event.bead = toBead(JSON.parse(r.issue_json) as WireIssue);
+	if (r.comment_json) {
+		event.comment = toEventComment(
+			r.issue_id,
+			JSON.parse(r.comment_json) as WireEventComment,
+		);
+	}
 	return event;
 }

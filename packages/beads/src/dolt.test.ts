@@ -129,3 +129,44 @@ test("a Bun SQL instance is a SqlTag", () => {
 	const asTag = (sql: SQL): SqlTag => sql;
 	expect(typeof asTag).toBe("function");
 });
+
+test("comment_json becomes the event's comment", async () => {
+	const { sql } = fakeSql([
+		{
+			seq: 7,
+			ts: new Date("2026-11-10T08:01:41Z"),
+			op: "comment",
+			issue_id: "fl-e8a",
+			actor: "acc/r1",
+			issue_json: null,
+			comment_json:
+				'{"id":"c1","author":"acc/r1","text":"hello","created_at":"2026-11-10T08:01:40Z","source":"structured"}',
+		},
+	]);
+	const [event] = await new DoltReader(sql).journalSince(6);
+	expect(event?.comment).toEqual({
+		id: "c1",
+		beadId: "fl-e8a",
+		author: "acc/r1",
+		text: "hello",
+		createdAt: "2026-11-10T08:01:40.000Z",
+	});
+});
+
+test("journalOf, journalRecent and comments query one bead or the newest rows", async () => {
+	const { sql, calls } = fakeSql([]);
+	const reader = new DoltReader(sql);
+	await reader.journalOf("mm-1");
+	await reader.journalRecent(50);
+	await reader.journalRecent(50, 100);
+	await reader.comments("mm-1");
+	expect(calls.map((c) => c.values)).toEqual([
+		["mm-1", 2_000],
+		[50],
+		[100, 50],
+		["mm-1"],
+	]);
+	expect(calls[0]?.text).toContain("where issue_id = ?");
+	expect(calls[1]?.text).toContain("order by seq desc");
+	expect(calls[3]?.text).toContain("from comments");
+});

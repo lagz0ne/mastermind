@@ -22,6 +22,8 @@ export type BdClientOptions = {
 export type CreateBead = {
 	title: string;
 	description?: string;
+	/** Acceptance criteria. */
+	acceptance?: string;
 	priority?: Priority;
 	/** bd issue type. bd defaults to `task`. */
 	type?: string;
@@ -111,6 +113,8 @@ export class BdClient {
 	async create(actor: string, input: CreateBead): Promise<Bead> {
 		const body: Record<string, unknown> = { actor, title: input.title };
 		if (input.description !== undefined) body.description = input.description;
+		if (input.acceptance !== undefined)
+			body.acceptance_criteria = input.acceptance;
 		if (input.priority !== undefined) body.priority = input.priority;
 		if (input.type !== undefined) body.issue_type = input.type;
 		if (input.labels !== undefined) body.labels = input.labels;
@@ -159,6 +163,18 @@ export class BdClient {
 		const res = await this.#call<{ issue: WireIssue }>(
 			"POST",
 			`/issues/${enc(id)}:close`,
+			body,
+		);
+		return toBead(res.issue);
+	}
+
+	/** Idempotent: reopening an open bead returns it unchanged. */
+	async reopen(id: string, actor: string, reason?: string): Promise<Bead> {
+		const body: Record<string, unknown> = { actor };
+		if (reason !== undefined) body.reason = reason;
+		const res = await this.#call<{ issue: WireIssue }>(
+			"POST",
+			`/issues/${enc(id)}:reopen`,
 			body,
 		);
 		return toBead(res.issue);

@@ -241,3 +241,44 @@ describe("BdClient errors", () => {
 		expect(err.message).toBe("bad gateway");
 	});
 });
+
+describe("comments on the journal, acceptance, reopen (bd 1.3.4 recordings)", () => {
+	test("events carry the comment of op comment, and the acceptance", async () => {
+		const { default: page } = await import(
+			"./fixtures/wire/events-comment.json"
+		);
+		const { client } = fake(200, page);
+		const { events } = await client.events(8);
+		expect(events[0]?.comment).toEqual({
+			id: "4ddd47ec-d6d6-54a9-8882-d9dc79a822de",
+			beadId: "fl-e8a",
+			author: "bob",
+			text: "not done",
+			createdAt: "2026-11-10T08:03:50.000Z",
+		});
+		expect(events[0]?.bead?.acceptance).toBe("it works");
+	});
+
+	test("create sends acceptance_criteria; close maps close_reason", async () => {
+		const { client, seen } = fake(201, created);
+		await client.create("duke", { title: "t", acceptance: "it works" });
+		expect(seen[0]?.body).toMatchObject({
+			actor: "duke",
+			acceptance_criteria: "it works",
+		});
+		const c = fake(200, closed);
+		expect((await c.client.close("pr-pkn", "a", "done")).closeReason).toBe(
+			"done",
+		);
+	});
+
+	test("reopen posts :reopen with the actor and reason", async () => {
+		const { default: reopened } = await import("./fixtures/wire/reopen.json");
+		const { client, seen } = fake(200, reopened);
+		const bead = await client.reopen("fl-e8a", "duke", "not done");
+		expect(seen[0]?.method).toBe("POST");
+		expect(seen[0]?.url.pathname).toBe("/v0/beads/issues/fl-e8a:reopen");
+		expect(seen[0]?.body).toEqual({ actor: "duke", reason: "not done" });
+		expect(bead.status).toBe("open");
+	});
+});

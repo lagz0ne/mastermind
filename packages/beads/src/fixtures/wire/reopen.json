@@ -1,0 +1,16 @@
+{
+	"already_open": false,
+	"issue": {
+		"id": "fl-e8a",
+		"title": "probe",
+		"description": "d",
+		"acceptance_criteria": "it works",
+		"status": "open",
+		"priority": 2,
+		"issue_type": "task",
+		"created_at": "2026-11-10T08:01:40Z",
+		"updated_at": "2026-11-10T08:03:50Z",
+		"labels": ["queue:build"]
+	},
+	"revision": "-7835173198681418580"
+}

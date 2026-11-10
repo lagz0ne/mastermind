@@ -6,6 +6,7 @@
 import {
 	BEAD_STATUSES,
 	type Bead,
+	type BeadComment,
 	type BeadEvent,
 	type BeadStatus,
 	type Priority,
@@ -20,6 +21,7 @@ export type WireIssue = {
 	id: string;
 	title: string;
 	description?: string;
+	acceptance_criteria?: string;
 	status: string;
 	priority: number;
 	issue_type: string;
@@ -44,6 +46,16 @@ export type WireEvent = {
 	actor: string;
 	/** Absent for a delete. */
 	issue?: WireIssue;
+	/** Op `comment` only: the comment it added (no issue_id here). */
+	comment?: WireEventComment;
+};
+
+/** The comment of a journal record, on the HTTP surface and in `comment_json`. */
+export type WireEventComment = {
+	id: string;
+	author: string;
+	text: string;
+	created_at: string;
 };
 
 export type WireComment = {
@@ -64,14 +76,7 @@ export type WireProblem = {
 	[member: string]: unknown;
 };
 
-/** A comment on a bead. Not part of core: only the client needs it so far. */
-export type BeadComment = {
-	id: string;
-	beadId: string;
-	author: string;
-	text: string;
-	createdAt: string;
-};
+export type { BeadComment } from "@mastermind/core";
 
 function isBeadStatus(status: string): status is BeadStatus {
 	return (BEAD_STATUSES as readonly string[]).includes(status);
@@ -109,8 +114,10 @@ export function toBead(w: WireIssue): Bead {
 		updatedAt: iso(w.updated_at),
 	};
 	if (w.description) bead.description = w.description;
+	if (w.acceptance_criteria) bead.acceptance = w.acceptance_criteria;
 	if (w.assignee) bead.assignee = w.assignee;
 	if (w.closed_at) bead.closedAt = iso(w.closed_at);
+	if (w.close_reason) bead.closeReason = w.close_reason;
 	if (w.lease_expires_at) {
 		bead.lease = {
 			expiresAt: iso(w.lease_expires_at),
@@ -129,7 +136,21 @@ export function toBeadEvent(w: WireEvent): BeadEvent {
 		actor: w.actor,
 	};
 	if (w.issue) event.bead = toBead(w.issue);
+	if (w.comment) event.comment = toEventComment(w.issue_id, w.comment);
 	return event;
+}
+
+export function toEventComment(
+	beadId: string,
+	w: WireEventComment,
+): BeadComment {
+	return {
+		id: w.id,
+		beadId,
+		author: w.author,
+		text: w.text,
+		createdAt: iso(w.created_at),
+	};
 }
 
 export function toBeadComment(w: WireComment): BeadComment {
