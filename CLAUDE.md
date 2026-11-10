@@ -5,6 +5,8 @@
 (`.claude/skills/trunk-agents/SKILL.md`) before editing files or running any git command.
 Multiple agents share this working directory: no branches, no worktrees, no stash.
 
+Start every session with `scripts/status.sh`. Delegate with `scripts/spawn.sh <bead|"title">` (Paseo agent, same checkout).
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:46cd31e7 -->
 ## Beads Issue Tracker
 
@@ -70,6 +72,8 @@ bun install             # install
 bun run check           # full gate: biome ci + typecheck + test + build (what CI runs)
 bun run dev             # all dev servers
 bun test                # inside a package
+scripts/status.sh        # who is doing what: claims, merge slot, dirty files, agents, CI
+scripts/spawn.sh <bead>  # put a Paseo agent on a bead (same checkout)
 scripts/ship.sh -m "<msg>" -i <bead> -- <paths>   # the only way to commit/push
 ```
 

@@ -19,14 +19,15 @@ doing what. Use **beads** to see what other agents are doing:
 Quality gates: `scripts/ship.sh` verifies **exactly your commit** before it lands
 (pre-integration). CI re-verifies every push to main. CD publishes and deploys every green commit.
 
-## 0. Identity: do this once per session
+## 0. Identity: automatic
 
-Pick a unique actor name and **prefix every `bd` and ship command** with it (shell
-env does not persist between tool calls):
+A SessionStart hook (`scripts/agent-env.sh`) sets `BEADS_ACTOR=paseo-<your short Paseo agent id>`
+and puts bun on PATH for every Bash call. Check once with `echo $BEADS_ACTOR`. If it is empty
+(non-Claude provider, hook didn't run), prefix every `bd` and ship command yourself:
+`BEADS_ACTOR=paseo-${PASEO_AGENT_ID:0:7}`.
 
-```bash
-BEADS_ACTOR=claude-<short-task>-<4 random chars>   # e.g. claude-auth-k3f9
-```
+The name is the address: a bead assigned to `paseo-113cf46` is held by the Paseo agent you can
+reach with `paseo send 113cf46 "..."`.
 
 Keep bd output small: use `bd -q ...` (errors only) for writes, and `--json` when you parse results.
 The bd **git hooks are intentionally uninstalled.** They could block commits for up to 300s
@@ -35,10 +36,7 @@ on the shared DB lock, and ship.sh calls bd explicitly anyway. Do not run `bd ho
 ## 1. Orient (session start, and before every new task)
 
 ```bash
-git pull --rebase --autostash -q origin main   # only if no one holds the merge slot
-bd list --status in_progress                   # what others are doing
-bd ready                                       # unblocked work
-git status --short                             # dirty files are probably OTHER agents' WIP
+scripts/status.sh    # claims + declared files, merge slot, ready work, dirty files, agents, CI
 ```
 
 Files that are dirty in `git status` and not covered by your claimed issue **belong to
@@ -47,11 +45,11 @@ someone else**. Do not edit, format, revert, stash, or commit them.
 ## 2. Claim: one issue, explicit file scope
 
 ```bash
-BEADS_ACTOR=$me bd update <id> --claim        # atomic; "already claimed" → pick another
-# or: BEADS_ACTOR=$me bd ready --claim --json # claim next ready issue
+bd -q update <id> --claim     # atomic; "already claimed" → pick another
+# or: bd ready --claim --json   # claim next ready issue
 # no issue yet? create it first:
-BEADS_ACTOR=$me bd create "Add X" -t feature -p 2 -d "why + acceptance" --json
-BEADS_ACTOR=$me bd note <id> "files: packages/core/src/x.ts, apps/api/src/routes/x.ts"
+bd create "Add X" -t feature -p 2 -d "why + acceptance" --json
+bd note <id> "files: packages/core/src/x.ts, apps/api/src/routes/x.ts"
 ```
 
 - Before touching a file, check that no other in_progress issue declares it
@@ -64,7 +62,7 @@ BEADS_ACTOR=$me bd note <id> "files: packages/core/src/x.ts, apps/api/src/routes
 ## 3. Ship small and often (many times per hour, not per day)
 
 ```bash
-BEADS_ACTOR=$me scripts/ship.sh -m "feat(core): add x parser" -i <id> -- <your paths...>
+scripts/ship.sh -m "feat(core): add x parser" -i <id> -- <your paths...>
 ```
 
 `ship.sh` takes the merge slot, rebases on origin/main, builds a snapshot of
@@ -81,7 +79,7 @@ committed and the failure is in **your** change.
 Then close or continue:
 
 ```bash
-BEADS_ACTOR=$me bd close <id> -r "shipped <sha>: what changed"
+bd close <id> -r "shipped <sha>: what changed"
 ```
 
 ## 4. Forbidden in this shared directory
@@ -99,7 +97,29 @@ If `gh run list -b main -L 3` shows a failure:
 2. Otherwise check whether a P0 already exists (`bd list -p 0`). If not, create one:
    `bd create "main red: <job>" -t bug -p 0 -d "<run url>"`. Hold non-fix ships until it's closed.
 
-## 6. Recovery
+## 6. Paseo: delegate and talk to other agents
+
+All agents run in **local** Paseo workspaces on this one checkout. Never pass
+`--new-workspace worktree`, `isolation: "worktree"`, or any branch option.
+
+```bash
+scripts/spawn.sh mm-abc                    # put a new agent on an existing bead
+scripts/spawn.sh "Add /version endpoint"   # create the bead and put an agent on it
+scripts/spawn.sh -p claude/claude-sonnet-5-5 -x "extra instructions" mm-abc
+paseo ls                                   # agents in this checkout
+paseo logs <id>                            # what an agent is doing
+paseo send <id> "..."                      # steer or ask (e.g. the holder of a file you need)
+```
+
+- Splitting work: create one bead per independently shippable slice, wire order with
+  `bd dep add <later> <earlier>`, give each bead a description with acceptance criteria, then
+  spawn one agent per **ready** bead. Slices must not share files; if they must, make them dependent.
+- Need a file another agent declared? `paseo send <their id> "need <path> for <bead>, when do you ship?"`
+  and work on something else meanwhile. Don't edit it.
+- `paseo.json` scripts (`check`, `test`, `status`, `api` service) are available from the Paseo UI
+  and `paseo script start <name> --workspace <id>`.
+
+## 7. Recovery
 
 - Merge slot stuck: `bd merge-slot check`. If the holder has no live in_progress
   work, run `bd merge-slot release --holder <holder>`.

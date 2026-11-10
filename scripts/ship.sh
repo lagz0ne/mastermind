@@ -7,7 +7,7 @@
 #     and runs the full gate on it ("not rocket science" rule)
 #   * commits only your paths, rebases on origin/main, pushes, syncs beads
 #
-# Usage: BEADS_ACTOR=<you> scripts/ship.sh -m "feat(core): msg" [-i mm-abc] -- <path>...
+# Usage: scripts/ship.sh -m "feat(core): msg" [-i mm-abc] -- <path>...
 set -euo pipefail
 
 die() { echo "ship: $*" >&2; exit 1; }
@@ -23,8 +23,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 paths=("$@")
-actor="${BEADS_ACTOR:-}"
+actor="${BEADS_ACTOR:-${PASEO_AGENT_ID:+paseo-${PASEO_AGENT_ID:0:7}}}"
 [[ -n "$actor" ]] || die "set BEADS_ACTOR to your unique agent name"
+export BEADS_ACTOR="$actor" PATH="$HOME/.bun/bin:$PATH"
 [[ -n "$msg" ]] || die "-m <message> is required"
 [[ ${#paths[@]} -gt 0 ]] || die "list the paths you changed after --  (never ship the whole tree)"
 
