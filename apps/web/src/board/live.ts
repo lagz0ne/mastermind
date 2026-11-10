@@ -1,4 +1,4 @@
-import type { Bead, BeadEvent, BoardSnapshot } from "@mastermind/core";
+import type { Bead, BeadEvent, BoardSnapshot, Lease } from "@mastermind/core";
 import { createContext, useContext, useEffect, useState } from "react";
 
 /** "loading" until the snapshot arrives; "offline" when the api cannot serve it. */
@@ -11,9 +11,37 @@ export type LiveBoard = {
 	seq: number;
 	/** Why the board is offline (the api's error). */
 	error?: string;
+	/** Every journal event the board applies, for views that fold them (the bead sheet). */
+	onEvent: (listener: (event: BeadEvent) => void) => () => void;
 };
 
-export const emptyBoard: LiveBoard = { beads: [], status: "loading", seq: 0 };
+const noListen = () => () => {};
+
+export const emptyBoard: LiveBoard = {
+	beads: [],
+	status: "loading",
+	seq: 0,
+	onEvent: noListen,
+};
+
+/** `event: lease` of /api/events: a heartbeat renewed a lease, or it is gone. */
+export type LeaseChange = { beadId: string; lease?: Lease };
+
+/** Apply a lease change; beads the board does not hold stay out. */
+export function applyLease(
+	beads: ReadonlyMap<string, Bead>,
+	change: LeaseChange,
+): Map<string, Bead> {
+	const next = new Map(beads);
+	const bead = next.get(change.beadId);
+	if (!bead) return next;
+	const { lease: _old, ...rest } = bead;
+	next.set(
+		change.beadId,
+		change.lease ? { ...rest, lease: change.lease } : rest,
+	);
+	return next;
+}
 
 /**
  * Apply one journal event: the event carries the bead after the mutation,
@@ -45,7 +73,14 @@ async function loadSnapshot(): Promise<BoardSnapshot> {
  * reconnects by itself and resumes with Last-Event-ID.
  */
 export function useLiveBoardSource(): LiveBoard {
-	const [board, setBoard] = useState<LiveBoard>(emptyBoard);
+	const [listeners] = useState(() => new Set<(event: BeadEvent) => void>());
+	const [onEvent] = useState(() => (listener: (event: BeadEvent) => void) => {
+		listeners.add(listener);
+		return () => {
+			listeners.delete(listener);
+		};
+	});
+	const [board, setBoard] = useState<Omit<LiveBoard, "onEvent">>(emptyBoard);
 
 	useEffect(() => {
 		let source: EventSource | null = null;
@@ -64,6 +99,11 @@ export function useLiveBoardSource(): LiveBoard {
 					if (event.seq <= seq) return;
 					seq = event.seq;
 					beads = applyEvent(beads, event);
+					setBoard({ beads: [...beads.values()], status: "live", seq });
+					for (const listener of listeners) listener(event);
+				});
+				source.addEventListener("lease", (message) => {
+					beads = applyLease(beads, JSON.parse(message.data) as LeaseChange);
 					setBoard({ beads: [...beads.values()], status: "live", seq });
 				});
 				source.addEventListener("open", () =>
@@ -87,9 +127,9 @@ export function useLiveBoardSource(): LiveBoard {
 			cancelled = true;
 			source?.close();
 		};
-	}, []);
+	}, [listeners]);
 
-	return board;
+	return { ...board, onEvent };
 }
 
 export const LiveBoardContext = createContext<LiveBoard>(emptyBoard);

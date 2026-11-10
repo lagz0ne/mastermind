@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Bead, BeadEvent } from "@mastermind/core";
-import { applyEvent } from "./live.ts";
+import { applyEvent, applyLease } from "./live.ts";
 
 const bead = (id: string, title: string): Bead => ({
 	id,
@@ -42,5 +42,22 @@ describe("applyEvent", () => {
 		const after = applyEvent(before, event(2, "delete", null));
 		expect(after.size).toBe(0);
 		expect(before.size).toBe(1);
+	});
+});
+
+describe("applyLease", () => {
+	test("a heartbeat replaces the lease; a removal drops it; unknown beads stay out", () => {
+		const held = {
+			...bead("mm-1", "held"),
+			lease: { expiresAt: "a", heartbeatAt: "a" },
+		};
+		let beads = new Map<string, Bead>([[held.id, held]]);
+		const lease = { expiresAt: "b", heartbeatAt: "b" };
+		beads = applyLease(beads, { beadId: "mm-1", lease });
+		expect(beads.get("mm-1")?.lease).toEqual(lease);
+		beads = applyLease(beads, { beadId: "mm-1" });
+		expect(beads.get("mm-1")).not.toHaveProperty("lease");
+		beads = applyLease(beads, { beadId: "mm-9", lease });
+		expect(beads.has("mm-9")).toBe(false);
 	});
 });

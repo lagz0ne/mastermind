@@ -1,4 +1,4 @@
-import { type Bead, leaseState, queueOf } from "@mastermind/core";
+import { type Bead, queueOf } from "@mastermind/core";
 import { Link } from "@tanstack/react-router";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
@@ -8,6 +8,7 @@ import {
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { type LeaseLook, leaseView, useNow } from "../work/lease.ts";
 
 export function PriorityBadge({ priority }: Pick<Bead, "priority">) {
 	return (
@@ -15,25 +16,36 @@ export function PriorityBadge({ priority }: Pick<Bead, "priority">) {
 	);
 }
 
+const LEASE_TEXT: Record<Exclude<LeaseLook, "none">, string> = {
+	live: "text-live",
+	expiring: "text-signal",
+	expired: "text-signal line-through",
+};
+
+/** ■ m:ss left (live, expiring) or expired; ticks every second. */
 export function LeaseMark({ lease }: Pick<Bead, "lease">) {
-	const state = leaseState(lease);
-	if (state === "none") return null;
+	const now = useNow();
+	const view = leaseView(lease, now);
+	if (view.look === "none") return null;
 	return (
 		<Tooltip>
 			<TooltipTrigger asChild>
 				<span
+					data-lease={view.look}
 					className={cn(
-						"inline-flex items-center gap-1 text-[11px]",
-						state === "live" ? "text-live" : "text-signal",
+						"inline-flex items-center gap-1 font-mono text-[11px] tabular-nums",
+						LEASE_TEXT[view.look],
 					)}
 				>
-					<span aria-hidden className="size-1.5 rounded-full bg-current" />
-					{state === "live" ? "lease live" : "lease expired"}
+					<span aria-hidden className="size-1.5 bg-current" />
+					{view.look === "expired" ? "expired" : view.left}
+					<span className="sr-only"> lease {view.look}</span>
 				</span>
 			</TooltipTrigger>
 			<TooltipContent>
-				{state === "live" ? "expires" : "expired"}{" "}
-				{new Date(lease?.expiresAt ?? 0).toLocaleTimeString()}
+				lease {view.look} · {view.look === "expired" ? "expired" : "expires"}{" "}
+				{new Date(lease?.expiresAt ?? 0).toLocaleTimeString()} · beat{" "}
+				{view.beatAgoS} s ago
 			</TooltipContent>
 		</Tooltip>
 	);
