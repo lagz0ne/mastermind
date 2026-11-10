@@ -12,6 +12,7 @@
 	},
 	"dependencies": {
 		"@mastermind/core": "workspace:*",
+		"@mastermind/telemetry": "workspace:*",
 		"@radix-ui/react-dialog": "^1.3.1",
 		"@radix-ui/react-scroll-area": "^1.4.0",
 		"@radix-ui/react-slot": "^1.5.0",

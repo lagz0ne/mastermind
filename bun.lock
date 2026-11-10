@@ -19,6 +19,7 @@
         "@mastermind/bus": "workspace:*",
         "@mastermind/core": "workspace:*",
         "@mastermind/router": "workspace:*",
+        "@mastermind/telemetry": "workspace:*",
         "@mastermind/web": "workspace:*",
         "@nats-io/jwt": "0.0.10-5",
         "@nats-io/nats-core": "^3.4.0",
@@ -33,6 +34,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@mastermind/core": "workspace:*",
+        "@mastermind/telemetry": "workspace:*",
         "@radix-ui/react-dialog": "^1.3.1",
         "@radix-ui/react-scroll-area": "^1.4.0",
         "@radix-ui/react-slot": "^1.5.0",
@@ -85,6 +87,10 @@
         "@mastermind/core": "workspace:*",
       },
     },
+    "packages/telemetry": {
+      "name": "@mastermind/telemetry",
+      "version": "0.0.0",
+    },
   },
   "packages": {
     "@biomejs/biome": ["@biomejs/biome@2.6.6", "", { "optionalDependencies": { "@biomejs/cli-android-arm64": "2.6.6", "@biomejs/cli-android-x64": "2.6.6", "@biomejs/cli-darwin-arm64": "2.6.6", "@biomejs/cli-darwin-x64": "2.6.6", "@biomejs/cli-linux-arm64": "2.6.6", "@biomejs/cli-linux-arm64-musl": "2.6.6", "@biomejs/cli-linux-x64": "2.6.6", "@biomejs/cli-linux-x64-musl": "2.6.6", "@biomejs/cli-win32-arm64": "2.6.6", "@biomejs/cli-win32-x64": "2.6.6" }, "bin": { "biome": "bin/biome" } }, "sha512-NCgVJRyrU1+hsW1ILNaRqNAb9fRL4n49bwyef+wjVJQ488/bXbp0BfnNqTTExkiNQT3ugkgYKR1vK8NxsjlNSQ=="],
@@ -128,6 +134,8 @@
     "@mastermind/deploy": ["@mastermind/deploy@workspace:deploy"],
 
     "@mastermind/router": ["@mastermind/router@workspace:packages/router"],
+
+    "@mastermind/telemetry": ["@mastermind/telemetry@workspace:packages/telemetry"],
 
     "@mastermind/web": ["@mastermind/web@workspace:apps/web"],
 
