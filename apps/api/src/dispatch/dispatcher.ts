@@ -16,6 +16,7 @@ import { BusError } from "@mastermind/bus";
 import {
 	type Ack,
 	type Bead,
+	type BeadComment,
 	type BeadEvent,
 	type CompleteRequest,
 	columnOf,
@@ -23,6 +24,7 @@ import {
 	type DispatchEnv,
 	type HeartbeatReply,
 	type HeartbeatRequest,
+	isAgentActor,
 	leaseState,
 	type NextReply,
 	type NextRequest,
@@ -36,11 +38,11 @@ import {
 import {
 	type RoutingRule,
 	type RunnerState,
-	requirementsOf,
 	route,
 	selectBead,
 	selectWaiter,
 } from "@mastermind/router";
+import { envOf } from "../beads/env.ts";
 import type { Work } from "./work.ts";
 
 /** How long `next` waits for work before it answers `{dispatch: null}`. */
@@ -77,12 +79,25 @@ export type DispatcherOptions = {
 	onError?: (error: unknown) => void;
 };
 
+/** Read from the bead's labels: repo:, ref:, provider:, req: (see beads/env.ts). */
 export function defaultEnv(bead: Bead): DispatchEnv {
-	return { repo: "", ref: "main", requires: requirementsOf(bead) };
+	return envOf(bead);
 }
 
-export function promptOf(bead: Bead): string {
-	return bead.description ? `${bead.title}\n\n${bead.description}` : bead.title;
+/** Title, description, acceptance, then the notes humans left on the bead. */
+export function promptOf(
+	bead: Bead,
+	notes: readonly BeadComment[] = [],
+): string {
+	const parts = [bead.title];
+	if (bead.description) parts.push(bead.description);
+	if (bead.acceptance) parts.push(`Acceptance:\n${bead.acceptance}`);
+	if (notes.length) {
+		parts.push(
+			`Notes:\n${notes.map((n) => `- ${n.author} (${n.createdAt}): ${n.text}`).join("\n")}`,
+		);
+	}
+	return parts.join("\n\n");
 }
 
 type Waiter = RunnerState & {
@@ -418,8 +433,21 @@ export class Dispatcher {
 			lease: claimed.lease,
 			stage: "work",
 			env: (this.#opts.env ?? defaultEnv)(held, queue),
-			prompt: promptOf(held),
+			prompt: promptOf(held, await this.#notes(bead.id)),
 		};
+	}
+
+	/** Notes humans left on a bead (not runner reports); none when unreadable. */
+	async #notes(beadId: string): Promise<BeadComment[]> {
+		if (!this.#work.notes) return [];
+		try {
+			return (await this.#work.notes(beadId)).filter(
+				(c) => !isAgentActor(c.author),
+			);
+		} catch (error) {
+			this.#opts.onError?.(error);
+			return [];
+		}
 	}
 
 	/** The bead, if `actor` holds it; else conflict. */

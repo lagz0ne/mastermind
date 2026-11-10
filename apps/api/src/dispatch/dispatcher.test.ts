@@ -347,3 +347,48 @@ describe("observe", () => {
 		expect(errors.length).toBe(2);
 	});
 });
+
+describe("dispatch envelope from the bead (mm-210.26)", () => {
+	test("env comes from repo:/ref:/provider:/req: labels; prompt has acceptance and human notes", async () => {
+		const { d, work } = setup();
+		work.add(
+			{
+				id: "mm-9",
+				description: "do it",
+				acceptance: "tests pass",
+				labels: [
+					"repo:https://github.com/x/y.git",
+					"ref:dev",
+					"provider:claude",
+				],
+			},
+			"build",
+		);
+		work.notes = async (id) => [
+			{
+				id: "n1",
+				beadId: id,
+				author: "duke",
+				text: "use bun",
+				createdAt: "t1",
+			},
+			{
+				id: "n2",
+				beadId: id,
+				author: "alice/old",
+				text: "a report",
+				createdAt: "t2",
+			},
+		];
+		const { dispatch } = await d.next("alice", "build", runner("laptop"));
+		expect(dispatch?.env).toEqual({
+			repo: "https://github.com/x/y.git",
+			ref: "dev",
+			provider: "claude",
+			requires: [],
+		});
+		expect(dispatch?.prompt).toBe(
+			"mm-9\n\ndo it\n\nAcceptance:\ntests pass\n\nNotes:\n- duke (t1): use bun",
+		);
+	});
+});
