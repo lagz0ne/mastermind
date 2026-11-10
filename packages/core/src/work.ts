@@ -34,7 +34,7 @@ export type Bead = {
 	priority: Priority;
 	/** bd issue type: task, bug, feature, epic, ... */
 	type: string;
-	/** The actor that holds the bead, as `<user>/<agent>` for dispatched work. */
+	/** The actor that holds the bead, as `<account>/<agent>` for dispatched work. */
 	assignee?: string;
 	labels: string[];
 	/** True when an open dependency blocks the bead, whatever its status says. */
