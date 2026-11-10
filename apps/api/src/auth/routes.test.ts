@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { MemoryKv } from "./memory-kv.ts";
-import { authRoutes, CSRF_HEADER, SESSION_COOKIE } from "./routes.ts";
+import {
+	authRoutes,
+	CSRF_HEADER,
+	LOGIN_COOKIE,
+	SESSION_COOKIE,
+} from "./routes.ts";
 import { Auth } from "./service.ts";
 
 const URL_BASE = "https://mm.example";
@@ -173,4 +178,118 @@ test("routes answer 503 until auth is ready", async () => {
 	});
 	const res = await routes["/api/auth/login"].POST(post({ token: "mml_x" }));
 	expect(res.status).toBe(503);
+});
+
+describe("login by code (routes)", () => {
+	const OPERATOR_KEY = "op-key-for-tests";
+	function withOperator(operatorKey?: string) {
+		const auth = new Auth({
+			accounts: new MemoryKv(),
+			serviceAccounts: new MemoryKv(),
+			tokens: new MemoryKv(),
+			sessions: new MemoryKv(),
+		});
+		const routes = authRoutes(auth, {
+			publicUrl: URL_BASE,
+			csrfSecret: "test-secret",
+			operatorKey,
+		});
+		return { auth, routes };
+	}
+	const cookieOf = (res: Response, name: string) =>
+		res.headers
+			.getSetCookie()
+			.find((c) => c.startsWith(`${name}=`))
+			?.split(";")[0] ?? "";
+	const poll = (
+		routes: ReturnType<typeof withOperator>["routes"],
+		cookie: string,
+	) =>
+		routes["/api/auth/login/poll"].GET(
+			new Request(`${URL_BASE}/x`, { headers: { cookie } }),
+		);
+
+	test("start, operator approve, poll: session cookie once", async () => {
+		const { routes } = withOperator(OPERATOR_KEY);
+		const start = await routes["/api/auth/login/start"].POST(
+			post({}, { "user-agent": "Firefox" }),
+		);
+		expect(start.status).toBe(201);
+		const { code } = (await start.json()) as { code: string };
+		expect(code).toMatch(/^[A-Z2-9]{4}-[A-Z2-9]{4}$/);
+		const set = start.headers.get("set-cookie") ?? "";
+		expect(set).toStartWith(`${LOGIN_COOKIE}=`);
+		expect(set).toContain("HttpOnly");
+		expect(set).toContain("Secure");
+		const pending = cookieOf(start, LOGIN_COOKIE);
+		expect(await (await poll(routes, pending)).json()).toMatchObject({
+			status: "pending",
+		});
+
+		const approve = await routes["/api/auth/login/approve"].POST(
+			post(
+				{ code, account: "duke" },
+				{ authorization: `Bearer ${OPERATOR_KEY}` },
+			),
+		);
+		expect(approve.status).toBe(200);
+		expect(await approve.json()).toMatchObject({
+			account: "duke",
+			created: true,
+			userAgent: "Firefox",
+		});
+
+		const done = await poll(routes, pending);
+		expect(await done.json()).toEqual({ status: "approved", account: "duke" });
+		expect(cookieOf(done, SESSION_COOKIE)).not.toBe(`${SESSION_COOKIE}=`);
+		expect(cookieOf(done, LOGIN_COOKIE)).toBe(`${LOGIN_COOKIE}=`);
+		expect(await (await poll(routes, pending)).json()).toEqual({
+			status: "expired",
+		});
+	});
+
+	test("a wrong operator key, or none configured, is refused", async () => {
+		for (const key of [OPERATOR_KEY, undefined]) {
+			const { routes } = withOperator(key);
+			const start = await routes["/api/auth/login/start"].POST(post({}));
+			const { code } = (await start.json()) as { code: string };
+			const res = await routes["/api/auth/login/approve"].POST(
+				post({ code, account: "duke" }, { authorization: "Bearer nope" }),
+			);
+			expect(res.status).toBe(401);
+		}
+	});
+
+	test("an account approves with its session and CSRF token", async () => {
+		const { routes, cookie, csrf } = await login();
+		const start = await routes["/api/auth/login/start"].POST(post({}));
+		const { code } = (await start.json()) as { code: string };
+		const noCsrf = await routes["/api/auth/login/approve"].POST(
+			post({ code, account: "bob" }, { cookie }),
+		);
+		expect(noCsrf.status).toBe(403);
+		const ok = await routes["/api/auth/login/approve"].POST(
+			post({ code, account: "bob" }, { cookie, [CSRF_HEADER]: csrf }),
+		);
+		expect(await ok.json()).toMatchObject({ account: "bob", created: true });
+		const done = await poll(routes, cookieOf(start, LOGIN_COOKIE));
+		expect(await done.json()).toEqual({ status: "approved", account: "bob" });
+	});
+
+	test("a wrong code says nothing about other codes; approve is rate limited", async () => {
+		const { routes } = withOperator(OPERATOR_KEY);
+		const statuses: number[] = [];
+		for (let i = 0; i < 25; i++) {
+			const res = await routes["/api/auth/login/approve"].POST(
+				post(
+					{ code: "AAAA-AAAA", account: "duke" },
+					{ authorization: `Bearer ${OPERATOR_KEY}` },
+				),
+			);
+			statuses.push(res.status);
+			if (i === 0) expect(await res.json()).toEqual({ error: "no such code" });
+		}
+		expect(statuses.slice(0, 20).every((s) => s === 404)).toBe(true);
+		expect(statuses.at(-1)).toBe(429);
+	});
 });

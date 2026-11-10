@@ -26,7 +26,6 @@ describe.skipIf(!bin)("auth against nats-server", () => {
 	const ws = `ws://127.0.0.1:${base + 2}`;
 	let server: ReturnType<typeof Bun.spawn> | undefined;
 	let svc: AuthService;
-	let firstUrl = "";
 	const open: NatsConnection[] = [];
 
 	beforeAll(async () => {
@@ -60,10 +59,7 @@ describe.skipIf(!bin)("auth against nats-server", () => {
 			authPassword: PASSWORD,
 			issuerSeed: new TextDecoder().decode(issuer.getSeed()),
 			publicUrl: "https://mm.example",
-			log: (line) => {
-				const m = /first login \(single use\): (\S+)/.exec(line);
-				if (m?.[1]) firstUrl = m[1];
-			},
+			log: () => {},
 		});
 		// What the dispatcher does: serve next for every account.
 		serve(svc.app, "mm.u.*.q.*.next", SERVICE_QUEUE, (_req, msg) => ({
@@ -91,28 +87,23 @@ describe.skipIf(!bin)("auth against nats-server", () => {
 		return nc;
 	};
 
-	test("a second start with no account rotates the token on JetStream KV", async () => {
-		const old = firstUrl.split("#")[1] as string;
-		const fresh = (await svc.auth.bootstrap()) as string;
-		expect(fresh).toStartWith("mml_");
-		expect(fresh).not.toBe(old);
-		expect(await svc.auth.login(old)).toBeNull();
-		firstUrl = `https://mm.example/login#${fresh}`;
-	});
-
-	test("the first-start login URL works exactly once", async () => {
-		expect(firstUrl).toStartWith("https://mm.example/login#mml_");
-		const token = firstUrl.split("#")[1] as string;
-		expect((await svc.auth.login(token))?.account).toBe("admin");
-		expect(await svc.auth.login(token)).toBeNull();
-	});
-
-	test("N parallel consumes of one token on JetStream KV: one winner", async () => {
-		const token = await svc.auth.loginToken("admin");
-		const results = await Promise.all(
-			Array.from({ length: 10 }, () => svc.auth.login(token)),
+	test("login by code on JetStream KV: N approvals and N polls, one session", async () => {
+		const { code, cookie } = await svc.auth.startLogin("test-browser");
+		const approvals = await Promise.allSettled(
+			Array.from({ length: 10 }, () =>
+				svc.auth.approveLogin(code, "admin", { kind: "operator" }),
+			),
 		);
-		expect(results.filter(Boolean)).toHaveLength(1);
+		expect(approvals.filter((a) => a.status === "fulfilled")).toHaveLength(1);
+		const polls = await Promise.all(
+			Array.from({ length: 10 }, () => svc.auth.pollLogin(cookie)),
+		);
+		const won = polls.filter((p) => p.status === "approved");
+		expect(won).toHaveLength(1);
+		expect(won[0]).toMatchObject({ account: "admin" });
+		await expect(
+			svc.auth.approveLogin(code, "admin", { kind: "operator" }),
+		).rejects.toThrow("no such code");
 	});
 
 	test("a runner enrols, connects, and stays inside its account", async () => {

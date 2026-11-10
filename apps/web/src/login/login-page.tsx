@@ -1,66 +1,215 @@
 import type { PeopleSetup } from "@mastermind/core";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { loadSetup, setMe } from "../session/session.ts";
-import { type LoginResult, login, tokenFromHash } from "./login.ts";
+import {
+	type CodeStart,
+	clock,
+	type LoginResult,
+	login,
+	pollCode,
+	secondsLeft,
+	startCode,
+	tokenFromHash,
+} from "./login.ts";
+
+type Phase =
+	| { kind: "starting" }
+	| CodeStart
+	| { kind: "expired" }
+	| { kind: "ok"; account: string }
+	| { kind: "skip" };
+
+const POLL_MS = 1500;
 
 export function LoginPage() {
 	const navigate = useNavigate();
-	const [result, setResult] = useState<LoginResult | null>(null);
+	const [phase, setPhase] = useState<Phase>({ kind: "starting" });
+	const [legacy, setLegacy] = useState<LoginResult | null>(null);
 	const [setup, setSetup] = useState<PeopleSetup | null>(null);
 	const started = useRef(false);
 
+	const done = useCallback(
+		(account: string) => {
+			setMe({ account, auth: "on" });
+			void navigate({ to: "/board" });
+		},
+		[navigate],
+	);
+
+	const newCode = useCallback(async () => {
+		setPhase({ kind: "starting" });
+		setPhase(await startCode());
+	}, []);
+
 	useEffect(() => {
-		// Strict mode runs effects twice; the token is single use.
+		// Strict mode runs effects twice; a code and a link are single use.
 		if (started.current) return;
 		started.current = true;
 		const token = tokenFromHash(window.location.hash);
-		// Take the token out of the address bar and the history.
-		if (token) window.history.replaceState(null, "", window.location.pathname);
-		login(token).then((r) => {
-			setResult(r);
-			if (r.kind === "ok") {
-				setMe({ account: r.account, auth: "on" });
-				void navigate({ to: "/board" });
-			}
+		if (token) {
+			// An older login link: take it out of the address bar and the history.
+			window.history.replaceState(null, "", window.location.pathname);
+			setPhase({ kind: "skip" });
+			void login(token).then((r) => {
+				setLegacy(r);
+				if (r.kind === "ok") done(r.account);
+			});
+			return;
+		}
+		void loadSetup().then((s) => {
+			setSetup(s);
+			if (s?.auth === "off" || s?.auth === "unconfigured")
+				setPhase({ kind: "skip" });
+			else void newCode();
 		});
-		void loadSetup().then(setSetup);
-	}, [navigate]);
+	}, [done, newCode]);
+
+	// Poll while a code is shown.
+	useEffect(() => {
+		if (phase.kind !== "code") return;
+		let stop = false;
+		const timer = setInterval(async () => {
+			const r = await pollCode();
+			if (stop) return;
+			if (r.kind === "ok") {
+				setPhase(r);
+				done(r.account);
+			} else if (r.kind === "expired") setPhase({ kind: "expired" });
+		}, POLL_MS);
+		return () => {
+			stop = true;
+			clearInterval(timer);
+		};
+	}, [phase, done]);
 
 	return (
 		<div className="mx-auto max-w-sm px-4 py-10">
 			<h1 className="font-bold text-lg">Log in</h1>
-			<p className="mt-2 text-muted-foreground text-sm" role="status">
-				{message(result)}
-			</p>
-			{result?.kind === "ok" ? null : <SetupHint setup={setup} />}
-			{result?.kind === "ok" ? null : (
+			{legacy ? (
+				<p className="mt-2 text-muted-foreground text-sm" role="status">
+					{legacyMessage(legacy)}
+				</p>
+			) : (
+				<CodePanel phase={phase} onNewCode={newCode} />
+			)}
+			{phase.kind === "ok" || legacy?.kind === "ok" ? null : (
+				<SetupHint setup={setup} />
+			)}
+			{phase.kind === "skip" && legacy?.kind !== "ok" ? (
 				<p className="mt-4 text-sm">
 					<Link to="/board" className="underline">
 						Go to the board
 					</Link>
 				</p>
-			)}
+			) : null}
 		</div>
 	);
 }
 
-function message(r: LoginResult | null): string {
-	switch (r?.kind) {
-		case undefined:
-			return "Logging in…";
+function CodePanel({
+	phase,
+	onNewCode,
+}: {
+	phase: Phase;
+	onNewCode: () => void;
+}) {
+	switch (phase.kind) {
+		case "skip":
+			return null;
+		case "starting":
+			return (
+				<p className="mt-2 text-muted-foreground text-sm" role="status">
+					Getting a login code…
+				</p>
+			);
+		case "ok":
+			return (
+				<p className="mt-2 text-sm" role="status">
+					Logged in as {phase.account}.
+				</p>
+			);
+		case "error":
+			return (
+				<div className="mt-2 text-sm" role="status">
+					<p>Could not get a login code: {phase.message}</p>
+					<NewCode onClick={onNewCode} />
+				</div>
+			);
+		case "expired":
+			return (
+				<div className="mt-2 text-sm" role="status">
+					<p>This code expired or was used. Get a new one.</p>
+					<NewCode onClick={onNewCode} />
+				</div>
+			);
+		case "code":
+			return (
+				<ShowCode
+					code={phase.code}
+					expiresAt={phase.expiresAt}
+					onNewCode={onNewCode}
+				/>
+			);
+	}
+}
+
+function ShowCode({
+	code,
+	expiresAt,
+	onNewCode,
+}: {
+	code: string;
+	expiresAt: string;
+	onNewCode: () => void;
+}) {
+	const [left, setLeft] = useState(() => secondsLeft(expiresAt));
+	useEffect(() => {
+		const t = setInterval(() => setLeft(secondsLeft(expiresAt)), 1000);
+		return () => clearInterval(t);
+	}, [expiresAt]);
+	return (
+		<div className="mt-2 text-sm">
+			<p>Tell this code to the operator, or to a person who has an account.</p>
+			<span className="sr-only">Login code:</span>
+			<p className="my-4 border-foreground border-y-2 py-3 text-center font-bold font-mono text-4xl tracking-widest">
+				{code}
+			</p>
+			<p className="text-muted-foreground" role="status">
+				Waiting for approval. This page logs you in by itself.{" "}
+				{left > 0 ? `The code expires in ${clock(left)}.` : "The code expired."}
+			</p>
+			<NewCode onClick={onNewCode} />
+		</div>
+	);
+}
+
+function NewCode({ onClick }: { onClick: () => void }) {
+	return (
+		<button
+			type="button"
+			className="mt-3 border border-foreground px-2 py-1 text-sm hover:bg-foreground hover:text-background"
+			onClick={onClick}
+		>
+			New code
+		</button>
+	);
+}
+
+function legacyMessage(r: LoginResult): string {
+	switch (r.kind) {
 		case "no-token":
-			return "Open the login link that you received. Each link works once.";
+			return "";
 		case "ok":
 			return `Logged in as ${r.account}.`;
 		case "refused":
-			return "This login link is used or expired. Ask for a new one.";
+			return "This login link is used or expired. Open /login to get a code.";
 		case "error":
 			return `Login failed: ${r.message}`;
 	}
 }
 
-/** Why there may be no link yet: first start, auth off, or not configured. */
+/** Auth off or not configured, or no account yet. */
 function SetupHint({ setup }: { setup: PeopleSetup | null }) {
 	if (!setup) return null;
 	if (setup.auth === "off")
@@ -82,11 +231,12 @@ function SetupHint({ setup }: { setup: PeopleSetup | null }) {
 			<div className="mt-4 border-foreground border-t-2 pt-2 text-sm">
 				<p className="font-semibold">No account exists yet.</p>
 				<p className="mt-1">
-					Each start of the server writes a new login link for the first account
-					(<code>admin</code>) to its log, and the link of the previous start
-					stops working. The operator gets the newest link with{" "}
-					<code>bun deploy/dokploy.ts first-login</code>. Open it at once: it
-					works once.
+					The operator approves the first login:{" "}
+					<code>
+						bun deploy/dokploy.ts login-approve &lt;code&gt; --account
+						&lt;name&gt;
+					</code>
+					. That makes the account.
 				</p>
 			</div>
 		);

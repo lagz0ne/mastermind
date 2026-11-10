@@ -16,9 +16,6 @@ import { hmac } from "./secrets.ts";
 import { Auth, type AuthStores, BUCKETS } from "./service.ts";
 import { accountGuard, type RequireAccount } from "./session.ts";
 
-/** Prefix of the first-login log lines (deploy/dokploy.ts first-login looks for it). */
-export const FIRST_LOGIN = "auth: first login";
-
 export type AuthConfig = {
 	/** NATS URL(s) for Mastermind (internal network), ws:// or wss://. */
 	natsUrl: string;
@@ -33,6 +30,11 @@ export type AuthConfig = {
 	publicNatsUrl?: string;
 	/** Id of the first account. Default `admin`. */
 	firstAccount?: string;
+	/**
+	 * MASTERMIND_OPERATOR_KEY: the operator approves login codes with it
+	 * (`bun deploy/dokploy.ts login-approve`). Unset: only accounts approve.
+	 */
+	operatorKey?: string;
 	log?: (line: string) => void;
 };
 
@@ -46,8 +48,8 @@ export type AuthService = {
 
 /**
  * Start auth: answer the NATS auth callout, open Mastermind's own APP and SYS
- * connections through it, open the KV buckets, and on first start log a
- * single-use login URL for the first account. On failure nothing stays open.
+ * connections through it, and open the KV buckets. Nothing secret is logged:
+ * a login is a code that an approver approves. On failure nothing stays open.
  */
 export async function startAuth(cfg: AuthConfig): Promise<AuthService> {
 	const log = cfg.log ?? console.log;
@@ -124,15 +126,6 @@ export async function startAuth(cfg: AuthConfig): Promise<AuthService> {
 		});
 		auth = ready;
 
-		// While no account exists, every start logs a new URL and the previous
-		// one stops working. Only stdout gets it: `log` is not the OTLP exporter.
-		// `bun deploy/dokploy.ts first-login` reads these lines back.
-		const first = await ready.bootstrap();
-		if (first)
-			log(`${FIRST_LOGIN} (single use): ${cfg.publicUrl}/login#${first}`);
-		else if ((await stores.accounts.list()).length > 0)
-			log(`${FIRST_LOGIN}: not needed, an account exists`);
-
 		return {
 			app,
 			auth: ready,
@@ -156,6 +149,7 @@ function routesFor(cfg: AuthConfig, auth: () => Auth | null) {
 		publicUrl: cfg.publicUrl,
 		csrfSecret: csrfSecret(cfg),
 		natsUrl: cfg.publicNatsUrl,
+		operatorKey: cfg.operatorKey,
 		onError: (error) => log(`auth: ${error}`),
 	});
 }

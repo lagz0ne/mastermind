@@ -1,8 +1,20 @@
-import { type Auth, AuthError, BUCKETS } from "./service.ts";
+import { formatCode } from "./code.ts";
+import { clientIp, RateLimit } from "./rate-limit.ts";
+import { sameSecret, sha256 } from "./secrets.ts";
+import {
+	type Approver,
+	type Auth,
+	AuthError,
+	BUCKETS,
+	LOGIN_CODE_TTL_MS,
+} from "./service.ts";
 
 /**
  * HTTP side of auth:
  *
+ *   POST   /api/auth/login/start           -> {code, expiresAt} + pending-login cookie
+ *   POST   /api/auth/login/approve         {code, account}; operator (Bearer key) or a session
+ *   GET    /api/auth/login/poll            pending-login cookie -> {status}; session cookie once approved
  *   POST   /api/auth/login                 {token} -> session cookie
  *   POST   /api/auth/logout
  *   GET    /api/auth/me                    -> {account, csrf}
@@ -16,6 +28,8 @@ import { type Auth, AuthError, BUCKETS } from "./service.ts";
 
 export const SESSION_COOKIE = "mm_session";
 export const CSRF_HEADER = "x-csrf-token";
+/** The browser's half of a pending login (`<code>.<secret>`). */
+export const LOGIN_COOKIE = "mm_login";
 
 export type AuthRoutesOptions = {
 	/** Public origin of the UI, for login links (`https://host`). */
@@ -24,6 +38,8 @@ export type AuthRoutesOptions = {
 	csrfSecret: string;
 	/** Public NATS WebSocket URL, returned to a runner when it enrols. */
 	natsUrl?: string;
+	/** Bearer key of the operator for /api/auth/login/approve. Unset: no operator. */
+	operatorKey?: string;
 	onError?: (error: unknown) => void;
 };
 
@@ -55,6 +71,16 @@ export function sessionCookie(value: string, secure: boolean, maxAge: number) {
 	}).serialize();
 }
 
+function loginCookie(value: string, secure: boolean, maxAge: number) {
+	return new Bun.Cookie(LOGIN_COOKIE, value, {
+		httpOnly: true,
+		secure,
+		sameSite: "lax",
+		path: "/api/auth/login",
+		maxAge,
+	}).serialize();
+}
+
 /**
  * Routes for Bun.serve. `auth` may be a getter: until it returns an Auth
  * (NATS still connecting), every route answers 503.
@@ -68,8 +94,14 @@ export function authRoutes(
 	const maxAge = Math.floor(BUCKETS.sessions.ttlMs / 1000);
 	const loginUrl = (token: string) => `${opts.publicUrl}/login#${token}`;
 
-	const sessionOf = (req: Request) =>
-		new Bun.CookieMap(req.headers.get("cookie") ?? "").get(SESSION_COOKIE);
+	const cookieOf = (req: Request, name: string) =>
+		new Bun.CookieMap(req.headers.get("cookie") ?? "").get(name);
+	const sessionOf = (req: Request) => cookieOf(req, SESSION_COOKIE);
+	const operatorHash = opts.operatorKey ? sha256(opts.operatorKey) : null;
+	// Per replica. Start: per address. Approve: per address and per approver.
+	const startLimit = new RateLimit(20, 60_000);
+	const approveLimit = new RateLimit(20, 60_000);
+	const limited = () => fail(429, "too many requests; wait a minute");
 
 	/** Wrap a handler: map AuthError to a status, hide other errors. */
 	const handle =
@@ -81,9 +113,12 @@ export function authRoutes(
 				return await fn(req, auth);
 			} catch (error) {
 				if (error instanceof AuthError) {
-					const status = { bad_request: 400, conflict: 409, not_found: 404 }[
-						error.code
-					];
+					const status = {
+						bad_request: 400,
+						conflict: 409,
+						forbidden: 403,
+						not_found: 404,
+					}[error.code];
 					return fail(status, error.message);
 				}
 				opts.onError?.(error);
@@ -107,7 +142,69 @@ export function authRoutes(
 			return fn(req, account, auth);
 		});
 
+	/** Approve as the operator (Bearer key) or as the session's account (with CSRF). */
+	const approve = handle(async (req, auth) => {
+		if (!approveLimit.take(`ip:${clientIp(req)}`)) return limited();
+		let approver: Approver;
+		const bearer = /^Bearer\s+(\S+)$/i.exec(
+			req.headers.get("authorization") ?? "",
+		)?.[1];
+		if (bearer) {
+			if (!operatorHash || !sameSecret(operatorHash, sha256(bearer)))
+				return fail(401, "bad operator key");
+			approver = { kind: "operator" };
+		} else {
+			const account = await auth.session(sessionOf(req));
+			if (!account) return fail(401, "not logged in");
+			const t = req.headers.get(CSRF_HEADER);
+			if (!t || !Bun.CSRF.verify(t, { secret: opts.csrfSecret }))
+				return fail(403, "bad csrf token");
+			approver = { kind: "account", account };
+		}
+		const who = approver.kind === "operator" ? "operator" : approver.account;
+		if (!approveLimit.take(`by:${who}`)) return limited();
+		const b = await body(req);
+		if (typeof b?.code !== "string" || typeof b.account !== "string")
+			return fail(400, "code and account required");
+		return json(await auth.approveLogin(b.code, b.account, approver));
+	});
+
 	return {
+		"/api/auth/login/start": {
+			POST: handle(async (req, auth) => {
+				if (!startLimit.take(clientIp(req))) return limited();
+				const s = await auth.startLogin(req.headers.get("user-agent") ?? "");
+				return json({ code: formatCode(s.code), expiresAt: s.expiresAt }, 201, {
+					"set-cookie": loginCookie(
+						s.cookie,
+						secure,
+						Math.floor(LOGIN_CODE_TTL_MS / 1000),
+					),
+				});
+			}),
+		},
+		"/api/auth/login/approve": { POST: approve },
+		"/api/auth/login/poll": {
+			GET: handle(async (req, auth) => {
+				const r = await auth.pollLogin(cookieOf(req, LOGIN_COOKIE));
+				if (r.status === "pending")
+					return json(r, 200, { "cache-control": "no-store" });
+				const headers = new Headers({
+					"set-cookie": loginCookie("", secure, 0),
+					"cache-control": "no-store",
+				});
+				if (r.status === "expired")
+					return Response.json({ status: "expired" }, { headers });
+				headers.append(
+					"set-cookie",
+					sessionCookie(r.sessionId, secure, maxAge),
+				);
+				return Response.json(
+					{ status: "approved", account: r.account },
+					{ headers },
+				);
+			}),
+		},
 		"/api/auth/login": {
 			POST: handle(async (req, auth) => {
 				const token = (await body(req))?.token;

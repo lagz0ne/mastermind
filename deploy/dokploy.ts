@@ -8,22 +8,27 @@
 //   bun deploy/dokploy.ts release <sha|latest>
 //                                    pin the app image to the CI tag of <sha>, deploy it, show the
 //                                    Dokploy queue and status, fail with the log tail, wait for health
-//   bun deploy/dokploy.ts first-login  print the newest first-login URL from the app log (no account yet)
+//   bun deploy/dokploy.ts login-approve <code> --account <name>
+//                                    approve a login code shown on <public url>/login (the operator)
 //
 // Configuration, nothing is built in:
 //   deploy/site.json       the site: Dokploy URL, project, service names, public host.
 //                          MASTERMIND_SITE=<path> selects another file for another site.
 //   DOKPLOY_API_KEY        the Dokploy API key, or
 //   DOKPLOY_API_KEY_FILE   a file that holds it.
-// Secrets live only in Dokploy. This script never prints a secret value; the one
-// exception is `first-login`, which prints the single-use first-login URL on purpose.
+// Secrets live only in Dokploy. This script never prints a secret value.
 
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { createAccount, fromSeed } from "@nats-io/nkeys";
 import { probe } from "./nats/smoke.ts";
 import { mergeEnv, parseEnv, serializeEnv } from "./src/env.ts";
-import { FIRST_LOGIN, newestFirstLogin } from "./src/first-login.ts";
+import {
+	type Approval,
+	approveError,
+	describeApproval,
+	parseApproveArgs,
+} from "./src/login-approve.ts";
 import {
 	type Deployment,
 	describeQueue,
@@ -82,7 +87,6 @@ type App = Service & {
 	buildSecrets: string | null;
 	createEnvFile: boolean;
 	refreshToken: string;
-	serverId?: string | null;
 	mounts?: { mountPath: string }[];
 	dockerImage?: string | null;
 	username?: string | null;
@@ -285,6 +289,8 @@ async function apply() {
 			NATS_AUTH_PASSWORD: secret,
 			NATS_ISSUER_SEED: () =>
 				new TextDecoder().decode(createAccount().getSeed()),
+			// The operator approves login codes with it (login-approve).
+			MASTERMIND_OPERATOR_KEY: secret,
 		},
 	});
 	const natsPassword = withSecrets.env.get("NATS_AUTH_PASSWORD") ?? "";
@@ -580,125 +586,50 @@ async function secrets() {
 }
 
 /**
- * Read up to `tail` lines of a container or swarm service log through the
- * Dokploy log socket (the one its UI uses), filtered by `search`. The socket
- * follows the log, so stop when it goes quiet.
+ * The operator approves a login code that a browser shows on /login. The
+ * operator key comes from the app env in Dokploy and is never printed.
  */
-async function dockerLogs(q: {
-	containerId: string;
-	runType: "swarm" | "native";
-	search: string;
-	serverId?: string | null;
-	tail?: number;
-}): Promise<string> {
-	key ??= await apiKey();
-	const params = new URLSearchParams({
-		containerId: q.containerId,
-		tail: String(q.tail ?? 10_000),
-		since: "all",
-		search: q.search,
-		runType: q.runType,
-	});
-	if (q.serverId) params.set("serverId", q.serverId);
-	const url = `${cfg.dokployUrl.replace(/^http/, "ws")}/docker-container-logs?${params}`;
-	const ws = new WebSocket(url, { headers: { "x-api-key": key } });
-	let text = "";
-	return await new Promise<string>((resolve, reject) => {
-		let idle: Timer | undefined;
-		const done = () => {
-			clearTimeout(idle);
-			clearTimeout(cap);
-			ws.close();
-			resolve(text);
-		};
-		const quiet = () => {
-			clearTimeout(idle);
-			idle = setTimeout(done, 3_000);
-		};
-		const cap = setTimeout(done, 30_000);
-		ws.onopen = quiet;
-		ws.onmessage = (e) => {
-			text += String(e.data);
-			quiet();
-		};
-		ws.onerror = () => {
-			clearTimeout(idle);
-			clearTimeout(cap);
-			reject(new Error(`dokploy log socket failed for ${q.containerId}`));
-		};
-		ws.onclose = done;
-	});
-}
-
-/**
- * While no account exists, every start of the app logs a new single-use
- * login URL (and the previous one stops working). Print the newest one.
- */
-async function firstLogin() {
-	const setup = (await fetch(`${cfg.publicUrl}/api/people/setup`, {
-		signal: AbortSignal.timeout(10_000),
-	})
-		.then((r) => r.json())
-		.catch(() => null)) as { auth?: string; firstLogin?: boolean } | null;
-	if (setup?.auth === "on" && setup.firstLogin === false) {
-		log(
-			"first-login: an account exists, so no first-login token is minted. Ask an account to invite you.",
+async function loginApprove(argv: string[]) {
+	const args = parseApproveArgs(argv);
+	if (!args)
+		throw new Error(
+			"usage: bun deploy/dokploy.ts login-approve <code> --account <name>",
 		);
-		return;
-	}
-	if (setup && setup.auth !== "on")
-		log(`first-login: auth on ${cfg.publicUrl} is '${setup.auth}'`);
-
 	const { applicationId } = await findProject();
 	if (!applicationId) throw new Error(`no app '${cfg.app}' in Dokploy`);
 	const app = await api<App>("application.one", { applicationId });
-	const search = FIRST_LOGIN;
-	let found = newestFirstLogin(
-		await dockerLogs({
-			containerId: app.appName,
-			runType: "swarm",
-			search,
-			serverId: app.serverId,
-		}),
-	);
-	if (found.kind === "none") {
-		// Not a swarm service: read each container of the app.
-		const containers = await api<{ containerId: string }[]>(
-			"docker.getContainersByAppNameMatch",
-			{
-				appName: app.appName,
-				...(app.serverId ? { serverId: app.serverId } : {}),
-			},
-		);
-		let all = "";
-		for (const c of containers)
-			all += `${await dockerLogs({ containerId: c.containerId, runType: "native", search, serverId: app.serverId })}\n`;
-		found = newestFirstLogin(all);
-	}
-	if (found.kind === "url") {
-		log(
-			`first-login: open this once (single use; a restart of the app replaces it)${found.at ? `, logged ${found.at}` : ""}:`,
-		);
-		log(found.url);
-	} else if (found.kind === "not-needed")
-		log("first-login: an account exists, so no first-login token is minted.");
-	else
+	const operatorKey = parseEnv(app.env).get("MASTERMIND_OPERATOR_KEY");
+	if (!operatorKey)
 		throw new Error(
-			"no first-login line in the app log. Restart the app (bun deploy/dokploy.ts apply, or redeploy) and run this again.",
+			"MASTERMIND_OPERATOR_KEY is not in the app env: run 'bun deploy/dokploy.ts apply' first",
 		);
+	const res = await fetch(`${cfg.publicUrl}/api/auth/login/approve`, {
+		method: "POST",
+		headers: {
+			authorization: `Bearer ${operatorKey}`,
+			"content-type": "application/json",
+		},
+		body: JSON.stringify(args),
+		signal: AbortSignal.timeout(15_000),
+	});
+	const body = (await res.json().catch(() => ({}))) as Partial<Approval> & {
+		error?: string;
+	};
+	if (!res.ok) throw new Error(approveError(res.status, body.error ?? ""));
+	log(describeApproval(body as Approval));
 }
 
 const commands: Record<string, () => Promise<void>> = {
 	status,
 	apply,
 	secrets,
-	"first-login": firstLogin,
+	"login-approve": () => loginApprove(process.argv.slice(3)),
 	release: () => release(process.argv[3]),
 };
 const command = commands[process.argv[2] ?? ""];
 if (!command) {
 	console.error(
-		"usage: bun deploy/dokploy.ts status | apply | secrets | first-login | release <sha|latest>",
+		"usage: bun deploy/dokploy.ts status | apply | secrets | release <sha|latest> | login-approve <code> --account <name>",
 	);
 	process.exit(2);
 }

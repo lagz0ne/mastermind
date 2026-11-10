@@ -9,7 +9,7 @@ export DOKPLOY_API_KEY=...            # or DOKPLOY_API_KEY_FILE=<path to a file 
 bun deploy/dokploy.ts status          # what runs, env key names, health
 bun deploy/dokploy.ts apply           # create or update Dolt, NATS and the app env; deploy; verify
 bun deploy/dokploy.ts secrets         # redeploy hooks + PUBLIC_URL into the GitHub environment
-bun deploy/dokploy.ts first-login     # the single-use login URL for the first account (no account yet)
+bun deploy/dokploy.ts login-approve <code> --account <name>   # approve a login code shown on /login
 bun deploy/dokploy.ts release <sha>   # deploy the image of one commit (sha-<sha> tag), show queue/status/log
 bun deploy/dokploy.ts release latest  # unpin: back to :latest (what the app hook deploys)
 ```
@@ -160,24 +160,26 @@ Accounts: `AUTH` (one user, `mastermind`: the auth callout service), `APP` (JetS
 client), `SYS`. Every other login goes through the NATS auth callout: Mastermind answers
 `$SYS.REQ.USER.AUTH` and issues a user JWT for `APP`, signed with `NATS_ISSUER_SEED` (mm-210.12).
 
-### First start: the first login
+### Login: a code, approved by the operator or an account
 
-While no account exists, EVERY start of the app mints a new single-use login token for the first
-account (`admin`) and writes one line to the app log (stdout only, never to the OTLP log exporter):
+A login is a single-use code. Nothing secret goes to a log or a URL.
 
-```
-auth: first login (single use): https://<public url>/login#mml_...
-```
+1. The person opens `<public url>/login`. The page shows a code (`ABCD-EFGH`, valid 10 min) and
+   keeps a cookie that only this browser holds.
+2. The person tells the code to an approver:
+   - the operator (also for the first account, when no account exists):
+     ```bash
+     bun deploy/dokploy.ts login-approve ABCD-EFGH --account duke
+     ```
+     It reads `MASTERMIND_OPERATOR_KEY` from the app env through the Dokploy API (never printed)
+     and calls `POST /api/auth/login/approve`. The account is made if it does not exist. The reply
+     shows how old the code is and the browser's user agent: refuse a code that you do not expect.
+   - a logged-in account: for itself (another device) or for a new account name (an invite).
+3. The page polls and logs in within a few seconds. The code works once. Another browser that
+   knows the code gets nothing.
 
-The URL of the previous start stops working. Each green commit redeploys the app, so do not search
-the log by hand. Run this, then open the URL at once:
-
-```bash
-bun deploy/dokploy.ts first-login     # reads the app log through the Dokploy API; prints the newest URL
-```
-
-When an account exists, no token is minted, the app logs `auth: first login: not needed, ...`, and
-the command says so. More people come in by invite from a logged-in account.
+`apply` makes `MASTERMIND_OPERATOR_KEY` in the app env when it is missing. Without it, only
+accounts approve. Codes are case-insensitive and ignore `-` and spaces.
 
 **Safe state.** Until Mastermind runs the auth callout service, NATS refuses every client connection
 except the `mastermind` user, with `Authorization Violation`. This is correct. It is not an outage.
@@ -193,6 +195,7 @@ except the `mastermind` user, with `Authorization Violation`. This is correct. I
 | `NATS_WS_URL` | app | `ws://<nats host>:8080`: the internal WebSocket; `@mastermind/bus` connects over WebSocket only |
 | `PUBLIC_URL` | app | the public base URL of the site, from `deploy/site.json` |
 | `NATS_AUTH_USER` | app | `mastermind` |
+| `MASTERMIND_OPERATOR_KEY` | app | the operator's key to approve login codes. Secret, made by `apply`; read by `login-approve` |
 | `NATS_PUBLIC_WS_URL` | app | `wss://mastermind.vibea.dev/nats`; given to adapters |
 | `AUTH_DISABLED` | app, local dev only | `1`: with auth NOT configured, every `/api` request is account `local`. Ignored when auth is configured. Without auth and without this flag, `/api` routes outside `/api/auth` answer 503. Never set it in Dokploy |
 

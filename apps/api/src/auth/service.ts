@@ -1,4 +1,5 @@
 import { BusError, type Store } from "@mastermind/bus";
+import { normalizeCode, randomCode } from "./code.ts";
 import {
 	formatCredential,
 	isAccountId,
@@ -51,10 +52,45 @@ export type TokenRecord =
 	| { kind: "login"; account: string; create: boolean; by: string | null }
 	| { kind: "enrol"; account: string; name: string }
 	/**
+	 * A login started in a browser (login by code). Key: hash of the code.
+	 * `browser`: hash of the secret in that browser's cookie; only that
+	 * browser collects the session. `approved` is set once, by an approver.
+	 */
+	| {
+			kind: "pending";
+			browser: string;
+			createdAt: string;
+			userAgent: string;
+			approved: Approval | null;
+	  }
+	/**
 	 * Points at the current first-start token (`key`: its token key). Older
 	 * markers have no key.
 	 */
 	| { kind: "bootstrap"; key?: string };
+
+/** Who approved a pending login, for which account. `by` null = the operator. */
+export type Approval = { account: string; create: boolean; by: string | null };
+
+export type Approver =
+	| { kind: "operator" }
+	| { kind: "account"; account: string };
+
+/** What the approver sees, so that they can refuse a stranger's code. */
+export type ApproveResult = {
+	account: string;
+	created: boolean;
+	ageSeconds: number;
+	userAgent: string;
+};
+
+export type PollResult =
+	| { status: "pending"; expiresAt: string }
+	| { status: "expired" }
+	| { status: "approved"; account: string; sessionId: string };
+
+/** A pending login lives this long. */
+export const LOGIN_CODE_TTL_MS = 10 * 60 * 1000;
 
 export type Session = { account: string; createdAt: string };
 
@@ -73,7 +109,11 @@ export const BUCKETS = {
 	sessions: { name: "mm_sessions", ttlMs: 30 * 24 * 60 * 60 * 1000 },
 } as const;
 
-export type AuthErrorCode = "bad_request" | "conflict" | "not_found";
+export type AuthErrorCode =
+	| "bad_request"
+	| "conflict"
+	| "forbidden"
+	| "not_found";
 
 export class AuthError extends Error {
 	override name = "AuthError";
@@ -86,6 +126,9 @@ export class AuthError extends Error {
 }
 
 const BOOTSTRAP_KEY = "bootstrap";
+const pendingKey = (code: string) => `pending.${sha256(code)}`;
+/** One answer for a wrong, used and expired code: never say which. */
+const noSuchCode = () => new AuthError("not_found", "no such code");
 const tokenKey = (kind: "login" | "enrol", token: string) =>
 	`${kind}.${sha256(token)}`;
 const saKey = (account: string, id: string) => `${account}.${id}`;
@@ -159,6 +202,155 @@ export class Auth {
 			if (e?.value.kind === "login" && e.value.create && e.value.by === null)
 				await this.stores.tokens.delete(key, e.revision).catch(() => {});
 		}
+	}
+
+	/**
+	 * A browser starts a login: a code to read aloud, and a secret for that
+	 * browser's cookie (`<code>.<secret>`). Only hashes are stored.
+	 */
+	async startLogin(
+		userAgent: string,
+	): Promise<{ code: string; cookie: string; expiresAt: string }> {
+		const secret = randomSecret();
+		const createdAt = this.now();
+		for (;;) {
+			const code = randomCode();
+			try {
+				await this.stores.tokens.create(pendingKey(code), {
+					kind: "pending",
+					browser: sha256(secret),
+					createdAt: createdAt.toISOString(),
+					userAgent: userAgent.slice(0, 200),
+					approved: null,
+				});
+			} catch (err) {
+				if (isConflict(err)) continue;
+				throw err;
+			}
+			return {
+				code,
+				cookie: `${code}.${secret}`,
+				expiresAt: new Date(
+					createdAt.getTime() + LOGIN_CODE_TTL_MS,
+				).toISOString(),
+			};
+		}
+	}
+
+	/**
+	 * Approve the login of `code` for `account`. The operator may name any
+	 * account (it is created when missing). A logged-in account approves for
+	 * itself (another device) or for a new account name (an invite). Of many
+	 * concurrent approvals, one wins.
+	 */
+	async approveLogin(
+		codeInput: string,
+		account: string,
+		approver: Approver,
+	): Promise<ApproveResult> {
+		if (!isAccountId(account))
+			throw new AuthError("bad_request", "bad account id");
+		const exists = (await this.stores.accounts.get(account)) !== null;
+		let approval: Approval;
+		if (approver.kind === "operator")
+			approval = { account, create: !exists, by: null };
+		else if (approver.account === account)
+			approval = { account, create: false, by: account };
+		else if (exists)
+			throw new AuthError(
+				"forbidden",
+				`account ${account} exists; only it can approve its own logins`,
+			);
+		else approval = { account, create: true, by: approver.account };
+
+		const code = normalizeCode(codeInput);
+		if (!code) throw noSuchCode();
+		const e = await this.stores.tokens.get(pendingKey(code));
+		if (
+			e?.value.kind !== "pending" ||
+			e.value.approved ||
+			this.expired(e.value)
+		)
+			throw noSuchCode();
+		try {
+			await this.stores.tokens.update(
+				pendingKey(code),
+				{ ...e.value, approved: approval },
+				e.revision,
+			);
+		} catch (err) {
+			if (isConflict(err)) throw noSuchCode();
+			throw err;
+		}
+		return {
+			account,
+			created: approval.create,
+			ageSeconds: Math.max(
+				0,
+				Math.round(
+					(this.now().getTime() - Date.parse(e.value.createdAt)) / 1000,
+				),
+			),
+			userAgent: e.value.userAgent,
+		};
+	}
+
+	/**
+	 * The browser that started a login asks with its cookie. Once approved,
+	 * the pending login is consumed (one winner) and a session is made.
+	 */
+	async pollLogin(cookie: string | null | undefined): Promise<PollResult> {
+		const [codePart, secret] = (cookie ?? "").split(".", 2);
+		const code = normalizeCode(codePart ?? "");
+		if (!code || !secret) return { status: "expired" };
+		const key = pendingKey(code);
+		const e = await this.stores.tokens.get(key);
+		if (
+			e?.value.kind !== "pending" ||
+			!sameSecret(e.value.browser, sha256(secret)) ||
+			this.expired(e.value)
+		)
+			return { status: "expired" };
+		const { approved } = e.value;
+		if (!approved)
+			return {
+				status: "pending",
+				expiresAt: new Date(
+					Date.parse(e.value.createdAt) + LOGIN_CODE_TTL_MS,
+				).toISOString(),
+			};
+		try {
+			await this.stores.tokens.delete(key, e.revision);
+		} catch (err) {
+			if (isConflict(err)) return { status: "expired" };
+			throw err;
+		}
+		if (approved.create) {
+			try {
+				await this.stores.accounts.create(approved.account, {
+					id: approved.account,
+					createdAt: this.now().toISOString(),
+					invitedBy: approved.by,
+				});
+			} catch (err) {
+				if (!isConflict(err)) throw err;
+				// The operator may log in to an account made meanwhile; an
+				// invite of a name taken meanwhile fails.
+				if (approved.by !== null)
+					throw new AuthError("conflict", `account ${approved.account} exists`);
+			}
+		} else if (!(await this.stores.accounts.get(approved.account)))
+			return { status: "expired" };
+		const sessionId = randomSecret();
+		await this.stores.sessions.create(sha256(sessionId), {
+			account: approved.account,
+			createdAt: this.now().toISOString(),
+		});
+		return { status: "approved", account: approved.account, sessionId };
+	}
+
+	private expired(p: { createdAt: string }): boolean {
+		return this.now().getTime() - Date.parse(p.createdAt) >= LOGIN_CODE_TTL_MS;
 	}
 
 	/** A logged-in account invites a new account: a login token that creates it. */

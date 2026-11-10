@@ -257,3 +257,124 @@ describe("listing", () => {
 		]);
 	});
 });
+
+describe("login by code", () => {
+	function clocked() {
+		let t = Date.parse("2026-11-10T10:00:00Z");
+		const stores = {
+			accounts: new MemoryKv<Account>(),
+			serviceAccounts: new MemoryKv<ServiceAccount>(),
+			tokens: new MemoryKv<TokenRecord>(),
+			sessions: new MemoryKv<Session>(),
+		} satisfies AuthStores;
+		const auth = new Auth(stores, { now: () => new Date(t) });
+		return { auth, stores, advance: (ms: number) => (t += ms) };
+	}
+	const operator = { kind: "operator" } as const;
+
+	test("the operator approves; the starting browser gets a session and the account", async () => {
+		const { auth, stores } = clocked();
+		const { code, cookie, expiresAt } = await auth.startLogin("Firefox");
+		expect(code).toMatch(/^[A-HJ-NP-Z2-9]{8}$/);
+		expect(expiresAt).toBe("2026-11-10T10:10:00.000Z");
+		expect(await auth.pollLogin(cookie)).toMatchObject({ status: "pending" });
+		const typed = `${code.slice(0, 4).toLowerCase()} - ${code.slice(4)}`;
+		expect(await auth.approveLogin(typed, "duke", operator)).toEqual({
+			account: "duke",
+			created: true,
+			ageSeconds: 0,
+			userAgent: "Firefox",
+		});
+		const r = await auth.pollLogin(cookie);
+		if (r.status !== "approved") throw new Error(r.status);
+		expect(await auth.session(r.sessionId)).toBe("duke");
+		expect((await stores.accounts.get("duke"))?.value.invitedBy).toBeNull();
+		// Single use: the code and the cookie are spent.
+		expect(await auth.pollLogin(cookie)).toEqual({ status: "expired" });
+		await expect(auth.approveLogin(code, "duke", operator)).rejects.toThrow(
+			"no such code",
+		);
+	});
+
+	test("the code alone is not enough: another browser gets no session", async () => {
+		const { auth } = clocked();
+		const { code } = await auth.startLogin("a");
+		await auth.approveLogin(code, "duke", operator);
+		expect(await auth.pollLogin(`${code}.forged`)).toEqual({
+			status: "expired",
+		});
+		expect(await auth.pollLogin(code)).toEqual({ status: "expired" });
+	});
+
+	test("an expired code is refused, wrong codes look the same", async () => {
+		const { auth, advance } = clocked();
+		const { code, cookie } = await auth.startLogin("a");
+		advance(10 * 60 * 1000);
+		await expect(auth.approveLogin(code, "duke", operator)).rejects.toThrow(
+			"no such code",
+		);
+		expect(await auth.pollLogin(cookie)).toEqual({ status: "expired" });
+		for (const wrong of ["AAAA-AAAA", "short", "0000-0000"])
+			await expect(auth.approveLogin(wrong, "duke", operator)).rejects.toThrow(
+				"no such code",
+			);
+	});
+
+	test("race: N approvals and N polls give one session", async () => {
+		const { auth } = clocked();
+		const { code, cookie } = await auth.startLogin("a");
+		const approvals = await Promise.allSettled(
+			Array.from({ length: 20 }, (_, i) =>
+				auth.approveLogin(code, `user-${i}`, operator),
+			),
+		);
+		expect(approvals.filter((a) => a.status === "fulfilled")).toHaveLength(1);
+		const polls = await Promise.all(
+			Array.from({ length: 20 }, () => auth.pollLogin(cookie)),
+		);
+		expect(polls.filter((p) => p.status === "approved")).toHaveLength(1);
+		expect(await auth.accounts()).toHaveLength(1);
+	});
+
+	test("an account approves for itself or for a new name, not for another account", async () => {
+		const { auth } = clocked();
+		const first = await auth.startLogin("a");
+		await auth.approveLogin(first.code, "duke", operator);
+		await auth.pollLogin(first.cookie);
+
+		const self = await auth.startLogin("phone");
+		expect(
+			await auth.approveLogin(self.code, "duke", {
+				kind: "account",
+				account: "duke",
+			}),
+		).toMatchObject({ account: "duke", created: false });
+		expect(await auth.pollLogin(self.cookie)).toMatchObject({
+			status: "approved",
+			account: "duke",
+		});
+
+		const invite = await auth.startLogin("c");
+		await auth.approveLogin(invite.code, "carol", {
+			kind: "account",
+			account: "duke",
+		});
+		expect(await auth.pollLogin(invite.cookie)).toMatchObject({
+			account: "carol",
+		});
+		expect(
+			(await auth.accounts()).find((a) => a.id === "carol")?.invitedBy,
+		).toBe("duke");
+
+		const other = await auth.startLogin("d");
+		await expect(
+			auth.approveLogin(other.code, "carol", {
+				kind: "account",
+				account: "duke",
+			}),
+		).rejects.toMatchObject({ code: "forbidden" });
+		await expect(
+			auth.approveLogin(other.code, "Bad Name", operator),
+		).rejects.toMatchObject({ code: "bad_request" });
+	});
+});
