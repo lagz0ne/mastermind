@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.turbo/
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store
+coverage/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+*.gate.lock*
