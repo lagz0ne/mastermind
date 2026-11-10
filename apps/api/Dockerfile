@@ -35,5 +35,7 @@ ARG GIT_SHA=dev
 # DO_NOT_TRACK: bd sends anonymous usage metrics unless told not to.
 ENV NODE_ENV=production PORT=3000 GIT_SHA=$GIT_SHA BD_BIN=/usr/local/bin/bd DO_NOT_TRACK=1
 EXPOSE 3000
+# JetStream backups (BACKUP_URL=file:///backups/nats): a new volume mounted here takes this owner.
+RUN mkdir -p /backups && chown bun:bun /backups
 USER bun
 CMD ["bun", "index.js"]

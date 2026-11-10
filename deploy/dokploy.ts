@@ -10,6 +10,9 @@
 //                                    Dokploy queue and status, fail with the log tail, wait for health
 //   bun deploy/dokploy.ts login-approve <code> --account <name>
 //                                    approve a login code shown on <public url>/login (the operator)
+//   bun deploy/dokploy.ts jetstream <list|backup|restore|usage|marker> [...]
+//                                    the JetStream backup CLI (apps/api/src/backup/cli.ts) against
+//                                    the production NATS over its public WebSocket, as the api
 //
 // Configuration, nothing is built in:
 //   deploy/site.json       the site: Dokploy URL, project, service names, public host.
@@ -376,7 +379,22 @@ async function apply() {
 	} else log("nats: unchanged");
 
 	// 4. Point the app at both. Keys this script does not know (DATABASE_URL, ...) are left alone.
+	// JetStream backups go to a volume of the app (the api writes them); BACKUP_URL may be changed
+	// to an s3:// bucket in Dokploy, and apply keeps it.
+	let appMounted = false;
+	if (!app.mounts?.some((m) => m.mountPath === "/backups")) {
+		await api("mounts.create", {
+			type: "volume",
+			volumeName: `${cfg.app}-backups`,
+			mountPath: "/backups",
+			serviceType: "application",
+			serviceId: ids.applicationId,
+		});
+		appMounted = true;
+		log(`app: volume ${cfg.app}-backups at /backups`);
+	}
 	const appEnv = mergeEnv(withSecrets.env, {
+		keep: { BACKUP_URL: () => "file:///backups/nats" },
 		set: {
 			DOLT_URL: `mysql://root:${infraEnv.env.get("DOLT_ROOT_PASSWORD")}@mastermind-dolt:3306/mastermind`,
 			DOLT_BACKUP_URL: "file:///backups/mastermind",
@@ -398,9 +416,12 @@ async function apply() {
 			buildSecrets: app.buildSecrets ?? "",
 			createEnvFile: app.createEnvFile ?? false,
 		});
-		log(`app: env changed ${appChanged.join(", ")}; redeploying`);
-		await deployApp(ids.applicationId, "env");
+		log(`app: env changed ${appChanged.join(", ")}`);
 	} else log("app: env unchanged");
+	if (appChanged.length || appMounted) {
+		log("app: redeploying");
+		await deployApp(ids.applicationId, appMounted ? "volume" : "env");
+	}
 
 	// 5. Verify from outside.
 	const h = await waitFor("health dolt=up bd=up", 300, async () => {
@@ -619,17 +640,57 @@ async function loginApprove(argv: string[]) {
 	log(describeApproval(body as Approval));
 }
 
+/**
+ * Run the JetStream backup CLI from this clone against production: NATS over the public
+ * WebSocket, logged in as the api (the internal APP token from NATS_ISSUER_SEED, which the
+ * api's auth callout admits). The seed goes to the child's env, never to argv or a log.
+ * BACKUP_URL here is a location on THIS machine or a bucket (pass --url): `backup --url
+ * file:///some/dir` is an off-machine copy.
+ */
+async function jetstream(argv: string[]) {
+	const { applicationId } = await findProject();
+	if (!applicationId) throw new Error(`no app '${cfg.app}' in Dokploy`);
+	const app = await api<App>("application.one", { applicationId });
+	const seed = parseEnv(app.env).get("NATS_ISSUER_SEED");
+	if (!seed)
+		throw new Error(
+			"NATS_ISSUER_SEED is not in the app env: run 'bun deploy/dokploy.ts apply' first",
+		);
+	const cli = join(
+		import.meta.dir,
+		"..",
+		"apps",
+		"api",
+		"src",
+		"backup",
+		"cli.ts",
+	);
+	const proc = Bun.spawn([process.execPath, cli, ...argv], {
+		env: {
+			...process.env,
+			NATS_WS_URL: natsPublicUrl,
+			NATS_ISSUER_SEED: seed,
+			DOKPLOY_API_KEY: "",
+		},
+		stdout: "inherit",
+		stderr: "inherit",
+	});
+	const code = await proc.exited;
+	if (code !== 0) throw new Error(`jetstream ${argv[0] ?? ""}: exit ${code}`);
+}
+
 const commands: Record<string, () => Promise<void>> = {
 	status,
 	apply,
 	secrets,
 	"login-approve": () => loginApprove(process.argv.slice(3)),
 	release: () => release(process.argv[3]),
+	jetstream: () => jetstream(process.argv.slice(3)),
 };
 const command = commands[process.argv[2] ?? ""];
 if (!command) {
 	console.error(
-		"usage: bun deploy/dokploy.ts status | apply | secrets | release <sha|latest> | login-approve <code> --account <name>",
+		"usage: bun deploy/dokploy.ts status | apply | secrets | release <sha|latest> | login-approve <code> --account <name> | jetstream <list|backup|restore|usage|marker> ...",
 	);
 	process.exit(2);
 }

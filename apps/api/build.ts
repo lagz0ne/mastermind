@@ -32,9 +32,19 @@ const runner = await Bun.build({
 	},
 });
 
-for (const log of [...result.logs, ...runner.logs]) console.error(log);
-if (!result.success || !runner.success) process.exit(1);
-for (const out of [...result.outputs, ...runner.outputs]) {
+// The JetStream backup CLI, in the image as /app/backup.js (src/backup/cli.ts, docs/deploy.md).
+const backup = await Bun.build({
+	entrypoints: ["src/backup/cli.ts"],
+	outdir: "dist",
+	target: "bun",
+	naming: "backup.js",
+	minify: true,
+});
+
+const builds = [result, runner, backup];
+for (const log of builds.flatMap((b) => b.logs)) console.error(log);
+if (!builds.every((b) => b.success)) process.exit(1);
+for (const out of builds.flatMap((b) => b.outputs)) {
 	console.log(
 		`${out.path.slice(process.cwd().length + 1)}  ${(out.size / 1024).toFixed(1)} KiB`,
 	);
