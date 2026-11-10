@@ -8,3 +8,5 @@ export type Health = {
 export function isHealthy(db: Health["db"]): boolean {
 	return db !== "down";
 }
+
+export * from "./work.ts";
