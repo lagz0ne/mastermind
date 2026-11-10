@@ -36,7 +36,7 @@ describe.skipIf(!url)("against nats-server", () => {
 	test("typed request/reply through one queue group", async () => {
 		const served = [0, 0];
 		const subs = [0, 1].map((i) =>
-			serve<{ n: number }, { user: string; queue: string; double: number }>(
+			serve<{ n: number }, { account: string; queue: string; double: number }>(
 				mm,
 				patterns.next,
 				SERVICE_QUEUE,
@@ -45,7 +45,7 @@ describe.skipIf(!url)("against nats-server", () => {
 					const s = parseSubject(msg.subject);
 					if (s?.kind !== "next")
 						throw new BusError("bad_request", "not a next subject");
-					return { user: s.user, queue: s.queue, double: req.n * 2 };
+					return { account: s.account, queue: s.queue, double: req.n * 2 };
 				},
 			),
 		);
@@ -53,9 +53,13 @@ describe.skipIf(!url)("against nats-server", () => {
 		for (let n = 0; n < 20; n++) {
 			const res = await request<
 				{ n: number },
-				{ user: string; queue: string; double: number }
+				{ account: string; queue: string; double: number }
 			>(runner, subjects.next("alice", "backend"), { n });
-			expect(res).toEqual({ user: "alice", queue: "backend", double: n * 2 });
+			expect(res).toEqual({
+				account: "alice",
+				queue: "backend",
+				double: n * 2,
+			});
 		}
 		expect((served[0] ?? 0) + (served[1] ?? 0)).toBe(20);
 		for (const s of subs) s.unsubscribe();
@@ -152,59 +156,59 @@ describe.skipIf(!url)("against nats-server", () => {
 	});
 
 	test("Store: create, get, CAS update, put, delete, list", async () => {
-		type User = { name: string; queues: string[] };
-		const users = await Store.open<User>(mm, `mm_test_users_${run}`, {
+		type Account = { name: string; queues: string[] };
+		const accounts = await Store.open<Account>(mm, `mm_test_accounts_${run}`, {
 			history: 5,
 		});
-		const r1 = await users.create("alice", {
+		const r1 = await accounts.create("alice", {
 			name: "Alice",
 			queues: ["backend"],
 		});
 		await expect(
-			users.create("alice", { name: "x", queues: [] }),
+			accounts.create("alice", { name: "x", queues: [] }),
 		).rejects.toMatchObject({ code: "conflict" });
-		expect(await users.get("alice")).toEqual({
+		expect(await accounts.get("alice")).toEqual({
 			key: "alice",
 			value: { name: "Alice", queues: ["backend"] },
 			revision: r1,
 		});
 
-		const r2 = await users.update(
+		const r2 = await accounts.update(
 			"alice",
 			{ name: "Alice", queues: ["backend", "web"] },
 			r1,
 		);
 		expect(r2).toBeGreaterThan(r1);
 		await expect(
-			users.update("alice", { name: "stale", queues: [] }, r1),
+			accounts.update("alice", { name: "stale", queues: [] }, r1),
 		).rejects.toMatchObject({
 			code: "conflict",
 		});
-		await users.put("bob", { name: "Bob", queues: ["web"] });
-		expect((await users.list()).sort()).toEqual(["alice", "bob"]);
+		await accounts.put("bob", { name: "Bob", queues: ["web"] });
+		expect((await accounts.list()).sort()).toEqual(["alice", "bob"]);
 
-		await expect(users.delete("bob", r1)).rejects.toMatchObject({
+		await expect(accounts.delete("bob", r1)).rejects.toMatchObject({
 			code: "conflict",
 		});
-		await users.delete("bob");
-		expect(await users.get("bob")).toBeNull();
-		expect(await users.list()).toEqual(["alice"]);
+		await accounts.delete("bob");
+		expect(await accounts.get("bob")).toBeNull();
+		expect(await accounts.list()).toEqual(["alice"]);
 		// a deleted key can be created again
-		await users.create("bob", { name: "Bob 2", queues: [] });
-		expect((await users.get("bob"))?.value.name).toBe("Bob 2");
-		expect(await users.get("nobody")).toBeNull();
+		await accounts.create("bob", { name: "Bob 2", queues: [] });
+		expect((await accounts.get("bob"))?.value.name).toBe("Bob 2");
+		expect(await accounts.get("nobody")).toBeNull();
 	});
 
 	test("Store: consume is single use under a race", async () => {
-		const tokens = await Store.open<{ user: string }>(
+		const tokens = await Store.open<{ account: string }>(
 			mm,
 			`mm_test_tokens_${run}`,
 		);
-		await tokens.create("tok_abc", { user: "alice" });
+		await tokens.create("tok_abc", { account: "alice" });
 		const results = await Promise.all(
 			[1, 2, 3, 4, 5].map(() => tokens.consume("tok_abc")),
 		);
-		expect(results.filter((r) => r !== null)).toEqual([{ user: "alice" }]);
+		expect(results.filter((r) => r !== null)).toEqual([{ account: "alice" }]);
 		expect(await tokens.consume("tok_abc")).toBeNull();
 		expect(await tokens.consume("never")).toBeNull();
 	});

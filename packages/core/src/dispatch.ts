@@ -1,13 +1,14 @@
 /**
- * Dispatch: how Mastermind hands one bead to one runner (a user's agent host)
- * and how the runner reports back. These are the payloads of the NATS
- * request/reply subjects that `@mastermind/bus` builds:
+ * Dispatch: how Mastermind hands one bead to one runner (an agent host that an
+ * account owns) and how the runner adapter reports back for the agent. These
+ * are the payloads of the NATS request/reply subjects that `@mastermind/bus`
+ * builds:
  *
- *   mm.u.<user>.q.<queue>.next          NextRequest      -> NextReply
- *   mm.u.<user>.d.<bead>.heartbeat      HeartbeatRequest -> HeartbeatReply
- *   mm.u.<user>.d.<bead>.report         ReportRequest    -> Ack
- *   mm.u.<user>.d.<bead>.complete       CompleteRequest  -> Ack
- *   mm.u.<user>.d.<bead>.release        ReleaseRequest   -> Ack
+ *   mm.u.<account>.q.<queue>.next       NextRequest      -> NextReply
+ *   mm.u.<account>.d.<bead>.heartbeat   HeartbeatRequest -> HeartbeatReply
+ *   mm.u.<account>.d.<bead>.report      ReportRequest    -> Ack
+ *   mm.u.<account>.d.<bead>.complete    CompleteRequest  -> Ack
+ *   mm.u.<account>.d.<bead>.release     ReleaseRequest   -> Ack
  *   mm.q.<queue>.ready                  ReadyNotice      (publish)
  */
 import type { Bead, Lease } from "./work.ts";
@@ -43,7 +44,7 @@ export type DispatchEnv = {
 export type Dispatch = {
 	bead: Bead;
 	queue: string;
-	/** The claim holder, as `<user>/<runner>`. */
+	/** The claim holder, as `<account>/<agent>`. */
 	actor: string;
 	lease: Lease;
 	stage: DispatchStage;
@@ -52,11 +53,14 @@ export type Dispatch = {
 	prompt: string;
 };
 
-/** A runner as it describes itself to Mastermind. */
+/** A runner adapter as it describes itself to Mastermind. */
 export type RunnerInfo = {
-	/** Stable per user, for example the host name. */
+	/** Stable within the account, for example the host name. */
 	id: string;
-	user: string;
+	/** The account (human) that owns the runner and its work. */
+	account: string;
+	/** The service account the adapter connects with; owned by `account`. */
+	serviceAccount: string;
 	/** Agent providers the runner can start. */
 	providers: string[];
 	/** Capabilities it offers; matched against `DispatchEnv.requires`. */

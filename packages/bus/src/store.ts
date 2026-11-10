@@ -29,7 +29,7 @@ const live = (e: KvEntry | null): e is KvEntry =>
 
 /**
  * Typed JSON values in one JetStream KV bucket: Mastermind's own state
- * (users, tokens, sessions, runners, rules). Lost races raise
+ * (accounts, service accounts, tokens, sessions, runners, rules). Lost races raise
  * BusError("conflict"); readers see deleted keys as absent.
  */
 export class Store<T> {

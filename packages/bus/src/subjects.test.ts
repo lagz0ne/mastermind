@@ -17,7 +17,7 @@ describe("subjects", () => {
 		);
 		expect(subjects.ready("backend")).toBe("mm.q.backend.ready");
 		expect(subjects.beadEvent("mm-7")).toBe("mm.events.bead.mm-7");
-		expect(subjects.userScope("alice")).toBe("mm.u.alice.>");
+		expect(subjects.accountScope("alice")).toBe("mm.u.alice.>");
 	});
 
 	test("child bead ids keep one token: '.' is written as '~'", () => {
@@ -32,7 +32,7 @@ describe("subjects", () => {
 	test.each(["", "a.b", "a*", ">", "a b", "a\tb", "a~b"])(
 		"reject token %p",
 		(bad) => {
-			expect(() => token("user", bad)).toThrow(SubjectError);
+			expect(() => token("account", bad)).toThrow(SubjectError);
 			expect(() => subjects.next(bad, "q")).toThrow(SubjectError);
 			expect(() => subjects.next("u", bad)).toThrow(SubjectError);
 			expect(() => subjects.ready(bad)).toThrow(SubjectError);
@@ -50,13 +50,13 @@ describe("subjects", () => {
 	test("parse round-trips every builder", () => {
 		expect(parseSubject(subjects.next("alice", "web"))).toEqual({
 			kind: "next",
-			user: "alice",
+			account: "alice",
 			queue: "web",
 		});
 		for (const verb of BEAD_VERBS) {
 			expect(parseSubject(subjects.bead("bob", "mm-210.14", verb))).toEqual({
 				kind: "bead",
-				user: "bob",
+				account: "bob",
 				bead: "mm-210.14",
 				verb,
 			});

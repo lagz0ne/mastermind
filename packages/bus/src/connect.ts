@@ -9,14 +9,14 @@ export type ConnectOptions = {
 	servers: string | string[];
 	/** Connection name, shown in server monitoring (for example `mastermind-api`). */
 	name: string;
-	/** Token auth (adapters: the token the auth callout checks). */
+	/** Token auth (runner adapters: the service account token the auth callout checks). */
 	token?: string;
-	/** User/password auth (Mastermind's own auth-callout connection). */
+	/** NATS user/password auth (Mastermind's own auth-callout connection). */
 	user?: string;
 	pass?: string;
 	/**
-	 * Inbox prefix for replies. A scoped user may only subscribe to its own
-	 * inboxes, for example `_INBOX.<user>`.
+	 * Inbox prefix for replies. A scoped service account may only subscribe
+	 * to its own inboxes, for example `_INBOX.<account>`.
 	 */
 	inboxPrefix?: string;
 	/** Called on every connection status change: disconnect, reconnect, errors. */
