@@ -32,19 +32,40 @@ async function loggedIn() {
 }
 
 describe("bootstrap", () => {
-	test("mints one login token when there is no account", async () => {
+	test("mints a login token when there is no account", async () => {
 		const { auth } = setup();
-		const token = await auth.bootstrap();
-		expect(token).toStartWith("mml_");
+		expect(await auth.bootstrap()).toStartWith("mml_");
+	});
+
+	test("every start rotates: the previous token is refused", async () => {
+		const { auth, stores } = setup();
+		const first = (await auth.bootstrap()) as string;
+		const second = (await auth.bootstrap()) as string;
+		expect(second).toStartWith("mml_");
+		expect(second).not.toBe(first);
+		expect(await auth.login(first)).toBeNull();
+		expect((await auth.login(second))?.account).toBe("admin");
+		// Only the marker is left; the account now exists, so no more tokens.
+		expect(await stores.tokens.list()).toEqual(["bootstrap"]);
 		expect(await auth.bootstrap()).toBeNull();
 	});
 
-	test("of many replicas, one mints", async () => {
-		const { auth } = setup();
+	test("of many replicas, one mints and no loser token stays valid", async () => {
+		const { auth, stores } = setup();
 		const tokens = await Promise.all(
 			Array.from({ length: 5 }, () => auth.bootstrap()),
 		);
 		expect(tokens.filter(Boolean)).toHaveLength(1);
+		expect(await stores.tokens.list("login.*")).toHaveLength(1);
+	});
+
+	test("rotation from an older marker without a key drops its token", async () => {
+		const { auth, stores } = setup();
+		const old = (await auth.bootstrap()) as string;
+		await stores.tokens.put("bootstrap", { kind: "bootstrap" });
+		const fresh = (await auth.bootstrap()) as string;
+		expect(await auth.login(old)).toBeNull();
+		expect(await auth.login(fresh)).not.toBeNull();
 	});
 
 	test("does nothing when an account exists", async () => {
@@ -55,6 +76,7 @@ describe("bootstrap", () => {
 			invitedBy: null,
 		});
 		expect(await auth.bootstrap()).toBeNull();
+		expect(await stores.tokens.list()).toEqual([]);
 	});
 });
 

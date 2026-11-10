@@ -25,6 +25,13 @@ export class MemoryKv<T> implements Kv<T> {
 		return this.write(key, value);
 	}
 
+	async update(key: string, value: T, revision: number): Promise<number> {
+		await tick();
+		if (this.entries.get(key)?.revision !== revision)
+			throw new BusError("conflict", `${key} is not at revision ${revision}`);
+		return this.write(key, value);
+	}
+
 	async put(key: string, value: T): Promise<number> {
 		await tick();
 		return this.write(key, value);

@@ -16,6 +16,9 @@ import { hmac } from "./secrets.ts";
 import { Auth, type AuthStores, BUCKETS } from "./service.ts";
 import { accountGuard, type RequireAccount } from "./session.ts";
 
+/** Prefix of the first-login log lines (deploy/dokploy.ts first-login looks for it). */
+export const FIRST_LOGIN = "auth: first login";
+
 export type AuthConfig = {
 	/** NATS URL(s) for Mastermind (internal network), ws:// or wss://. */
 	natsUrl: string;
@@ -121,9 +124,14 @@ export async function startAuth(cfg: AuthConfig): Promise<AuthService> {
 		});
 		auth = ready;
 
+		// While no account exists, every start logs a new URL and the previous
+		// one stops working. Only stdout gets it: `log` is not the OTLP exporter.
+		// `bun deploy/dokploy.ts first-login` reads these lines back.
 		const first = await ready.bootstrap();
 		if (first)
-			log(`auth: first login (single use): ${cfg.publicUrl}/login#${first}`);
+			log(`${FIRST_LOGIN} (single use): ${cfg.publicUrl}/login#${first}`);
+		else if ((await stores.accounts.list()).length > 0)
+			log(`${FIRST_LOGIN}: not needed, an account exists`);
 
 		return {
 			app,

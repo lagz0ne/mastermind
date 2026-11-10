@@ -9,6 +9,7 @@ export DOKPLOY_API_KEY=...            # or DOKPLOY_API_KEY_FILE=<path to a file 
 bun deploy/dokploy.ts status          # what runs, env key names, health
 bun deploy/dokploy.ts apply           # create or update Dolt, NATS and the app env; deploy; verify
 bun deploy/dokploy.ts secrets         # redeploy hooks + PUBLIC_URL into the GitHub environment
+bun deploy/dokploy.ts first-login     # the single-use login URL for the first account (no account yet)
 ```
 
 `apply` is safe to run again: it keeps existing secrets, changes only what differs, and ends with a
@@ -144,6 +145,25 @@ mastermind app ──NATS_URL (nats://…:4222, internal)──▶ nats:4222
 Accounts: `AUTH` (one user, `mastermind`: the auth callout service), `APP` (JetStream on; every admitted
 client), `SYS`. Every other login goes through the NATS auth callout: Mastermind answers
 `$SYS.REQ.USER.AUTH` and issues a user JWT for `APP`, signed with `NATS_ISSUER_SEED` (mm-210.12).
+
+### First start: the first login
+
+While no account exists, EVERY start of the app mints a new single-use login token for the first
+account (`admin`) and writes one line to the app log (stdout only, never to the OTLP log exporter):
+
+```
+auth: first login (single use): https://<public url>/login#mml_...
+```
+
+The URL of the previous start stops working. Each green commit redeploys the app, so do not search
+the log by hand. Run this, then open the URL at once:
+
+```bash
+bun deploy/dokploy.ts first-login     # reads the app log through the Dokploy API; prints the newest URL
+```
+
+When an account exists, no token is minted, the app logs `auth: first login: not needed, ...`, and
+the command says so. More people come in by invite from a logged-in account.
 
 **Safe state.** Until Mastermind runs the auth callout service, NATS refuses every client connection
 except the `mastermind` user, with `Authorization Violation`. This is correct. It is not an outage.

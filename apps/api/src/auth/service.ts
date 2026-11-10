@@ -26,7 +26,7 @@ import {
 /** The part of {@link Store} that auth uses (a JetStream KV bucket in production). */
 export type Kv<T> = Pick<
 	Store<T>,
-	"get" | "create" | "put" | "delete" | "consume" | "list"
+	"get" | "create" | "update" | "put" | "delete" | "consume" | "list"
 >;
 
 export type Account = {
@@ -50,8 +50,11 @@ export type TokenRecord =
 	/** `create`: the account does not exist yet; the first login creates it. */
 	| { kind: "login"; account: string; create: boolean; by: string | null }
 	| { kind: "enrol"; account: string; name: string }
-	/** Marks that one replica minted the first-start token. */
-	| { kind: "bootstrap" };
+	/**
+	 * Points at the current first-start token (`key`: its token key). Older
+	 * markers have no key.
+	 */
+	| { kind: "bootstrap"; key?: string };
 
 export type Session = { account: string; createdAt: string };
 
@@ -112,24 +115,50 @@ export class Auth {
 	}
 
 	/**
-	 * First start: when no account exists, mint ONE login token for the first
-	 * account and return it (the caller logs the URL). Of many replicas, one
-	 * wins. Returns null when there is nothing to do. If the token expires
-	 * unused, the marker expires with it and the next start mints a new one.
+	 * First start: while no account exists, EVERY start mints a new login
+	 * token for the first account and returns it (the caller logs the URL).
+	 * The token of the previous start stops working. Of many replicas that
+	 * start together, one wins (compare-and-set on the marker). Returns null
+	 * when an account exists or another replica won.
 	 */
 	async bootstrap(): Promise<string | null> {
 		if ((await this.stores.accounts.list()).length > 0) return null;
-		try {
-			await this.stores.tokens.create(BOOTSTRAP_KEY, { kind: "bootstrap" });
-		} catch (err) {
-			if (isConflict(err)) return null;
-			throw err;
-		}
-		return this.mintLogin({
+		const old = await this.stores.tokens.get(BOOTSTRAP_KEY);
+		// Mint first, then point the marker at it: a token that loses the race
+		// is deleted again, and a winner's token is never deleted by a loser.
+		const token = await this.mintLogin({
 			account: this.firstAccount,
 			create: true,
 			by: null,
 		});
+		const marker: TokenRecord = {
+			kind: "bootstrap",
+			key: tokenKey("login", token),
+		};
+		try {
+			if (old)
+				await this.stores.tokens.update(BOOTSTRAP_KEY, marker, old.revision);
+			else await this.stores.tokens.create(BOOTSTRAP_KEY, marker);
+		} catch (err) {
+			await this.stores.tokens.delete(tokenKey("login", token));
+			if (isConflict(err)) return null;
+			throw err;
+		}
+		if (old?.value.kind === "bootstrap") {
+			if (old.value.key) await this.stores.tokens.delete(old.value.key);
+			else await this.dropFirstStartTokens(tokenKey("login", token));
+		}
+		return token;
+	}
+
+	/** Older markers do not name their token: delete every first-start token but `keep`. */
+	private async dropFirstStartTokens(keep: string): Promise<void> {
+		for (const key of await this.stores.tokens.list("login.*")) {
+			if (key === keep) continue;
+			const e = await this.stores.tokens.get(key);
+			if (e?.value.kind === "login" && e.value.create && e.value.by === null)
+				await this.stores.tokens.delete(key, e.revision).catch(() => {});
+		}
 	}
 
 	/** A logged-in account invites a new account: a login token that creates it. */

@@ -5,19 +5,22 @@
 //   bun deploy/dokploy.ts status     what runs, and which env keys exist (names only)
 //   bun deploy/dokploy.ts apply      create or update Dolt, NATS and the app env; deploy; verify
 //   bun deploy/dokploy.ts secrets    put the redeploy hooks and the public URL into GitHub (needs `gh`)
+//   bun deploy/dokploy.ts first-login  print the newest first-login URL from the app log (no account yet)
 //
 // Configuration, nothing is built in:
 //   deploy/site.json       the site: Dokploy URL, project, service names, public host.
 //                          MASTERMIND_SITE=<path> selects another file for another site.
 //   DOKPLOY_API_KEY        the Dokploy API key, or
 //   DOKPLOY_API_KEY_FILE   a file that holds it.
-// Secrets live only in Dokploy. This script never prints a secret value.
+// Secrets live only in Dokploy. This script never prints a secret value; the one
+// exception is `first-login`, which prints the single-use first-login URL on purpose.
 
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { createAccount, fromSeed } from "@nats-io/nkeys";
 import { probe } from "./nats/smoke.ts";
 import { mergeEnv, parseEnv, serializeEnv } from "./src/env.ts";
+import { FIRST_LOGIN, newestFirstLogin } from "./src/first-login.ts";
 import { loadSite } from "./src/site.ts";
 
 const cfg = await loadSite(
@@ -68,6 +71,7 @@ type App = Service & {
 	buildSecrets: string | null;
 	createEnvFile: boolean;
 	refreshToken: string;
+	serverId?: string | null;
 	mounts?: { mountPath: string }[];
 };
 type Compose = Service & {
@@ -456,14 +460,126 @@ async function secrets() {
 	);
 }
 
+/**
+ * Read up to `tail` lines of a container or swarm service log through the
+ * Dokploy log socket (the one its UI uses), filtered by `search`. The socket
+ * follows the log, so stop when it goes quiet.
+ */
+async function dockerLogs(q: {
+	containerId: string;
+	runType: "swarm" | "native";
+	search: string;
+	serverId?: string | null;
+	tail?: number;
+}): Promise<string> {
+	key ??= await apiKey();
+	const params = new URLSearchParams({
+		containerId: q.containerId,
+		tail: String(q.tail ?? 10_000),
+		since: "all",
+		search: q.search,
+		runType: q.runType,
+	});
+	if (q.serverId) params.set("serverId", q.serverId);
+	const url = `${cfg.dokployUrl.replace(/^http/, "ws")}/docker-container-logs?${params}`;
+	const ws = new WebSocket(url, { headers: { "x-api-key": key } });
+	let text = "";
+	return await new Promise<string>((resolve, reject) => {
+		let idle: Timer | undefined;
+		const done = () => {
+			clearTimeout(idle);
+			clearTimeout(cap);
+			ws.close();
+			resolve(text);
+		};
+		const quiet = () => {
+			clearTimeout(idle);
+			idle = setTimeout(done, 3_000);
+		};
+		const cap = setTimeout(done, 30_000);
+		ws.onopen = quiet;
+		ws.onmessage = (e) => {
+			text += String(e.data);
+			quiet();
+		};
+		ws.onerror = () => {
+			clearTimeout(idle);
+			clearTimeout(cap);
+			reject(new Error(`dokploy log socket failed for ${q.containerId}`));
+		};
+		ws.onclose = done;
+	});
+}
+
+/**
+ * While no account exists, every start of the app logs a new single-use
+ * login URL (and the previous one stops working). Print the newest one.
+ */
+async function firstLogin() {
+	const setup = (await fetch(`${cfg.publicUrl}/api/people/setup`, {
+		signal: AbortSignal.timeout(10_000),
+	})
+		.then((r) => r.json())
+		.catch(() => null)) as { auth?: string; firstLogin?: boolean } | null;
+	if (setup?.auth === "on" && setup.firstLogin === false) {
+		log(
+			"first-login: an account exists, so no first-login token is minted. Ask an account to invite you.",
+		);
+		return;
+	}
+	if (setup && setup.auth !== "on")
+		log(`first-login: auth on ${cfg.publicUrl} is '${setup.auth}'`);
+
+	const { applicationId } = await findProject();
+	if (!applicationId) throw new Error(`no app '${cfg.app}' in Dokploy`);
+	const app = await api<App>("application.one", { applicationId });
+	const search = FIRST_LOGIN;
+	let found = newestFirstLogin(
+		await dockerLogs({
+			containerId: app.appName,
+			runType: "swarm",
+			search,
+			serverId: app.serverId,
+		}),
+	);
+	if (found.kind === "none") {
+		// Not a swarm service: read each container of the app.
+		const containers = await api<{ containerId: string }[]>(
+			"docker.getContainersByAppNameMatch",
+			{
+				appName: app.appName,
+				...(app.serverId ? { serverId: app.serverId } : {}),
+			},
+		);
+		let all = "";
+		for (const c of containers)
+			all += `${await dockerLogs({ containerId: c.containerId, runType: "native", search, serverId: app.serverId })}\n`;
+		found = newestFirstLogin(all);
+	}
+	if (found.kind === "url") {
+		log(
+			`first-login: open this once (single use; a restart of the app replaces it)${found.at ? `, logged ${found.at}` : ""}:`,
+		);
+		log(found.url);
+	} else if (found.kind === "not-needed")
+		log("first-login: an account exists, so no first-login token is minted.");
+	else
+		throw new Error(
+			"no first-login line in the app log. Restart the app (bun deploy/dokploy.ts apply, or redeploy) and run this again.",
+		);
+}
+
 const commands: Record<string, () => Promise<void>> = {
 	status,
 	apply,
 	secrets,
+	"first-login": firstLogin,
 };
 const command = commands[process.argv[2] ?? ""];
 if (!command) {
-	console.error("usage: bun deploy/dokploy.ts status | apply | secrets");
+	console.error(
+		"usage: bun deploy/dokploy.ts status | apply | secrets | first-login",
+	);
 	process.exit(2);
 }
 await command().catch((error) => {

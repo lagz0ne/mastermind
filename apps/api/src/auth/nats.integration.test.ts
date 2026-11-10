@@ -91,6 +91,15 @@ describe.skipIf(!bin)("auth against nats-server", () => {
 		return nc;
 	};
 
+	test("a second start with no account rotates the token on JetStream KV", async () => {
+		const old = firstUrl.split("#")[1] as string;
+		const fresh = (await svc.auth.bootstrap()) as string;
+		expect(fresh).toStartWith("mml_");
+		expect(fresh).not.toBe(old);
+		expect(await svc.auth.login(old)).toBeNull();
+		firstUrl = `https://mm.example/login#${fresh}`;
+	});
+
 	test("the first-start login URL works exactly once", async () => {
 		expect(firstUrl).toStartWith("https://mm.example/login#mml_");
 		const token = firstUrl.split("#")[1] as string;

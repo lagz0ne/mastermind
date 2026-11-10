@@ -82,10 +82,11 @@ function SetupHint({ setup }: { setup: PeopleSetup | null }) {
 			<div className="mt-4 border-foreground border-t-2 pt-2 text-sm">
 				<p className="font-semibold">No account exists yet.</p>
 				<p className="mt-1">
-					At first start, the server writes one login link for the first account
-					(<code>admin</code>) to its log. Find the line that starts with{" "}
-					<code>auth: first login</code> and open that link. It works once and
-					expires in 24 h; a restart after that writes a new one.
+					Each start of the server writes a new login link for the first account
+					(<code>admin</code>) to its log, and the link of the previous start
+					stops working. The operator gets the newest link with{" "}
+					<code>bun deploy/dokploy.ts first-login</code>. Open it at once: it
+					works once.
 				</p>
 			</div>
 		);
