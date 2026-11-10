@@ -1,4 +1,5 @@
 {
+  "enabledMcpjsonServers": ["doop"],
   "hooks": {
     "SessionStart": [
       {

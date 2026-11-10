@@ -1,0 +1,9 @@
+{
+	"mcpServers": {
+		"doop": {
+			"type": "http",
+			"url": "https://doop.vibea.dev/mcp",
+			"headersHelper": "printf '{\"Authorization\":\"Bearer %s\"}' \"$(cat \"$HOME/.config/secrets/doop-agent-key\")\""
+		}
+	}
+}
