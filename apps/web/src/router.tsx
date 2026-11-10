@@ -11,6 +11,9 @@ import { BoardPage } from "./board/board-page.tsx";
 import { TooltipProvider } from "./components/ui/tooltip.tsx";
 import { HealthFooter } from "./health-footer.tsx";
 import { LoginPage } from "./login/login-page.tsx";
+import { PeoplePage } from "./people/people-page.tsx";
+import { AccountMenu } from "./session/account-menu.tsx";
+import { ensureSession } from "./session/session.ts";
 
 function Layout() {
 	return (
@@ -27,7 +30,14 @@ function Layout() {
 						>
 							Board
 						</Link>
+						<Link
+							to="/people"
+							className="ml-3 text-muted-foreground [&.active]:font-semibold [&.active]:text-foreground"
+						>
+							People
+						</Link>
 					</nav>
+					<AccountMenu />
 				</header>
 				<main className="min-h-0 flex-1">
 					<Outlet />
@@ -55,6 +65,11 @@ function NotFound() {
 const rootRoute = createRootRoute({
 	component: Layout,
 	notFoundComponent: NotFound,
+	// No session: go to /login (GET /api/people/me says 401).
+	beforeLoad: async ({ location }) => {
+		if ((await ensureSession(location.pathname)) === "login")
+			throw redirect({ to: "/login" });
+	},
 });
 
 const indexRoute = createRoute({
@@ -77,6 +92,12 @@ const beadRoute = createRoute({
 	component: BeadSheet,
 });
 
+const peopleRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/people",
+	component: PeoplePage,
+});
+
 const loginRoute = createRoute({
 	getParentRoute: () => rootRoute,
 	path: "/login",
@@ -86,6 +107,7 @@ const loginRoute = createRoute({
 export const routeTree = rootRoute.addChildren([
 	indexRoute,
 	loginRoute,
+	peopleRoute,
 	boardRoute.addChildren([beadRoute]),
 ]);
 
