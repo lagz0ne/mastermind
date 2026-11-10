@@ -4,7 +4,7 @@
 //
 //   bun deploy/dokploy.ts status     what runs, and which env keys exist (names only)
 //   bun deploy/dokploy.ts apply      create or update the infra stack + app env, deploy, verify
-//   bun deploy/dokploy.ts secrets    put the two deploy hooks into GitHub (needs `gh`)
+//   bun deploy/dokploy.ts secrets    put the redeploy hooks into GitHub (needs `gh`)
 //
 // Auth: DOKPLOY_API_KEY, or a file named by DOKPLOY_API_KEY_FILE
 // (default ~/.config/secrets/dokploy-api). DOKPLOY_URL defaults to https://dokploy.vibea.dev.
@@ -13,7 +13,8 @@
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { createAccount, fromSeed } from "@nats-io/nkeys";
-import { type Env, mergeEnv, parseEnv, serializeEnv } from "./src/env.ts";
+import { probe } from "./nats/smoke.ts";
+import { mergeEnv, parseEnv, serializeEnv } from "./src/env.ts";
 
 const cfg = {
 	url: (process.env.DOKPLOY_URL ?? "https://dokploy.vibea.dev").replace(
@@ -23,6 +24,7 @@ const cfg = {
 	project: "mastermind",
 	app: "mastermind",
 	infra: "mastermind-infra",
+	nats: "mastermind-nats",
 	repo: "https://github.com/lagz0ne/mastermind.git",
 	branch: "main",
 	composePath: "./deploy/compose.yml",
@@ -77,6 +79,7 @@ type App = Service & {
 	buildSecrets: string | null;
 	createEnvFile: boolean;
 	refreshToken: string;
+	mounts?: { mountPath: string }[];
 };
 type Compose = Service & {
 	composeId: string;
@@ -85,6 +88,7 @@ type Compose = Service & {
 	refreshToken: string;
 };
 type Domain = {
+	domainId: string;
 	host: string;
 	path: string | null;
 	port: number | null;
@@ -112,6 +116,7 @@ async function findProject() {
 		environmentId: env.environmentId,
 		applicationId: env.applications.find((a) => a.name === cfg.app)
 			?.applicationId,
+		natsId: env.applications.find((a) => a.name === cfg.nats)?.applicationId,
 		composeId: env.compose.find((c) => c.name === cfg.infra)?.composeId,
 	};
 }
@@ -148,31 +153,38 @@ async function health(): Promise<Record<string, unknown>> {
 	return (await res.json()) as Record<string, unknown>;
 }
 
+const keys = (env: string | null) =>
+	[...parseEnv(env).keys()].join(", ") || "(none)";
+
 async function status() {
 	const ids = await findProject();
 	log(`dokploy ${cfg.url}  project ${cfg.project}`);
-	if (ids.applicationId) {
-		const app = await api<App>("application.one", {
-			applicationId: ids.applicationId,
-		});
+	for (const [label, id] of [
+		["app", ids.applicationId],
+		["nats", ids.natsId],
+	] as const) {
+		if (!id) {
+			log(`  ${label.padEnd(8)} MISSING (run: bun deploy/dokploy.ts apply)`);
+			continue;
+		}
+		const app = await api<App>("application.one", { applicationId: id });
 		log(
-			`  app      ${app.name}: ${app.applicationStatus}  env: ${[...parseEnv(app.env).keys()].join(", ") || "(none)"}`,
+			`  ${label.padEnd(8)} ${app.name}: ${app.applicationStatus}  host ${app.appName}  env: ${keys(app.env)}`,
 		);
-	} else log(`  app      ${cfg.app}: MISSING`);
+		for (const d of await api<Domain[]>("domain.byApplicationId", {
+			applicationId: id,
+		}))
+			log(
+				`  route    https://${d.host}${d.path && d.path !== "/" ? d.path : ""} → ${app.name}:${d.port}`,
+			);
+	}
 	if (ids.composeId) {
 		const infra = await api<Compose>("compose.one", {
 			composeId: ids.composeId,
 		});
-		const domains = await api<Domain[]>("domain.byComposeId", {
-			composeId: ids.composeId,
-		});
 		log(
-			`  infra    ${infra.name}: ${infra.composeStatus}  env: ${[...parseEnv(infra.env).keys()].join(", ") || "(none)"}`,
+			`  infra    ${infra.name}: ${infra.composeStatus}  env: ${keys(infra.env)}`,
 		);
-		for (const d of domains)
-			log(
-				`  route    https://${d.host}${d.path ?? ""} → ${d.serviceName}:${d.port}`,
-			);
 	} else
 		log(`  infra    ${cfg.infra}: MISSING (run: bun deploy/dokploy.ts apply)`);
 	log(
@@ -180,12 +192,28 @@ async function status() {
 	);
 }
 
+async function deployApp(applicationId: string, why: string) {
+	await api("application.deploy", {
+		applicationId,
+		title: `deploy/dokploy.ts apply (${why})`,
+	});
+	await sleep(3000);
+	await waitFor(`the deploy of ${applicationId}`, 600, async () => {
+		const a = await api<App>("application.one", { applicationId });
+		if (a.applicationStatus === "error")
+			throw new Error(
+				"Dokploy reports the deploy failed; see its log in Dokploy",
+			);
+		return a.applicationStatus === "done" ? true : undefined;
+	});
+}
+
 async function apply() {
 	const ids = await findProject();
 	if (!ids.applicationId)
 		throw new Error(`app '${cfg.app}' not found in project '${cfg.project}'`);
 
-	// 1. The infra compose: source = this repo, so Dokploy always runs what is on main.
+	// 1. The infra compose (Dolt): source = this repo, so Dokploy runs what is on main.
 	let composeId = ids.composeId;
 	if (!composeId) {
 		const created = await api<Compose>("compose.create", {
@@ -198,25 +226,10 @@ async function apply() {
 		log(`infra: created compose ${cfg.infra}`);
 	}
 	const infra = await api<Compose>("compose.one", { composeId });
-	const issuer = createAccount();
 	const infraEnv = mergeEnv(parseEnv(infra.env), {
-		keep: {
-			DOLT_ROOT_PASSWORD: secret,
-			NATS_AUTH_PASSWORD: secret,
-			// The seed is kept next to the public key so the app env can be rebuilt from here.
-			NATS_ISSUER_SEED: () => new TextDecoder().decode(issuer.getSeed()),
-		},
+		keep: { DOLT_ROOT_PASSWORD: secret },
+		drop: ["NATS_AUTH_PASSWORD", "NATS_ISSUER_SEED", "NATS_ISSUER_PUBLIC"],
 	});
-	const seed = infraEnv.env.get("NATS_ISSUER_SEED");
-	if (!seed) throw new Error("NATS_ISSUER_SEED missing");
-	const withPublic = mergeEnv(infraEnv.env, {
-		set: {
-			NATS_ISSUER_PUBLIC: fromSeed(
-				new TextEncoder().encode(seed),
-			).getPublicKey(),
-		},
-	});
-	const infraChanged = [...infraEnv.changed, ...withPublic.changed];
 	await api("compose.update", {
 		composeId,
 		sourceType: "git",
@@ -224,29 +237,16 @@ async function apply() {
 		customGitBranch: cfg.branch,
 		composePath: cfg.composePath,
 		autoDeploy: true,
-		env: serializeEnv(withPublic.env),
+		env: serializeEnv(infraEnv.env),
 	});
-	log(
-		`infra: source ${cfg.repo}@${cfg.branch} ${cfg.composePath}; env ${infraChanged.length ? `added ${infraChanged.join(", ")}` : "unchanged"}`,
-	);
-
-	// 2. The one public route: adapters reach NATS over WebSocket.
-	const domains = await api<Domain[]>("domain.byComposeId", { composeId });
-	if (!domains.some((d) => d.host === cfg.host && d.path === "/nats")) {
-		await api("domain.create", {
-			host: cfg.host,
-			path: "/nats",
-			port: 8080,
-			https: true,
-			certificateType: "none",
-			composeId,
-			serviceName: "nats",
-			domainType: "compose",
-		});
-		log(`infra: route wss://${cfg.host}/nats → nats:8080`);
+	// This Traefik reads only Dokploy's route files, so a route on a compose service does nothing.
+	for (const d of await api<Domain[]>("domain.byComposeId", { composeId })) {
+		await api("domain.delete", { domainId: d.domainId });
+		log(`infra: removed dead route ${d.host}${d.path ?? ""}`);
 	}
-
-	// 3. Deploy the stack and wait for Dokploy to finish.
+	log(
+		`infra: source ${cfg.repo}@${cfg.branch} ${cfg.composePath}; env ${infraEnv.changed.length ? `changed ${infraEnv.changed.join(", ")}` : "unchanged"}`,
+	);
 	await api("compose.deploy", { composeId, title: "deploy/dokploy.ts apply" });
 	await sleep(3000);
 	await waitFor("the infra deploy", 600, async () => {
@@ -256,29 +256,114 @@ async function apply() {
 				"Dokploy reports the compose deploy failed; see its log in Dokploy",
 			);
 		return c.composeStatus === "done" ? true : undefined;
-	}).catch((error) => {
-		if (String(error).includes("failed")) process.exitCode = 1;
-		throw error;
 	});
 	log("infra: deployed");
 
-	// 4. Point the app at the stack. Existing keys (DATABASE_URL, ...) are left alone.
+	// 2. The app holds the NATS secrets. Existing values win, so apply never rotates them.
 	const app = await api<App>("application.one", {
 		applicationId: ids.applicationId,
 	});
-	const e: Env = withPublic.env;
-	const appEnv = mergeEnv(parseEnv(app.env), {
+	const withSecrets = mergeEnv(parseEnv(app.env), {
+		keep: {
+			NATS_AUTH_PASSWORD: secret,
+			NATS_ISSUER_SEED: () =>
+				new TextDecoder().decode(createAccount().getSeed()),
+		},
+	});
+	const natsPassword = withSecrets.env.get("NATS_AUTH_PASSWORD") ?? "";
+	const seed = withSecrets.env.get("NATS_ISSUER_SEED") ?? "";
+
+	// 3. NATS: a Dokploy application built from deploy/nats, public only as wss://<host>/nats.
+	let natsId = ids.natsId;
+	let natsChanged = false;
+	if (!natsId) {
+		const created = await api<App>("application.create", {
+			name: cfg.nats,
+			appName: cfg.nats,
+			environmentId: ids.environmentId,
+		});
+		natsId = created.applicationId;
+		natsChanged = true;
+		log(`nats: created application ${cfg.nats}`);
+	}
+	await api("application.saveGitProvider", {
+		applicationId: natsId,
+		customGitUrl: cfg.repo,
+		customGitBranch: cfg.branch,
+		customGitBuildPath: "/deploy/nats",
+		watchPaths: ["deploy/nats/**"],
+		enableSubmodules: false,
+	});
+	await api("application.saveBuildType", {
+		applicationId: natsId,
+		buildType: "dockerfile",
+		dockerfile: "Dockerfile",
+		dockerContextPath: ".",
+		dockerBuildStage: "",
+		herokuVersion: null,
+		railpackVersion: null,
+	});
+	const nats = await api<App>("application.one", { applicationId: natsId });
+	const natsEnv = mergeEnv(parseEnv(nats.env), {
 		set: {
-			DOLT_URL: `mysql://root:${e.get("DOLT_ROOT_PASSWORD")}@mastermind-dolt:3306/mastermind`,
+			NATS_AUTH_PASSWORD: natsPassword,
+			NATS_ISSUER_PUBLIC: fromSeed(
+				new TextEncoder().encode(seed),
+			).getPublicKey(),
+		},
+	});
+	if (natsEnv.changed.length) {
+		await api("application.saveEnvironment", {
+			applicationId: natsId,
+			env: serializeEnv(natsEnv.env),
+			buildArgs: nats.buildArgs ?? "",
+			buildSecrets: nats.buildSecrets ?? "",
+			createEnvFile: nats.createEnvFile ?? false,
+		});
+		natsChanged = true;
+	}
+	if (!nats.mounts?.some((m) => m.mountPath === "/data/jetstream")) {
+		await api("mounts.create", {
+			type: "volume",
+			volumeName: `${cfg.nats}-data`,
+			mountPath: "/data/jetstream",
+			serviceType: "application",
+			serviceId: natsId,
+		});
+		natsChanged = true;
+	}
+	const natsDomains = await api<Domain[]>("domain.byApplicationId", {
+		applicationId: natsId,
+	});
+	if (!natsDomains.some((d) => d.host === cfg.host && d.path === "/nats")) {
+		await api("domain.create", {
+			host: cfg.host,
+			path: "/nats",
+			port: 8080,
+			https: true,
+			certificateType: "none",
+			applicationId: natsId,
+		});
+		natsChanged = true;
+		log(`nats: route wss://${cfg.host}/nats → :8080`);
+	}
+	if (natsChanged || nats.applicationStatus !== "done") {
+		await deployApp(natsId, "nats");
+		log("nats: deployed");
+	} else log("nats: unchanged");
+
+	// 4. Point the app at both. Keys this script does not know (DATABASE_URL, ...) are left alone.
+	const appEnv = mergeEnv(withSecrets.env, {
+		set: {
+			DOLT_URL: `mysql://root:${infraEnv.env.get("DOLT_ROOT_PASSWORD")}@mastermind-dolt:3306/mastermind`,
 			DOLT_BACKUP_URL: "file:///backups/mastermind",
-			NATS_URL: "nats://mastermind-nats:4222",
+			NATS_URL: `nats://${nats.appName}:4222`,
 			NATS_AUTH_USER: "mastermind",
-			NATS_AUTH_PASSWORD: e.get("NATS_AUTH_PASSWORD") ?? "",
-			NATS_ISSUER_SEED: seed,
 			NATS_PUBLIC_WS_URL: `wss://${cfg.host}/nats`,
 		},
 	});
-	if (appEnv.changed.length) {
+	const appChanged = [...withSecrets.changed, ...appEnv.changed];
+	if (appChanged.length) {
 		await api("application.saveEnvironment", {
 			applicationId: ids.applicationId,
 			env: serializeEnv(appEnv.env),
@@ -286,11 +371,8 @@ async function apply() {
 			buildSecrets: app.buildSecrets ?? "",
 			createEnvFile: app.createEnvFile ?? false,
 		});
-		await api("application.deploy", {
-			applicationId: ids.applicationId,
-			title: "deploy/dokploy.ts apply (env)",
-		});
-		log(`app: env set ${appEnv.changed.join(", ")}; redeploying`);
+		log(`app: env changed ${appChanged.join(", ")}; redeploying`);
+		await deployApp(ids.applicationId, "env");
 	} else log("app: env unchanged");
 
 	// 5. Verify from outside.
@@ -298,21 +380,46 @@ async function apply() {
 		const now = await health();
 		return now.dolt === "up" && now.bd === "up" ? now : undefined;
 	});
-	log(`ok: ${JSON.stringify(h)}`);
+	log(`ok: health ${JSON.stringify(h)}`);
+	const reply = await waitFor(
+		"the public NATS WebSocket",
+		120,
+		async () => (await probe(`wss://${cfg.host}/nats`)).reply,
+	);
+	if (!reply.includes("Authorization Violation"))
+		throw new Error(`NATS let an unauthenticated client in: ${reply}`);
+	log(`ok: wss://${cfg.host}/nats answers and refuses unauthenticated clients`);
 }
 
-/** Put the two redeploy hooks into the GitHub environment. The URLs go through stdin, not argv. */
+/** `gh` may be logged in to several accounts; use the one that owns the repo when it is there. */
+async function ghEnv(): Promise<Record<string, string | undefined>> {
+	const owner = new URL(cfg.repo).pathname.split("/")[1] ?? "";
+	const proc = Bun.spawn(["gh", "auth", "token", "--user", owner], {
+		stdout: "pipe",
+		stderr: "ignore",
+	});
+	const token = (await new Response(proc.stdout).text()).trim();
+	return (await proc.exited) === 0 && token
+		? { ...process.env, GH_TOKEN: token }
+		: process.env;
+}
+
+/** Put the redeploy hooks into the GitHub environment. The URLs go through stdin, not argv. */
 async function secrets() {
 	const ids = await findProject();
-	if (!ids.applicationId || !ids.composeId) throw new Error("run apply first");
+	if (!ids.applicationId || !ids.composeId || !ids.natsId)
+		throw new Error("run apply first");
 	const app = await api<App>("application.one", {
 		applicationId: ids.applicationId,
 	});
+	const nats = await api<App>("application.one", { applicationId: ids.natsId });
 	const infra = await api<Compose>("compose.one", { composeId: ids.composeId });
 	const hooks = {
 		DOKPLOY_DEPLOY_HOOK: `${cfg.url}/api/deploy/${app.refreshToken}`,
+		DOKPLOY_NATS_HOOK: `${cfg.url}/api/deploy/${nats.refreshToken}`,
 		DOKPLOY_INFRA_HOOK: `${cfg.url}/api/deploy/compose/${infra.refreshToken}`,
 	};
+	const env = await ghEnv();
 	for (const [name, value] of Object.entries(hooks)) {
 		const proc = Bun.spawn(
 			["gh", "secret", "set", name, "--env", cfg.githubEnvironment],
@@ -320,6 +427,7 @@ async function secrets() {
 				stdin: new TextEncoder().encode(value),
 				stdout: "ignore",
 				stderr: "inherit",
+				env,
 			},
 		);
 		if ((await proc.exited) !== 0)

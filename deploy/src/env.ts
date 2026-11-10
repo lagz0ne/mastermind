@@ -25,11 +25,12 @@ export type Wanted = Record<string, string | (() => string)>;
 /**
  * `keep`: existing keys win, only missing keys are added (use for secrets, so
  * a second apply never rotates a password). `set`: these values always win.
- * Keys in neither stay as they are. Returns the names of the keys that changed.
+ * `drop`: these keys are removed. Keys in none of them stay as they are.
+ * Returns the names of the keys that changed.
  */
 export function mergeEnv(
 	current: Env,
-	wanted: { keep?: Wanted; set?: Record<string, string> },
+	wanted: { keep?: Wanted; set?: Record<string, string>; drop?: string[] },
 ): { env: Env; changed: string[] } {
 	const env: Env = new Map(current);
 	const changed: string[] = [];
@@ -42,6 +43,9 @@ export function mergeEnv(
 		if (env.get(key) === value) continue;
 		env.set(key, value);
 		changed.push(key);
+	}
+	for (const key of wanted.drop ?? []) {
+		if (env.delete(key)) changed.push(key);
 	}
 	return { env, changed };
 }

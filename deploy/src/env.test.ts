@@ -42,3 +42,11 @@ test("set overwrites, reports only real changes, and leaves unknown keys alone",
 	expect(env.get("DATABASE_URL")).toBe("keep-me");
 	expect(env.get("NATS_URL")).toBe("new");
 });
+
+test("drop removes keys and reports only the ones that existed", () => {
+	const { env, changed } = mergeEnv(parseEnv("A=1\nB=2"), {
+		drop: ["B", "MISSING"],
+	});
+	expect(changed).toEqual(["B"]);
+	expect([...env.keys()]).toEqual(["A"]);
+});
