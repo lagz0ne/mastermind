@@ -160,6 +160,7 @@ except the `mastermind` user, with `Authorization Violation`. This is correct. I
 | `PUBLIC_URL` | app | the public base URL of the site, from `deploy/site.json` |
 | `NATS_AUTH_USER` | app | `mastermind` |
 | `NATS_PUBLIC_WS_URL` | app | `wss://mastermind.vibea.dev/nats`; given to adapters |
+| `AUTH_DISABLED` | app, local dev only | `1`: with auth NOT configured, every `/api` request is account `local`. Ignored when auth is configured. Without auth and without this flag, `/api` routes outside `/api/auth` answer 503. Never set it in Dokploy |
 
 ### Check
 

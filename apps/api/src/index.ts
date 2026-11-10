@@ -4,6 +4,7 @@ import { browserIngest, telemetryFromEnv, traced } from "@mastermind/telemetry";
 import index from "@mastermind/web/index.html";
 import { SQL } from "bun";
 import { type Deps, health } from "./app.ts";
+import { requireAccountFromEnv } from "./auth/session.ts";
 import { startAuthInBackground } from "./auth/start.ts";
 import {
 	bdEnv,
@@ -125,6 +126,12 @@ const auth =
 				publicNatsUrl: env.NATS_PUBLIC_WS_URL,
 			})
 		: null;
+
+// Session check for every /api route outside /api/auth. Without auth: 503,
+// unless AUTH_DISABLED=1 (local dev: every request is account "local").
+export const requireAccount = requireAccountFromEnv(auth, env);
+if (!auth && env.AUTH_DISABLED === "1")
+	console.warn("auth: AUTH_DISABLED=1, every /api request is account local");
 
 // Dispatcher on NATS, on auth's APP connection; without auth, on DISPATCH_NATS_URL (ws/wss, local dev).
 // Off when neither is set; needs Dolt and bd serve.

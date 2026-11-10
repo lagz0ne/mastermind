@@ -12,6 +12,7 @@ import {
 import { authRoutes } from "./routes.ts";
 import { hmac } from "./secrets.ts";
 import { Auth, type AuthStores, BUCKETS } from "./service.ts";
+import { accountGuard, type RequireAccount } from "./session.ts";
 
 export type AuthConfig = {
 	/** NATS URL(s) for Mastermind (internal network), ws:// or wss://. */
@@ -127,11 +128,14 @@ export async function startAuth(cfg: AuthConfig): Promise<AuthService> {
 	}
 }
 
+const csrfSecret = (cfg: AuthConfig) =>
+	hmac(cfg.issuerSeed.trim(), "mastermind/csrf");
+
 function routesFor(cfg: AuthConfig, auth: () => Auth | null) {
 	const log = cfg.log ?? console.log;
 	return authRoutes(auth, {
 		publicUrl: cfg.publicUrl,
-		csrfSecret: hmac(cfg.issuerSeed.trim(), "mastermind/csrf"),
+		csrfSecret: csrfSecret(cfg),
 		natsUrl: cfg.publicNatsUrl,
 		onError: (error) => log(`auth: ${error}`),
 	});
@@ -140,6 +144,8 @@ function routesFor(cfg: AuthConfig, auth: () => Auth | null) {
 export type BackgroundAuth = {
 	/** Mounted at once; they answer 503 until auth is ready. */
 	routes: ReturnType<typeof authRoutes>;
+	/** The session check for other /api routes (503 until auth is ready). */
+	requireAccount: RequireAccount;
 	/** Resolves when auth runs (for example to start the dispatcher on `app`). */
 	ready: Promise<AuthService>;
 	stop(): Promise<void>;
@@ -175,6 +181,7 @@ export function startAuthInBackground(cfg: AuthConfig): BackgroundAuth {
 	ready.catch(() => {});
 	return {
 		routes: routesFor(cfg, () => service?.auth ?? null),
+		requireAccount: accountGuard(() => service?.auth ?? null, csrfSecret(cfg)),
 		ready,
 		stop: async () => {
 			stopped = true;
