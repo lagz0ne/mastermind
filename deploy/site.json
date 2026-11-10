@@ -3,7 +3,6 @@
 	"publicUrl": "https://mastermind.vibea.dev",
 	"project": "mastermind",
 	"app": "mastermind",
-	"infra": "mastermind-infra",
 	"nats": "mastermind-nats",
 	"repo": "https://github.com/lagz0ne/mastermind.git",
 	"branch": "main",
@@ -11,5 +10,6 @@
 	"appEnv": {
 		"OTEL_EXPORTER_OTLP_ENDPOINT": "http://otlp-ingest:4318",
 		"OTEL_SERVICE_NAME": "mastermind"
-	}
+	},
+	"retired": ["mastermind-infra", "mastermind-db"]
 }

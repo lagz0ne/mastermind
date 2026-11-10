@@ -94,7 +94,6 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Redeploy what changed since the live commit
         env:
-          DOKPLOY_INFRA_HOOK: ${{ secrets.DOKPLOY_INFRA_HOOK }}
           DOKPLOY_NATS_HOOK: ${{ secrets.DOKPLOY_NATS_HOOK }}
         run: |
           live=$(curl -fsS --max-time 10 "$PUBLIC_URL/api/health" | jq -r '.version' || true)
@@ -109,7 +108,6 @@ jobs:
             curl -fsS --retry 3 -o /dev/null -X POST -H 'content-type: application/json' \
               -H 'x-github-event: push' -d "{\"ref\":\"$GITHUB_REF\"}" "$1"
           }
-          if changed deploy/compose.yml; then echo "infra changed"; git_hook "$DOKPLOY_INFRA_HOOK"; fi
           if changed deploy/nats; then echo "nats changed"; git_hook "$DOKPLOY_NATS_HOOK"; fi
           if [ -n "$DOKPLOY_API_KEY" ]; then
             bun deploy/dokploy.ts release "$GITHUB_SHA"

@@ -8,10 +8,10 @@ bun run check      # lint + typecheck + test + build (same as CI)
 bun run dev
 ```
 
-- `apps/api`: Bun server, serves the UI and `/api/*` (→ `ghcr.io/lagz0ne/mastermind`)
+- `apps/api`: Bun server, serves the UI and `/api/*` (→ `ghcr.io/lagz0ne/mastermind`); state on NATS JetStream
 - `apps/web`: React UI, bundled into `apps/api`
 - `packages/*`: shared libraries (`@mastermind/*`)
-- Work is tracked in beads: `bd ready`. Agents: see `CLAUDE.md` and the `trunk-agents` skill.
+- This repo's own tasks are tracked in beads: `bd ready` (the product itself does not use beads). Agents: see `CLAUDE.md` and the `trunk-agents` skill.
 - Commit/push only via `scripts/ship.sh -m "<msg>" -i <bead> -- <paths>`.
 
 ## Working with agents (Paseo)

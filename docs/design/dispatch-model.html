@@ -128,7 +128,7 @@ th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: 
 	<div class="node new">
 		<div class="where">Mastermind</div>
 		<div class="name">Router + dispatcher</div>
-		<ul><li>rule: bead → queue</li><li>rule: bead → address</li><li>claim in beads, lease</li></ul>
+		<ul><li>rule: bead → queue</li><li>rule: bead → address</li><li>claim in the work store, lease</li></ul>
 		<span class="tag ok">queue exists</span> <span class="tag miss">address: mm-210.32</span>
 	</div>
 	<div class="node new">
@@ -146,7 +146,7 @@ th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: 
 </div>
 <div class="back"><b>← Flow back</b><span>The adapter sends heartbeat, reports and the result on NATS. Mastermind writes them to the bead. The board and the bead timeline show them live.</span><span class="tag ok">exists</span></div>
 <div class="stores">
-	<div class="store"><b>Beads on Dolt</b>Work items, claims, leases, event journal.</div>
+	<div class="store"><b>Work store on JetStream</b>Work items, claims, leases, event journal (stream MM_WORK).</div>
 	<div class="store"><b>NATS + JetStream KV</b>Transport. Also accounts, routing, environments.</div>
 	<div class="store"><b>Victoria</b>Logs, traces, metrics of api and web.</div>
 </div>

@@ -3,11 +3,11 @@ import { mergeEnv, parseEnv, serializeEnv } from "./env.ts";
 
 test("parseEnv reads KEY=VALUE lines and keeps '=' inside values", () => {
 	const env = parseEnv(
-		"# comment\nA=1\n\nURL=postgres://u:p@h/db?x=1\n  B = 2\nnot a pair\n",
+		"# comment\nA=1\n\nURL=nats://u:p@h:4222/?x=1\n  B = 2\nnot a pair\n",
 	);
 	expect([...env]).toEqual([
 		["A", "1"],
-		["URL", "postgres://u:p@h/db?x=1"],
+		["URL", "nats://u:p@h:4222/?x=1"],
 		["B", " 2"],
 	]);
 	expect(parseEnv(null).size).toBe(0);
@@ -33,13 +33,13 @@ test("keep never replaces an existing secret and makes a missing one once", () =
 
 test("set overwrites, reports only real changes, and leaves unknown keys alone", () => {
 	const { env, changed } = mergeEnv(
-		parseEnv("DATABASE_URL=keep-me\nNATS_URL=old\nSAME=1"),
+		parseEnv("OTHER_URL=keep-me\nNATS_URL=old\nSAME=1"),
 		{
 			set: { NATS_URL: "new", SAME: "1" },
 		},
 	);
 	expect(changed).toEqual(["NATS_URL"]);
-	expect(env.get("DATABASE_URL")).toBe("keep-me");
+	expect(env.get("OTHER_URL")).toBe("keep-me");
 	expect(env.get("NATS_URL")).toBe("new");
 });
 

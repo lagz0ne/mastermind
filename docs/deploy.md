@@ -7,11 +7,12 @@ machine is needed. The example site is https://mastermind.vibea.dev.
 ```bash
 export DOKPLOY_API_KEY=...            # or DOKPLOY_API_KEY_FILE=<path to a file that holds it>
 bun deploy/dokploy.ts status          # what runs, env key names, health
-bun deploy/dokploy.ts apply           # create or update Dolt, NATS and the app env; deploy; verify
+bun deploy/dokploy.ts apply           # create or update NATS and the app env; deploy; verify
 bun deploy/dokploy.ts secrets         # redeploy hooks + PUBLIC_URL into the GitHub environment
 bun deploy/dokploy.ts login-approve <code> --account <name>   # approve a login code shown on /login
 bun deploy/dokploy.ts release <sha>   # deploy the image of one commit (sha-<sha> tag), show queue/status/log
 bun deploy/dokploy.ts release latest  # deploy :latest (what the app hook deploys)
+bun deploy/dokploy.ts retire [--stop] # list (or stop) the services in site.json "retired"; never deletes
 ```
 
 `apply` is safe to run again: it keeps existing secrets, changes only what differs, and ends with a
@@ -24,32 +25,39 @@ service names, the git source, and extra app env (`appEnv`, never secrets). For 
 another file and set `MASTERMIND_SITE=<path>`. No host and no machine path is in the code;
 `deploy/src/independence.test.ts` (part of `bun run check`) fails if one comes back.
 
-The Dokploy project and the app (image + Postgres + `DATABASE_URL`) must exist before the first `apply`.
+The Dokploy project and the app (image) must exist before the first `apply`.
 
 ## Services
 
 | Service | Defined in | What | Reachable |
 |---|---|---|---|
-| `mastermind` | CI (`.github/workflows/ci.yml`) | the app image: UI, `/api/*`, and `bd serve` as a child. Volume `/backups` (JetStream backups) | the public URL, port 3000 |
-| `mastermind-db` | Dokploy database | Postgres 16: Mastermind's own state (`DATABASE_URL`) | internal only |
-| `mastermind-infra` | `deploy/compose.yml` (Dokploy compose, built from git) | `dolt`: `dolthub/dolt-sql-server:2.7.2`, the work queue (beads). Volumes: data `/var/lib/dolt`, backups `/backups` | internal only: `mastermind-dolt:3306` |
+| `mastermind` | CI (`.github/workflows/ci.yml`) | the app image: UI and `/api/*`. Volume `/backups` (JetStream backups) | the public URL, port 3000 |
 | `mastermind-nats` | `deploy/nats` (Dokploy application, built from git) | `nats:2.15.2` with `nats.conf` baked in: the bus to runner adapters. Volume `/data/jetstream` | 4222 and 8222 internal only; WebSocket 8080 public as `wss://<public host>/nats` |
 
-NATS is an application and not part of the compose because it needs a public route, and a Dokploy
+NATS is a Dokploy application (not a compose service) because it needs a public route, and a Dokploy
 whose Traefik reads only Dokploy's route files gives routes to applications only.
+
+The backend is Bun + NATS only. All state is on NATS JetStream: the work store (stream `MM_WORK`) and
+KV (accounts, routing, environments). There is no SQL database.
+
+### Retired services
+
+`deploy/site.json` `"retired"` names the services of the old stores: `mastermind-infra` (a Dokploy
+compose with Dolt, the beads work queue) and `mastermind-db` (Postgres). Nothing uses them since
+mm-210.35; they held test data only. `bun deploy/dokploy.ts retire` lists them with their status;
+`retire --stop` stops them and keeps their volumes. Deleting them is a human's decision, made in
+Dokploy. `apply` removes the old app env keys (`DOLT_*`, `DATABASE_URL`, `WORK_STORE`, `BD_*`).
 
 ## Secrets
 
 Secrets live only in Dokploy, as service env. `apply` makes the missing ones and never prints a value:
-the Dolt root password (env of `mastermind-infra`), and the NATS auth password and issuer seed (env of
-the app; the NATS server gets the password and the public key derived from the seed). To rotate one,
+the NATS auth password and issuer seed (env of the app; the NATS server gets the password and the public key derived from the seed). To rotate one,
 delete its key in Dokploy and run `apply`.
 
 ## CD
 
 Every push to `main`: check → publish the image → deploy. The deploy job asks production which commit
-is live, calls the Dokploy hook of the infra compose and of NATS only when `deploy/compose.yml` or
-`deploy/nats` changed since that commit, calls the app hook, then waits until `/api/health` reports
+is live, calls the Dokploy hook of NATS only when `deploy/nats` changed since that commit, calls the app hook, then waits until `/api/health` reports
 this commit with `ok: true`, and checks the public NATS WebSocket.
 
 Dokploy runs one deployment at a time for **all** its projects. An accepted hook can wait minutes
@@ -64,100 +72,21 @@ So the app deploy has two modes:
 - **No key** (hooks only): CI posts the app hook (`:latest`) once (a second post only adds a job to
   the shared queue), and fails after 15 minutes. It cannot see the queue or the log.
 
-`GET /api/health` reports `version` (the commit) and one probe per dependency: `db`, `dolt`, `bd`.
-Each is `up`, `down` or `unconfigured`; any `down` makes it a 503.
+`GET /api/health` reports `version` (the commit) and one probe per dependency: `nats` (the
+dispatcher) and `work` (the work store). Each is `up`, `down` or `unconfigured`; any `down` makes it a
+503. `jetstream` (storage use and the last backup) is a warning only.
 
-## Work store: `WORK_STORE`
+## Work store
 
-| `WORK_STORE` | Where work lives |
-|---|---|
-| `beads` | Dolt + `bd serve`, below. Needs `DOLT_URL`. Kept only until it is removed. |
-| `nats` (default) | JetStream (`packages/work`), on the dispatcher's NATS (auth's APP connection, or `DISPATCH_NATS_URL`). No `bd serve` child and no Dolt connection: `DOLT_URL` is ignored. Health shows `work: up`. |
+The work store is JetStream (`packages/work`), on the dispatcher's NATS (auth's APP connection, or
+`DISPATCH_NATS_URL` in local dev). Without NATS, work is off and `/api/board`, `/api/beads` answer 503.
 
-With `nats`, one stream `MM_WORK` (subjects `mm.work.<id>`, file storage, 1 replica, no age limit,
+One stream `MM_WORK` (subjects `mm.work.<id>`, file storage, 1 replica, no age limit,
 `max_bytes` 1 GiB with discard `new`) holds every item and its history: one message per change. A write
 is a compare-and-set on the item's subject, so a claim race has one winner. Lease renewals go to the KV
 bucket `mm_work_leases`, not to the stream. Each replica keeps the board in memory, loaded from the last
 message of each item and kept live by an ordered consumer. A full stream refuses writes; it never drops
-items. Not available on this store: dependencies (`blocked` is always false), the `bd` CLI, Dolt history.
-
-## Beads: Dolt + bd serve
-
-Mastermind reads beads straight from Dolt with `Bun.SQL` (MySQL protocol) and writes through `bd serve`,
-so claims, leases and the events journal stay correct. The api (`apps/api/src/index.ts`) does this at
-boot when `DOLT_URL` is set:
-
-1. If the database has no beads schema (no `issues` table), it runs `bd init --server --external` once
-   in a scratch dir. That creates the database. First boot takes about 15s.
-2. It writes a disposable workspace (`$BD_WORKSPACE`, default `$TMPDIR/mastermind-beads`): a
-   `git init`ed dir (bd resolves workspaces from a git root) with `.beads/metadata.json` (server mode,
-   the database name) and `.beads/config.yaml` (`events-journal: true`). All state is in Dolt, so the
-   workspace is rewritten on every boot.
-3. It runs `bd serve --addr 127.0.0.1:$BD_SERVE_PORT` and restarts it whenever it exits (backoff 0.5s
-   doubling to 30s). It listens on loopback only, so it needs no token. The Dolt password reaches bd
-   through `BEADS_DOLT_PASSWORD` in its env, never argv.
-4. If Dolt is unreachable it retries with backoff instead of crashing; health shows `dolt`/`bd` down
-   meanwhile.
-
-The image carries the `bd` binary (version and sha256 pinned in `apps/api/Dockerfile`), `git` (needed by
-`bd init` and `bd serve`) and `DO_NOT_TRACK=1` (bd usage metrics off). To upgrade bd, bump `BD_VERSION`
-and both checksums from the release's `checksums.txt`.
-
-### Env
-
-| Var | Example | Notes |
-|---|---|---|
-| `DOLT_URL` | `mysql://root:<pw>@mastermind-dolt:3306/mastermind` | unset: beads off, health says `unconfigured`. Set by `apply`. A secret (it holds the password) |
-| `DOLT_BACKUP_URL` | `file:///backups/mastermind` | a path on the **Dolt** container. Unset: no backups |
-| `DOLT_BACKUP_INTERVAL_MINUTES` | `360` | default 6h; one sync also runs at boot |
-| `BD_SERVE_PORT` | `3010` | loopback port of `bd serve` |
-| `BD_PREFIX` | `mm` | issue id prefix, used only when bootstrapping |
-| `BD_WORKSPACE` | `/tmp/mastermind-beads` | disposable workspace root |
-| `BD_BIN` | `/usr/local/bin/bd` | set in the image |
-
-The Dolt user needs `ALL` on `*.*`: it creates the database on first boot and calls `dolt_backup`.
-
-## Backup
-
-The api registers a Dolt backup named `mastermind-backup` at `DOLT_BACKUP_URL`
-(`CALL dolt_backup('add', ...)`) and runs `CALL dolt_backup('sync', 'mastermind-backup')` at boot and
-every `DOLT_BACKUP_INTERVAL_MINUTES`. A sync copies the whole database, history included, and logs
-`dolt: backup synced to ... in <ms>`. `bd backup` is not used: bd refuses it against a Dolt server it
-does not manage. The backup lands on the `/backups` volume of the Dolt container. It is on the same
-machine as the data: it protects against a bad write, not against the loss of the machine. An
-off-machine copy is not set up yet.
-
-## Restore
-
-Run these on the Dolt server (`dolt sql` inside the `dolt` container of `mastermind-infra`, or any MySQL
-client on the Docker network as the root user). They were drilled on dolt 2.7.2 with bd 1.3.4 (mm-210.6).
-
-1. **Check the backup** without touching the live database. Restore a copy next to it, count, then drop it:
-
-   ```sql
-   CALL dolt_backup('restore', 'file:///backups/mastermind', 'mastermind_check');
-   SELECT count(*) FROM mastermind_check.issues;
-   SELECT max(seq) FROM mastermind_check.bd_events_journal;
-   DROP DATABASE mastermind_check;
-   ```
-
-2. **Replace the live database.** Stop the app first (Dokploy: stop `mastermind`) so nothing writes
-   during the swap, then do one of:
-
-   ```sql
-   -- the live database still exists: overwrite it in place
-   CALL dolt_backup('restore', '--force', 'file:///backups/mastermind', 'mastermind');
-   -- the live database is gone
-   CALL dolt_backup('restore', 'file:///backups/mastermind', 'mastermind');
-   ```
-
-3. Start the app. Within seconds `GET /api/health` shows `"dolt":"up","bd":"up"`, and the next backup sync
-   re-registers the backup if the restore dropped it. The app also comes back by itself if the database
-   was swapped under it while it ran; stopping it just keeps writes from landing in the old copy.
-
-What you lose: writes after the last sync, up to `DOLT_BACKUP_INTERVAL_MINUTES`. Event journal `seq`
-numbers go back to the backup's, so clients that tail `/v0/beads/events?since=<seq>` must reset their
-cursor after a restore.
+items. Not available yet: dependencies (`blocked` is always false).
 
 ## NATS
 

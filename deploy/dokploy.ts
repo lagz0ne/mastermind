@@ -3,13 +3,16 @@
 // this script talks to the Dokploy API and needs nothing else on the machine.
 //
 //   bun deploy/dokploy.ts status     what runs, and which env keys exist (names only)
-//   bun deploy/dokploy.ts apply      create or update Dolt, NATS and the app env; deploy; verify
+//   bun deploy/dokploy.ts apply      create or update NATS and the app env; deploy; verify
 //   bun deploy/dokploy.ts secrets    put the redeploy hooks and the public URL into GitHub (needs `gh`)
 //   bun deploy/dokploy.ts release <sha|latest>
 //                                    pin the app image to the CI tag of <sha>, deploy it, show the
 //                                    Dokploy queue and status, fail with the log tail, wait for health
 //   bun deploy/dokploy.ts login-approve <code> --account <name>
 //                                    approve a login code shown on <public url>/login (the operator)
+//   bun deploy/dokploy.ts retire [--stop]
+//                                    list the services in site.json "retired"; --stop stops them.
+//                                    It never deletes: a human does that in Dokploy.
 //   bun deploy/dokploy.ts jetstream <list|backup|restore|usage|marker> [...]
 //                                    the JetStream backup CLI (apps/api/src/backup/cli.ts) against
 //                                    the production NATS over its public WebSocket, as the api
@@ -100,7 +103,10 @@ type Compose = Service & {
 	composeId: string;
 	composeStatus: string;
 	env: string | null;
-	refreshToken: string;
+};
+type Postgres = Service & {
+	postgresId: string;
+	applicationStatus: string;
 };
 type Domain = {
 	domainId: string;
@@ -116,6 +122,7 @@ type Project = {
 		environmentId: string;
 		applications: App[];
 		compose: Compose[];
+		postgres?: Postgres[];
 	}[];
 };
 
@@ -132,7 +139,7 @@ async function findProject() {
 		applicationId: env.applications.find((a) => a.name === cfg.app)
 			?.applicationId,
 		natsId: env.applications.find((a) => a.name === cfg.nats)?.applicationId,
-		composeId: env.compose.find((c) => c.name === cfg.infra)?.composeId,
+		env,
 	};
 }
 
@@ -165,8 +172,6 @@ async function waitFor<T>(
 	);
 }
 
-/** Where the infra compose is in this repo. */
-const composePath = "./deploy/compose.yml";
 const publicHost = new URL(cfg.publicUrl).host;
 const natsPublicUrl = `${cfg.publicUrl.replace(/^http/, "ws")}/nats`;
 
@@ -202,15 +207,8 @@ async function status() {
 				`  route    https://${d.host}${d.path && d.path !== "/" ? d.path : ""} → ${app.name}:${d.port}`,
 			);
 	}
-	if (ids.composeId) {
-		const infra = await api<Compose>("compose.one", {
-			composeId: ids.composeId,
-		});
-		log(
-			`  infra    ${infra.name}: ${infra.composeStatus}  env: ${keys(infra.env)}`,
-		);
-	} else
-		log(`  infra    ${cfg.infra}: MISSING (run: bun deploy/dokploy.ts apply)`);
+	for (const r of retiredServices(ids.env))
+		log(`  retired  ${r.name} (${r.kind}): ${r.status}`);
 	log(
 		`  health   ${JSON.stringify(await health().catch((e) => ({ error: String(e) })))}`,
 	);
@@ -237,53 +235,7 @@ async function apply() {
 	if (!ids.applicationId)
 		throw new Error(`app '${cfg.app}' not found in project '${cfg.project}'`);
 
-	// 1. The infra compose (Dolt): source = this repo, so Dokploy runs what is on main.
-	let composeId = ids.composeId;
-	if (!composeId) {
-		const created = await api<Compose>("compose.create", {
-			name: cfg.infra,
-			environmentId: ids.environmentId,
-			composeType: "docker-compose",
-			appName: cfg.infra,
-		});
-		composeId = created.composeId;
-		log(`infra: created compose ${cfg.infra}`);
-	}
-	const infra = await api<Compose>("compose.one", { composeId });
-	const infraEnv = mergeEnv(parseEnv(infra.env), {
-		keep: { DOLT_ROOT_PASSWORD: secret },
-		drop: ["NATS_AUTH_PASSWORD", "NATS_ISSUER_SEED", "NATS_ISSUER_PUBLIC"],
-	});
-	await api("compose.update", {
-		composeId,
-		sourceType: "git",
-		customGitUrl: cfg.repo,
-		customGitBranch: cfg.branch,
-		composePath: composePath,
-		autoDeploy: true,
-		env: serializeEnv(infraEnv.env),
-	});
-	// This Traefik reads only Dokploy's route files, so a route on a compose service does nothing.
-	for (const d of await api<Domain[]>("domain.byComposeId", { composeId })) {
-		await api("domain.delete", { domainId: d.domainId });
-		log(`infra: removed dead route ${d.host}${d.path ?? ""}`);
-	}
-	log(
-		`infra: source ${cfg.repo}@${cfg.branch} ${composePath}; env ${infraEnv.changed.length ? `changed ${infraEnv.changed.join(", ")}` : "unchanged"}`,
-	);
-	await api("compose.deploy", { composeId, title: "deploy/dokploy.ts apply" });
-	await sleep(3000);
-	await waitFor("the infra deploy", 600, async () => {
-		const c = await api<Compose>("compose.one", { composeId });
-		if (c.composeStatus === "error")
-			throw new Fatal(
-				"Dokploy reports that the compose deploy failed; read its log in Dokploy",
-			);
-		return c.composeStatus === "done" ? true : undefined;
-	});
-	log("infra: deployed");
-
-	// 2. The app holds the NATS secrets. Existing values win, so apply never rotates them.
+	// 1. The app holds the NATS secrets. Existing values win, so apply never rotates them.
 	const app = await api<App>("application.one", {
 		applicationId: ids.applicationId,
 	});
@@ -299,7 +251,7 @@ async function apply() {
 	const natsPassword = withSecrets.env.get("NATS_AUTH_PASSWORD") ?? "";
 	const seed = withSecrets.env.get("NATS_ISSUER_SEED") ?? "";
 
-	// 3. NATS: a Dokploy application built from deploy/nats, public only as wss://<host>/nats.
+	// 2. NATS: a Dokploy application built from deploy/nats, public only as wss://<host>/nats.
 	let natsId = ids.natsId;
 	let natsChanged = false;
 	if (!natsId) {
@@ -378,7 +330,8 @@ async function apply() {
 		log("nats: deployed");
 	} else log("nats: unchanged");
 
-	// 4. Point the app at both. Keys this script does not know (DATABASE_URL, ...) are left alone.
+	// 3. Point the app at NATS. Keys this script does not know are left alone; keys of the
+	// retired stores (Dolt, bd, Postgres) are removed.
 	// JetStream backups go to a volume of the app (the api writes them); BACKUP_URL may be changed
 	// to an s3:// bucket in Dokploy, and apply keeps it.
 	let appMounted = false;
@@ -395,9 +348,8 @@ async function apply() {
 	}
 	const appEnv = mergeEnv(withSecrets.env, {
 		keep: { BACKUP_URL: () => "file:///backups/nats" },
+		drop: RETIRED_APP_KEYS,
 		set: {
-			DOLT_URL: `mysql://root:${infraEnv.env.get("DOLT_ROOT_PASSWORD")}@mastermind-dolt:3306/mastermind`,
-			DOLT_BACKUP_URL: "file:///backups/mastermind",
 			NATS_URL: `nats://${nats.appName}:4222`,
 			// @mastermind/bus connects over WebSocket only.
 			NATS_WS_URL: `ws://${nats.appName}:8080`,
@@ -423,10 +375,10 @@ async function apply() {
 		await deployApp(ids.applicationId, appMounted ? "volume" : "env");
 	}
 
-	// 5. Verify from outside.
-	const h = await waitFor("health dolt=up bd=up", 300, async () => {
+	// 4. Verify from outside.
+	const h = await waitFor("health nats=up work=up", 300, async () => {
 		const now = await health();
-		return now.dolt === "up" && now.bd === "up" ? now : undefined;
+		return now.nats === "up" && now.work === "up" ? now : undefined;
 	});
 	log(`ok: health ${JSON.stringify(h)}`);
 	const reply = await waitFor(
@@ -572,17 +524,14 @@ async function ghEnv(): Promise<Record<string, string | undefined>> {
 /** Put the redeploy hooks into the GitHub environment. The URLs go through stdin, not argv. */
 async function secrets() {
 	const ids = await findProject();
-	if (!ids.applicationId || !ids.composeId || !ids.natsId)
-		throw new Error("run apply first");
+	if (!ids.applicationId || !ids.natsId) throw new Error("run apply first");
 	const app = await api<App>("application.one", {
 		applicationId: ids.applicationId,
 	});
 	const nats = await api<App>("application.one", { applicationId: ids.natsId });
-	const infra = await api<Compose>("compose.one", { composeId: ids.composeId });
 	const hooks = {
 		DOKPLOY_DEPLOY_HOOK: `${cfg.dokployUrl}/api/deploy/${app.refreshToken}`,
 		DOKPLOY_NATS_HOOK: `${cfg.dokployUrl}/api/deploy/${nats.refreshToken}`,
-		DOKPLOY_INFRA_HOOK: `${cfg.dokployUrl}/api/deploy/compose/${infra.refreshToken}`,
 	};
 	const env = await ghEnv();
 	for (const [name, value] of Object.entries(hooks)) {
@@ -653,6 +602,80 @@ async function loginApprove(argv: string[]) {
 	log(describeApproval(body as Approval));
 }
 
+/** App env keys of the stores Mastermind no longer uses; apply removes them. */
+const RETIRED_APP_KEYS = [
+	"DOLT_URL",
+	"DOLT_BACKUP_URL",
+	"DOLT_BACKUP_INTERVAL_MINUTES",
+	"DATABASE_URL",
+	"WORK_STORE",
+	"BD_SERVE_PORT",
+	"BD_WORKSPACE",
+	"BD_BIN",
+	"BD_PREFIX",
+];
+
+type Retired = {
+	name: string;
+	kind: "compose" | "postgres" | "application";
+	id: string;
+	status: string;
+};
+
+type ProjectEnv = Awaited<ReturnType<typeof findProject>>["env"];
+
+/** The services named in site.json "retired" that still exist, with their status. */
+function retiredServices(env: ProjectEnv): Retired[] {
+	const found: Retired[] = [];
+	for (const name of cfg.retired) {
+		for (const c of env.compose.filter((c) => c.name === name))
+			found.push({
+				name,
+				kind: "compose",
+				id: c.composeId,
+				status: c.composeStatus,
+			});
+		for (const d of (env.postgres ?? []).filter((d) => d.name === name))
+			found.push({
+				name,
+				kind: "postgres",
+				id: d.postgresId,
+				status: d.applicationStatus,
+			});
+		for (const a of env.applications.filter((a) => a.name === name))
+			found.push({
+				name,
+				kind: "application",
+				id: a.applicationId,
+				status: a.applicationStatus,
+			});
+	}
+	return found;
+}
+
+/**
+ * List the retired services; with --stop, stop each one. Stopping keeps the service, its
+ * volumes and its data: start it again in Dokploy to undo. Deleting is a human's decision.
+ */
+async function retire(argv: string[]) {
+	const stop = argv.includes("--stop");
+	const found = retiredServices((await findProject()).env);
+	const missing = cfg.retired.filter((n) => !found.some((r) => r.name === n));
+	for (const name of missing) log(`retired  ${name}: not in Dokploy (gone)`);
+	for (const r of found) {
+		log(`retired  ${r.name} (${r.kind}): ${r.status}`);
+		if (!stop) continue;
+		const idKey = {
+			compose: "composeId",
+			postgres: "postgresId",
+			application: "applicationId",
+		}[r.kind];
+		await api(`${r.kind}.stop`, { [idKey]: r.id });
+		log(`retired  ${r.name}: stop requested (volumes and data are kept)`);
+	}
+	if (!stop && found.length) log("run with --stop to stop them");
+}
+
 /**
  * Run the JetStream backup CLI from this clone against production: NATS over the public
  * WebSocket, logged in as the api (the internal APP token from NATS_ISSUER_SEED, which the
@@ -699,11 +722,12 @@ const commands: Record<string, () => Promise<void>> = {
 	"login-approve": () => loginApprove(process.argv.slice(3)),
 	release: () => release(process.argv[3]),
 	jetstream: () => jetstream(process.argv.slice(3)),
+	retire: () => retire(process.argv.slice(3)),
 };
 const command = commands[process.argv[2] ?? ""];
 if (!command) {
 	console.error(
-		"usage: bun deploy/dokploy.ts status | apply | secrets | release <sha|latest> | login-approve <code> --account <name> | jetstream <list|backup|restore|usage|marker> ...",
+		"usage: bun deploy/dokploy.ts status | apply | secrets | release <sha|latest> | login-approve <code> --account <name> | retire [--stop] | jetstream <list|backup|restore|usage|marker> ...",
 	);
 	process.exit(2);
 }

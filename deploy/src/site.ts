@@ -9,17 +9,20 @@ export type Site = {
 	project: string;
 	/** Name of the app (the UI + API image) in that project. It must exist. */
 	app: string;
-	/** Name of the compose service that runs deploy/compose.yml. */
-	infra: string;
 	/** Name of the application built from deploy/nats. */
 	nats: string;
-	/** Git URL and branch that Dokploy builds the infra from. */
+	/** Git URL and branch that Dokploy builds NATS from. */
 	repo: string;
 	branch: string;
 	/** GitHub environment that receives the redeploy hooks. */
 	githubEnvironment: string;
 	/** More app env for this site, for example the OTLP endpoint. Never secrets. */
 	appEnv: Record<string, string>;
+	/**
+	 * Services of this project that Mastermind no longer uses (by Dokploy name).
+	 * `retire` lists them and, with --stop, stops them. Nothing here deletes them.
+	 */
+	retired: string[];
 };
 
 const required = [
@@ -27,7 +30,6 @@ const required = [
 	"publicUrl",
 	"project",
 	"app",
-	"infra",
 	"nats",
 	"repo",
 	"branch",
@@ -52,12 +54,19 @@ export function parseSite(text: string, source: string): Site {
 		if (typeof value !== "string")
 			throw new Error(`${source}: appEnv.${key} must be a string`);
 	}
+	const retired = raw.retired ?? [];
+	if (
+		!Array.isArray(retired) ||
+		!retired.every((name) => typeof name === "string" && name)
+	)
+		throw new Error(`${source}: "retired" must be a list of service names`);
 	const site = raw as unknown as Site;
 	return {
 		...site,
 		dokployUrl: site.dokployUrl.replace(/\/$/, ""),
 		publicUrl: site.publicUrl.replace(/\/$/, ""),
 		appEnv: appEnv as Record<string, string>,
+		retired: retired as string[],
 	};
 }
 

@@ -86,7 +86,7 @@ scripts/ship.sh -m "<msg>" -i <bead> -- <paths>   # the only way to commit/push
 
 ## Architecture Overview
 
-- `apps/api`: the deployable. A Bun.serve server that serves the UI at `/*` and JSON at `/api/*`, with Postgres via `Bun.sql` (`DATABASE_URL`). Shipped as `ghcr.io/lagz0ne/mastermind`.
+- `apps/api`: the deployable. A Bun.serve server that serves the UI at `/*` and JSON at `/api/*`. All state is on NATS: the work store on JetStream (`packages/work`) and KV (accounts, routing, environments); no SQL database. Shipped as `ghcr.io/lagz0ne/mastermind`.
 - `apps/web`: the React UI. Not deployed on its own: `apps/api` imports `@mastermind/web/index.html` and Bun bundles it (HMR in dev, hashed assets in the image).
 - `packages/*`: internal libraries named `@mastermind/<name>`, exporting TS source (no build step). `core` holds types shared by api and web.
 - `.github/workflows/ci.yml`: on every push to main: check → publish image → deploy → wait until production serves that commit.
@@ -96,9 +96,10 @@ scripts/ship.sh -m "<msg>" -i <bead> -- <paths>   # the only way to commit/push
 Mastermind is the code: it may use services, but it reaches every one through configuration. No code,
 test, build or deploy step may need this machine's paths, the machine hub's tools, or a hard-coded host.
 
-- The repo owns its deployment: `bun deploy/dokploy.ts status | apply | secrets` talks to the Dokploy API
+- The repo owns its deployment: `bun deploy/dokploy.ts status | apply | secrets | release | retire` talks to the Dokploy API
   (`DOKPLOY_API_KEY` or `DOKPLOY_API_KEY_FILE`). Site values are in `deploy/site.json`. Details: `docs/deploy.md`.
-- Services: the app (image from CI), Postgres, Dolt (`deploy/compose.yml`), NATS (`deploy/nats`).
+- Services: the app (image from CI) and NATS with JetStream (`deploy/nats`). The old Dolt and Postgres
+  services are listed in `deploy/site.json` `retired` (`bun deploy/dokploy.ts retire`).
   `<public URL>/api/health` shows the live commit and the state of each dependency.
 - Secrets live only in Dokploy. Never copy a secret value into the repo, beads or logs.
 - CI redeploys through hooks stored in the GitHub environment `production`.
