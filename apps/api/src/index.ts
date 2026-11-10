@@ -4,6 +4,7 @@ import { browserIngest, telemetryFromEnv, traced } from "@mastermind/telemetry";
 import index from "@mastermind/web/index.html";
 import { SQL } from "bun";
 import { type Deps, health } from "./app.ts";
+import type { Auth } from "./auth/service.ts";
 import { requireAccountFromEnv } from "./auth/session.ts";
 import { startAuthInBackground } from "./auth/start.ts";
 import {
@@ -23,6 +24,9 @@ import {
 	serverUrl,
 	syncBackup,
 } from "./dolt.ts";
+import { RunnerRegistry } from "./people/registry.ts";
+import { peopleRoutes } from "./people/routes.ts";
+import { runnerScript } from "./people/runner-script.ts";
 
 const env = process.env;
 const version = env.GIT_SHA ?? "dev";
@@ -133,6 +137,19 @@ export const requireAccount = requireAccountFromEnv(auth, env);
 if (!auth && env.AUTH_DISABLED === "1")
 	console.warn("auth: AUTH_DISABLED=1, every /api request is account local");
 
+// /people: accounts and the live runner list (the dispatcher feeds the registry).
+const runners = new RunnerRegistry();
+let authNow: Auth | null = null;
+auth?.ready.then((s) => (authNow = s.auth)).catch(() => {});
+const people = peopleRoutes({
+	requireAccount,
+	auth: () => authNow,
+	mode: auth ? "on" : env.AUTH_DISABLED === "1" ? "off" : "unconfigured",
+	registry: runners,
+	runnerScript: runnerScript(),
+	onError: (error) => console.error(`people: ${error}`),
+});
+
 // Dispatcher on NATS, on auth's APP connection; without auth, on DISPATCH_NATS_URL (ws/wss, local dev).
 // Off when neither is set; needs Dolt and bd serve.
 const hub = board.hub;
@@ -154,6 +171,7 @@ const dispatch =
 				events: hub
 					? (listener) => hub.subscribe(listener).unsubscribe
 					: undefined,
+				observe: runners.observe,
 				onError: (error) => console.error(`dispatch: ${error}`),
 			})
 		: null;
@@ -167,6 +185,7 @@ const server = Bun.serve({
 		{
 			"/api/health": () => health(deps, version),
 			...board.routes,
+			...people,
 			// Empty when auth is off; the cast only keeps the route keys typed.
 			...(auth?.routes ?? ({} as NonNullable<typeof auth>["routes"])),
 			// Browser vitals, errors and route timings, forwarded as mastermind-web.
