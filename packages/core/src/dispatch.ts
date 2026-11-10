@@ -24,8 +24,58 @@ export const DISPATCH_STAGES = [
 ] as const;
 export type DispatchStage = (typeof DISPATCH_STAGES)[number];
 
+/**
+ * A named environment: where and how an agent works on a bead. Defined once in
+ * Mastermind (`/environments`, KV), referenced by a bead with the label
+ * `env:<name>`, resolved by the dispatcher into {@link DispatchEnv}.
+ */
+export type Environment = {
+	/** A single NATS subject token: letters, digits, '_' and '-'. */
+	name: string;
+	description: string;
+	/** Git remote URL of the repo to work in. */
+	repo: string;
+	/** Default branch, tag or commit; a bead's `ref:` label overrides it. */
+	ref: string;
+	/** Capabilities the runner must have (tools, CLIs, platforms), e.g. `bun>=1.4`. */
+	requires: string[];
+	/** Shell commands that prepare a checkout (install, build, seed). */
+	setup: string[];
+	/** Shell commands that prove the checkout is ready; run before each start. */
+	check: string[];
+	/** Names of secrets the runner must supply. Never the values. */
+	secrets: string[];
+	/** A preference only: the user's runner may override it. */
+	agent?: EnvironmentAgent;
+	/** Text added to every prompt for this environment. */
+	instructions?: string;
+};
+
+/** A bead names its environment with ONE label `env:<name>`. */
+export const ENV_LABEL_PREFIX = "env:";
+
+export function envLabel(name: string): string {
+	return `${ENV_LABEL_PREFIX}${name}`;
+}
+
+/** The environment name a bead points to, or null. */
+export function envNameOf(bead: Pick<Bead, "labels">): string | null {
+	const label = bead.labels.find(
+		(l) => l.startsWith(ENV_LABEL_PREFIX) && l.length > ENV_LABEL_PREFIX.length,
+	);
+	return label ? label.slice(ENV_LABEL_PREFIX.length) : null;
+}
+
+/** Which agent an environment prefers. */
+export type EnvironmentAgent = { provider?: string; mode?: string };
+
 /** What the runner must prepare before it starts the agent. */
 export type DispatchEnv = {
+	/**
+	 * The environment's name. Absent only for beads that still carry the old
+	 * `repo:`/`ref:` labels instead of `env:<name>`.
+	 */
+	name?: string;
 	/** Git remote URL of the repo to work in. */
 	repo: string;
 	/** Branch, tag or commit to check out. */
@@ -36,8 +86,14 @@ export type DispatchEnv = {
 	requires: string[];
 	/** Shell commands to run once in the checkout before the agent starts. */
 	setup?: string[];
+	/** Shell commands that prove readiness; run before every start. */
+	check?: string[];
 	/** Names of secrets the runner must supply. Never the values. */
 	secrets?: string[];
+	/** The environment's agent preference; the runner's own rules win. */
+	agent?: EnvironmentAgent;
+	/** Text the environment adds to every prompt. */
+	instructions?: string;
 };
 
 /** One unit of dispatched work: this bead, this stage, to this actor. */
