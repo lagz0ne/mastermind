@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { BusError } from "@mastermind/bus";
 import type { NextRequest, ReadyNotice, RunnerInfo } from "@mastermind/core";
-import { checkActor, checkRunner, Dispatcher } from "./dispatcher.ts";
+import {
+	checkActor,
+	checkRunner,
+	Dispatcher,
+	type DispatchSeen,
+} from "./dispatcher.ts";
 import { fakeWork, LEASE_MS } from "./fake-work.ts";
 
 const runner = (id: string, extra: Partial<RunnerInfo> = {}): NextRequest => ({
@@ -15,7 +20,9 @@ const runner = (id: string, extra: Partial<RunnerInfo> = {}): NextRequest => ({
 	},
 });
 
-function setup(opts: { waitMs?: number } = {}) {
+function setup(
+	opts: { waitMs?: number; observe?: (seen: DispatchSeen) => void } = {},
+) {
 	let clock = new Date("2026-11-10T08:00:00Z");
 	const now = () => clock;
 	const work = fakeWork(now);
@@ -24,6 +31,7 @@ function setup(opts: { waitMs?: number } = {}) {
 		work,
 		now,
 		waitMs: opts.waitMs ?? 0,
+		observe: opts.observe,
 		rules: () => [{ match: { type: "bug" }, queue: "fix" }],
 		notify: (n) => {
 			notices.push(n);
@@ -291,4 +299,51 @@ test("checkActor and checkRunner", () => {
 	expect(() => checkActor("alice", "alicex/a")).toThrow(BusError);
 	expect(() => checkActor("alice", "alice/a/b")).toThrow(BusError);
 	expect(checkRunner("alice", runner("a")).id).toBe("a");
+});
+
+describe("observe", () => {
+	test("tells who asked, who holds what and who let go", async () => {
+		const seen: DispatchSeen[] = [];
+		const { d, work, advance } = setup({ observe: (s) => seen.push(s) });
+		work.add({ id: "mm-1" }, "build");
+		work.add({ id: "mm-2" }, "build");
+		await d.next("alice", "build", runner("a", { capacity: 2 }));
+		await d.heartbeat("alice", "mm-1", { actor: "alice/a" });
+		await d.complete("alice", "mm-1", { actor: "alice/a", summary: "ok" });
+		await d.next("alice", "build", runner("a"));
+		advance(LEASE_MS + 1_000);
+		await d.sweep();
+		expect(
+			seen.map((s) =>
+				s.kind === "next"
+					? [s.kind, s.runner.capacity]
+					: [s.kind, s.actor, s.beadId],
+			),
+		).toEqual([
+			["next", 2],
+			["holds", "alice/a", "mm-1"],
+			["holds", "alice/a", "mm-1"],
+			["done", "alice/a", "mm-1"],
+			["next", undefined],
+			["holds", "alice/a", "mm-2"],
+			["done", "alice/a", "mm-2"],
+		]);
+	});
+
+	test("an observer that throws does not break dispatch", async () => {
+		const errors: unknown[] = [];
+		const work = fakeWork(() => new Date("2026-11-10T08:00:00Z"));
+		work.add({ id: "mm-1" }, "build");
+		const d = new Dispatcher({
+			work,
+			waitMs: 0,
+			observe: () => {
+				throw new Error("boom");
+			},
+			onError: (e) => errors.push(e),
+		});
+		const { dispatch } = await d.next("alice", "build", runner("a"));
+		expect(dispatch?.bead.id).toBe("mm-1");
+		expect(errors.length).toBe(2);
+	});
 });

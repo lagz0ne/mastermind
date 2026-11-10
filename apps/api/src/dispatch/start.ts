@@ -3,6 +3,7 @@ import { BdClient, DoltReader, type SqlTag } from "@mastermind/beads";
 import { connect } from "@mastermind/bus";
 import type { BeadEvent } from "@mastermind/core";
 import type { NatsConnection } from "@nats-io/nats-core";
+import type { DispatchSeen } from "./dispatcher.ts";
 import { type DispatchService, startDispatch } from "./nats.ts";
 import { beadsWork } from "./work.ts";
 
@@ -24,6 +25,8 @@ export type DispatchConfig = {
 	dolt: SqlTag;
 	events?: (listener: (event: BeadEvent) => void) => () => void;
 	waitMs?: number;
+	/** What runners do (the runner registry of /people). */
+	observe?: (seen: DispatchSeen) => void;
 	onError?: (error: unknown) => void;
 	log?: (line: string) => void;
 	/** Retry n waits backoffMs * 2^n, at most 60 s. Default 1 s. */
@@ -65,6 +68,7 @@ export function runDispatch(config: DispatchConfig): RunningDispatch {
 					),
 					events: config.events,
 					waitMs: config.waitMs,
+					observe: config.observe,
 					onError: config.onError,
 				});
 				if (stopped) await svc.stop();

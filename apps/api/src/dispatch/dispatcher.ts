@@ -46,8 +46,20 @@ import type { Work } from "./work.ts";
 /** How long `next` waits for work before it answers `{dispatch: null}`. */
 export const DEFAULT_WAIT_MS = 20_000;
 
+/**
+ * What the dispatcher saw of runners, for the live runner list on /people.
+ * `next`: a runner asked for work. `holds`: an actor holds a bead (claimed
+ * or heartbeat). `done`: it let go (complete, release, dead lease).
+ */
+export type DispatchSeen =
+	| { kind: "next"; runner: RunnerInfo; queue: string }
+	| { kind: "holds"; actor: string; beadId: string }
+	| { kind: "done"; actor: string; beadId: string };
+
 export type DispatcherOptions = {
 	work: Work;
+	/** Told what runners do; must not throw. */
+	observe?: (seen: DispatchSeen) => void;
 	/** Tell every replica that a queue has work (publishes mm.q.<queue>.ready). */
 	notify?: (notice: ReadyNotice) => void;
 	/** Routing rules, read on every routing decision. */
@@ -172,6 +184,7 @@ export class Dispatcher {
 	): Promise<NextReply> {
 		const runner = checkRunner(account, req);
 		const actor = `${account}/${runner.id}`;
+		this.#see({ kind: "next", runner, queue });
 		const state = this.#state(runner, actor, queue);
 		let wait: Promise<NextReply> | null = null;
 		const reply = await this.#lock(queue, async () => {
@@ -235,6 +248,7 @@ export class Dispatcher {
 			.claim(beadId, actor)
 			.catch((e) => Promise.reject(busError(e)));
 		if (!renewed.lease) throw new Error(`claim of ${beadId} has no lease`);
+		this.#see({ kind: "holds", actor, beadId });
 		return { lease: renewed.lease };
 	}
 
@@ -260,10 +274,11 @@ export class Dispatcher {
 		const actor = checkActor(account, req?.actor);
 		const summary = text(req.summary, "summary");
 		const bead = await this.#held(beadId, actor);
-		if (bead.status === "closed") return { ok: true };
-		await this.#work
-			.close(beadId, actor, summary)
-			.catch((e) => Promise.reject(busError(e)));
+		if (bead.status !== "closed")
+			await this.#work
+				.close(beadId, actor, summary)
+				.catch((e) => Promise.reject(busError(e)));
+		this.#see({ kind: "done", actor, beadId });
 		return { ok: true };
 	}
 
@@ -281,6 +296,7 @@ export class Dispatcher {
 		await this.#work
 			.release(beadId, actor)
 			.catch((e) => Promise.reject(busError(e)));
+		this.#see({ kind: "done", actor, beadId });
 		this.#signal(bead);
 		return { ok: true };
 	}
@@ -296,6 +312,7 @@ export class Dispatcher {
 			try {
 				await this.#work.release(bead.id, bead.assignee);
 				released.push(bead.id);
+				this.#see({ kind: "done", actor: bead.assignee, beadId: bead.id });
 				this.#signal(bead);
 			} catch (error) {
 				this.#opts.onError?.(error);
@@ -385,6 +402,7 @@ export class Dispatcher {
 		}
 		if (!claimed.lease) throw new Error(`claim of ${bead.id} has no lease`);
 		this.#served.set(actor, this.#now().toISOString());
+		this.#see({ kind: "holds", actor, beadId: bead.id });
 		// The claim reply has no labels; the ready list has them.
 		const held: Bead = {
 			...bead,
@@ -416,6 +434,14 @@ export class Dispatcher {
 			throw new BusError("conflict", `${beadId} is not held by ${actor}`);
 		}
 		return bead;
+	}
+
+	#see(seen: DispatchSeen): void {
+		try {
+			this.#opts.observe?.(seen);
+		} catch (error) {
+			this.#opts.onError?.(error);
+		}
 	}
 
 	#signal(bead: Bead): void {
