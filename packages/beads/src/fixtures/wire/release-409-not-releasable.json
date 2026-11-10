@@ -1,0 +1,7 @@
+{
+	"code": "not_releasable",
+	"detail": "this issue holds no claim, or its status is neither `open` nor `in_progress`; nothing was written. Read the row rather than assuming the claim is gone: a status this workspace configured can refuse a release while the row is still assigned",
+	"request_id": "e96b62aa-000013",
+	"status": 409,
+	"title": "Conflict"
+}

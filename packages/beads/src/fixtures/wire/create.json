@@ -1,0 +1,11 @@
+{
+	"id": "pr-pkn",
+	"title": "Probe create",
+	"description": "made by mm-210.3",
+	"status": "open",
+	"priority": 2,
+	"issue_type": "task",
+	"created_at": "2026-11-10T05:44:42.968363266Z",
+	"updated_at": "2026-11-10T05:44:42.968363266Z",
+	"labels": ["queue:build"]
+}

@@ -1,0 +1,9 @@
+{
+	"assignee": "alice/agent1",
+	"code": "already_claimed",
+	"detail": "issue is claimed by another actor",
+	"issue_status": "in_progress",
+	"request_id": "e96b62aa-000007",
+	"status": 409,
+	"title": "Conflict"
+}

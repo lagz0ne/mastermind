@@ -1,0 +1,9 @@
+{
+	"code": "invalid_argument",
+	"detail": "this operation's request body carries `actor` and nothing else",
+	"param": "nope",
+	"reason": "unknown_parameter",
+	"request_id": "e96b62aa-000022",
+	"status": 400,
+	"title": "Bad Request"
+}

@@ -1,0 +1,18 @@
+{
+	"already_closed": false,
+	"issue": {
+		"id": "pr-pkn",
+		"title": "Probe create (edited)",
+		"description": "made by mm-210.3",
+		"status": "closed",
+		"priority": 1,
+		"issue_type": "task",
+		"created_at": "2026-11-10T05:44:43Z",
+		"updated_at": "2026-11-10T05:44:53Z",
+		"closed_at": "2026-11-10T05:44:53Z",
+		"close_reason": "done",
+		"labels": ["queue:build"]
+	},
+	"open_children": 0,
+	"revision": "4006372237965240026"
+}

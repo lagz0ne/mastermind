@@ -1,0 +1,16 @@
+{
+	"already_claimed": true,
+	"issue": {
+		"id": "pr-x1u",
+		"title": "third",
+		"status": "in_progress",
+		"priority": 2,
+		"issue_type": "task",
+		"assignee": "bob/agent2",
+		"created_at": "2026-11-10T05:33:51Z",
+		"updated_at": "2026-11-10T05:46:28Z",
+		"started_at": "2026-11-10T05:46:28Z",
+		"lease_expires_at": "2026-11-10T05:51:28Z",
+		"heartbeat_at": "2026-11-10T05:46:28Z"
+	}
+}
