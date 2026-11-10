@@ -1,12 +1,22 @@
+/** State of one dependency in `GET /api/health`. */
+export type Probe = "up" | "down" | "unconfigured";
+
 /** Shape of `GET /api/health`, shared by the api and the web UI. */
 export type Health = {
 	ok: boolean;
 	version: string;
-	db: "up" | "down" | "unconfigured";
+	/** Postgres: Mastermind's own state. */
+	db: Probe;
+	/** Dolt sql-server: the work (beads), read with Bun.SQL. */
+	dolt: Probe;
+	/** `bd serve` on loopback: the write path for beads. */
+	bd: Probe;
 };
 
-export function isHealthy(db: Health["db"]): boolean {
-	return db !== "down";
+/** Healthy unless something configured is down; unconfigured is fine. */
+export function isHealthy(...probes: Probe[]): boolean {
+	return probes.every((probe) => probe !== "down");
 }
 
+export * from "./dispatch.ts";
 export * from "./work.ts";
