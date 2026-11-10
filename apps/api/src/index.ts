@@ -57,6 +57,9 @@ const deps: Deps = {
 let bd: Supervisor | null = null;
 let backupTimer: ReturnType<typeof setInterval> | null = null;
 
+/** bd serve's workspace; the bd CLI runs there too (dispatch: lease heartbeats). */
+const bdRoot = env.BD_WORKSPACE ?? join(tmpdir(), "mastermind-beads");
+
 /** Bootstrap the beads database if needed, then supervise bd serve. */
 async function startBeads(doltUrl: string): Promise<void> {
 	const target = parseDoltUrl(doltUrl);
@@ -70,7 +73,7 @@ async function startBeads(doltUrl: string): Promise<void> {
 	} finally {
 		await server.close();
 	}
-	const root = env.BD_WORKSPACE ?? join(tmpdir(), "mastermind-beads");
+	const root = bdRoot;
 	const beadsDir = await writeWorkspace(root, target.database);
 	bd = supervise({
 		cmd: serveCmd(bin, bdPort),
@@ -173,6 +176,11 @@ const dispatch =
 		? runDispatch({
 				nats: dispatchNats,
 				bdUrl: deps.bdUrl,
+				bdCli: {
+					bin: env.BD_BIN ?? "bd",
+					cwd: bdRoot,
+					env: bdEnv(parseDoltUrl(env.DOLT_URL ?? ""), join(bdRoot, ".beads")),
+				},
 				dolt: deps.dolt,
 				events: hub
 					? (listener) => hub.subscribe(listener).unsubscribe
