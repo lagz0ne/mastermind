@@ -72,7 +72,6 @@
 # - github.token    → use GITHUB_TOKEN env var instead
 
 sync:
-    remote: "git+https://lagz0ne@github.com/lagz0ne/mastermind.git"
-# remote: "git+https://github.com/lagz0ne/mastermind.git"
+    remote: "git+https://github.com/lagz0ne/mastermind.git"
 agent:
     profile: team-maintainer
