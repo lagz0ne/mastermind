@@ -1,7 +1,8 @@
 # NATS for Mastermind
 
 Mastermind and every runner adapter talk over NATS (bead mm-210.15, decisions in epic mm-210).
-The hub at `~/work` runs it in Dokploy. This directory holds the config and the checks.
+`deploy/dokploy.ts apply` runs it in Dokploy as an application built from this directory
+(`Dockerfile`: the official image with `nats.conf` baked in). `mastermind.vibea.dev` below is the example site.
 
 ```
 adapter ──wss://mastermind.vibea.dev/nats──▶ Cloudflare ─▶ Traefik ─▶ nats:8080 (websocket, no TLS)
@@ -15,7 +16,7 @@ mastermind app ──nats://<nats host>:4222 (internal network)──▶ nats:42
 |---|---|
 | Image | `nats:2.15.2` |
 | Command | `-c /etc/nats/nats.conf` |
-| Config | `deploy/nats/nats.conf` mounted at `/etc/nats/nats.conf` |
+| Config | `deploy/nats/nats.conf`, copied into the image at `/etc/nats/nats.conf` |
 | Volume | persistent, mounted at `/data/jetstream` |
 | 4222 | client port, internal Docker network only |
 | 8080 | WebSocket, public only as `wss://mastermind.vibea.dev/nats` |
@@ -30,7 +31,7 @@ NATS service: `NATS_AUTH_PASSWORD`, `NATS_ISSUER_PUBLIC` (public nkey of the iss
 Mastermind app: `NATS_URL`, `NATS_AUTH_USER` (`mastermind`), `NATS_AUTH_PASSWORD`,
 `NATS_ISSUER_SEED` (seed of the same key), `NATS_PUBLIC_WS_URL`.
 
-The hub makes the secrets. They are never in this repo.
+`deploy/dokploy.ts apply` makes the secrets and stores them in Dokploy. They are never in this repo.
 
 ## Auth: the safe state
 

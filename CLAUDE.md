@@ -86,11 +86,15 @@ scripts/ship.sh -m "<msg>" -i <bead> -- <paths>   # the only way to commit/push
 
 ## Deployment
 
-- Production: https://mastermind.vibea.dev (`/api/health` shows the commit being served and the database state).
-- Hosting is **Dokploy, owned by the machine hub at `~/work`**: project `mastermind`, app `mastermind` (image `ghcr.io/lagz0ne/mastermind:latest`, port 3000), Postgres 16 `mastermind-db` (internal only).
-- Do not drive Dokploy from this repo. Anything machine-level (env vars, database, domains, redeploys, secrets) goes through the `hub-request` skill: `hubq send "..." --from mastermind`.
-- The app gets `DATABASE_URL` from the hub (`~/.config/secrets/mastermind-app.env`); never copy secret values into the repo, beads or logs.
-- CI redeploys through the GitHub environment secret `DOKPLOY_DEPLOY_HOOK` (environment `production`).
+Mastermind is the code: it may use services, but it reaches every one through configuration. No code,
+test, build or deploy step may need this machine's paths, the machine hub's tools, or a hard-coded host.
+
+- The repo owns its deployment: `bun deploy/dokploy.ts status | apply | secrets` talks to the Dokploy API
+  (`DOKPLOY_API_KEY` or `DOKPLOY_API_KEY_FILE`). Site values are in `deploy/site.json`. Details: `docs/deploy.md`.
+- Services: the app (image from CI), Postgres, Dolt (`deploy/compose.yml`), NATS (`deploy/nats`).
+  `<public URL>/api/health` shows the live commit and the state of each dependency.
+- Secrets live only in Dokploy. Never copy a secret value into the repo, beads or logs.
+- CI redeploys through hooks stored in the GitHub environment `production`.
 
 ## UI design (doop)
 

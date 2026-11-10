@@ -1,6 +1,6 @@
 # mastermind
 
-Bun + Turborepo monorepo, trunk-based (everything lands on `main`, every green commit deploys to https://mastermind.vibea.dev).
+Bun + Turborepo monorepo, trunk-based (everything lands on `main`, every green commit deploys; see `docs/deploy.md`).
 
 ```bash
 bun install

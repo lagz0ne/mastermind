@@ -356,7 +356,10 @@ async function apply() {
 			DOLT_URL: `mysql://root:${infraEnv.env.get("DOLT_ROOT_PASSWORD")}@mastermind-dolt:3306/mastermind`,
 			DOLT_BACKUP_URL: "file:///backups/mastermind",
 			NATS_URL: `nats://${nats.appName}:4222`,
+			// @mastermind/bus connects over WebSocket only.
+			NATS_WS_URL: `ws://${nats.appName}:8080`,
 			NATS_AUTH_USER: "mastermind",
+			PUBLIC_URL: cfg.publicUrl,
 			...cfg.appEnv,
 			NATS_PUBLIC_WS_URL: `${natsPublicUrl}`,
 		},

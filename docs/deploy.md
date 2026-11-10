@@ -1,14 +1,53 @@
 # Deploy
 
-Production is https://mastermind.vibea.dev, on Dokploy (project `mastermind`), owned by the machine hub
-at `~/work`. Do not drive Dokploy from this repo: ask the hub (`hubq send "..." --from mastermind`).
+Mastermind is the code. It uses services, and it reaches every one of them through configuration.
+The repo owns its deployment: `deploy/dokploy.ts` talks to the Dokploy API, and nothing else on the
+machine is needed. The example site is https://mastermind.vibea.dev.
 
-| Service | What | Reachable |
-|---|---|---|
-| `mastermind` | the app image `ghcr.io/lagz0ne/mastermind:latest`: UI, `/api/*`, and `bd serve` as a child | https://mastermind.vibea.dev, port 3000 |
-| `mastermind-db` | Postgres 16: Mastermind's own state (`DATABASE_URL`) | internal only |
-| `mastermind-dolt` | `dolthub/dolt-sql-server:2.7.2`: the work (beads). Volumes: data `/var/lib/dolt`, backups `/backups` | internal only, port 3306 |
-| `nats` | `nats:2.15.2`: the bus between Mastermind and runner adapters. JetStream volume `/data/jetstream` | client 4222 and monitoring 8222 internal only; WebSocket 8080 public as `wss://mastermind.vibea.dev/nats` |
+```bash
+export DOKPLOY_API_KEY=...            # or DOKPLOY_API_KEY_FILE=<path to a file that holds it>
+bun deploy/dokploy.ts status          # what runs, env key names, health
+bun deploy/dokploy.ts apply           # create or update Dolt, NATS and the app env; deploy; verify
+bun deploy/dokploy.ts secrets         # redeploy hooks + PUBLIC_URL into the GitHub environment
+```
+
+`apply` is safe to run again: it keeps existing secrets, changes only what differs, and ends with a
+check from outside (health, then the public NATS WebSocket).
+
+## Site config
+
+`deploy/site.json` holds every value of one site: the Dokploy URL, the public URL, the project and
+service names, the git source, and extra app env (`appEnv`, never secrets). For another site, write
+another file and set `MASTERMIND_SITE=<path>`. No host and no machine path is in the code;
+`deploy/src/independence.test.ts` (part of `bun run check`) fails if one comes back.
+
+The Dokploy project and the app (image + Postgres + `DATABASE_URL`) must exist before the first `apply`.
+
+## Services
+
+| Service | Defined in | What | Reachable |
+|---|---|---|---|
+| `mastermind` | CI (`.github/workflows/ci.yml`) | the app image: UI, `/api/*`, and `bd serve` as a child | the public URL, port 3000 |
+| `mastermind-db` | Dokploy database | Postgres 16: Mastermind's own state (`DATABASE_URL`) | internal only |
+| `mastermind-infra` | `deploy/compose.yml` (Dokploy compose, built from git) | `dolt`: `dolthub/dolt-sql-server:2.7.2`, the work queue (beads). Volumes: data `/var/lib/dolt`, backups `/backups` | internal only: `mastermind-dolt:3306` |
+| `mastermind-nats` | `deploy/nats` (Dokploy application, built from git) | `nats:2.15.2` with `nats.conf` baked in: the bus to runner adapters. Volume `/data/jetstream` | 4222 and 8222 internal only; WebSocket 8080 public as `wss://<public host>/nats` |
+
+NATS is an application and not part of the compose because it needs a public route, and a Dokploy
+whose Traefik reads only Dokploy's route files gives routes to applications only.
+
+## Secrets
+
+Secrets live only in Dokploy, as service env. `apply` makes the missing ones and never prints a value:
+the Dolt root password (env of `mastermind-infra`), and the NATS auth password and issuer seed (env of
+the app; the NATS server gets the password and the public key derived from the seed). To rotate one,
+delete its key in Dokploy and run `apply`.
+
+## CD
+
+Every push to `main`: check → publish the image → deploy. The deploy job asks production which commit
+is live, calls the Dokploy hook of the infra compose and of NATS only when `deploy/compose.yml` or
+`deploy/nats` changed since that commit, calls the app hook, then waits until `/api/health` reports
+this commit with `ok: true`, and checks the public NATS WebSocket.
 
 `GET /api/health` reports `version` (the commit) and one probe per dependency: `db`, `dolt`, `bd`.
 Each is `up`, `down` or `unconfigured`; any `down` makes it a 503.
@@ -39,7 +78,7 @@ and both checksums from the release's `checksums.txt`.
 
 | Var | Example | Notes |
 |---|---|---|
-| `DOLT_URL` | `mysql://root:<pw>@<mastermind-dolt host>:3306/mastermind` | unset: beads off, health says `unconfigured`. Secret: lives in `~/.config/secrets/mastermind-app.env` (hub) |
+| `DOLT_URL` | `mysql://root:<pw>@mastermind-dolt:3306/mastermind` | unset: beads off, health says `unconfigured`. Set by `apply`. A secret (it holds the password) |
 | `DOLT_BACKUP_URL` | `file:///backups/mastermind` | a path on the **Dolt** container. Unset: no backups |
 | `DOLT_BACKUP_INTERVAL_MINUTES` | `360` | default 6h; one sync also runs at boot |
 | `BD_SERVE_PORT` | `3010` | loopback port of `bd serve` |
@@ -55,13 +94,14 @@ The api registers a Dolt backup named `mastermind-backup` at `DOLT_BACKUP_URL`
 (`CALL dolt_backup('add', ...)`) and runs `CALL dolt_backup('sync', 'mastermind-backup')` at boot and
 every `DOLT_BACKUP_INTERVAL_MINUTES`. A sync copies the whole database, history included, and logs
 `dolt: backup synced to ... in <ms>`. `bd backup` is not used: bd refuses it against a Dolt server it
-does not manage. The backup lands on the `/backups` volume of `mastermind-dolt`. Whether that volume
-also goes off-machine is the hub's call; check with it.
+does not manage. The backup lands on the `/backups` volume of the Dolt container. It is on the same
+machine as the data: it protects against a bad write, not against the loss of the machine. An
+off-machine copy is not set up yet.
 
 ## Restore
 
-Run these on `mastermind-dolt` (ask the hub: `dolt sql` inside the container, or any MySQL client on the
-project network as the root user). They were drilled on dolt 2.7.2 with bd 1.3.4 (mm-210.6).
+Run these on the Dolt server (`dolt sql` inside the `dolt` container of `mastermind-infra`, or any MySQL
+client on the Docker network as the root user). They were drilled on dolt 2.7.2 with bd 1.3.4 (mm-210.6).
 
 1. **Check the backup** without touching the live database. Restore a copy next to it, count, then drop it:
 
@@ -112,10 +152,12 @@ except the `mastermind` user, with `Authorization Violation`. This is correct. I
 
 | Var | On | Notes |
 |---|---|---|
-| `NATS_AUTH_PASSWORD` | nats, app | password of the `mastermind` user. Secret, made by the hub |
+| `NATS_AUTH_PASSWORD` | nats, app | password of the `mastermind` user. Secret, made by `apply` |
 | `NATS_ISSUER_PUBLIC` | nats | public nkey (`A…`) of the issuer account key |
-| `NATS_ISSUER_SEED` | app | seed (`SA…`) of the same key. Secret, made by the hub |
+| `NATS_ISSUER_SEED` | app | seed (`SA…`) of the same key. Secret, made by `apply` |
 | `NATS_URL` | app | `nats://<nats host>:4222` |
+| `NATS_WS_URL` | app | `ws://<nats host>:8080`: the internal WebSocket; `@mastermind/bus` connects over WebSocket only |
+| `PUBLIC_URL` | app | the public base URL of the site, from `deploy/site.json` |
 | `NATS_AUTH_USER` | app | `mastermind` |
 | `NATS_PUBLIC_WS_URL` | app | `wss://mastermind.vibea.dev/nats`; given to adapters |
 

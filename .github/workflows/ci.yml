@@ -66,30 +66,65 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # Dokploy (managed by the ~/work hub) pulls :latest and restarts the app.
-  # The job is green only once the public site reports this commit.
+  # Dokploy runs the site. Its hooks and PUBLIC_URL are in the GitHub environment
+  # (`bun deploy/dokploy.ts secrets` puts them there). The job is green only when
+  # the public site serves this commit and every dependency is up.
   deploy:
     needs: publish
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     environment:
       name: production
-      url: https://mastermind.vibea.dev
+      url: ${{ vars.PUBLIC_URL }}
+    env:
+      PUBLIC_URL: ${{ vars.PUBLIC_URL }}
     steps:
-      - name: Trigger Dokploy
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Redeploy what changed since the live commit
         env:
           DOKPLOY_DEPLOY_HOOK: ${{ secrets.DOKPLOY_DEPLOY_HOOK }}
-        run: curl -fsS --retry 3 -o /dev/null -X POST "$DOKPLOY_DEPLOY_HOOK"
+          DOKPLOY_INFRA_HOOK: ${{ secrets.DOKPLOY_INFRA_HOOK }}
+          DOKPLOY_NATS_HOOK: ${{ secrets.DOKPLOY_NATS_HOOK }}
+        run: |
+          live=$(curl -fsS --max-time 10 "$PUBLIC_URL/api/health" | jq -r '.version' || true)
+          echo "live: ${live:-unknown}"
+          # True when the paths differ from the live commit, or when that commit is unknown.
+          changed() {
+            git cat-file -e "$live^{commit}" 2>/dev/null || return 0
+            ! git diff --quiet "$live" "$GITHUB_SHA" -- "$@"
+          }
+          # Dokploy checks the branch of a git source, so send it like a push event.
+          git_hook() {
+            curl -fsS --retry 3 -o /dev/null -X POST -H 'content-type: application/json' \
+              -H 'x-github-event: push' -d "{\"ref\":\"$GITHUB_REF\"}" "$1"
+          }
+          if changed deploy/compose.yml; then echo "infra changed"; git_hook "$DOKPLOY_INFRA_HOOK"; fi
+          if changed deploy/nats; then echo "nats changed"; git_hook "$DOKPLOY_NATS_HOOK"; fi
+          curl -fsS --retry 3 -o /dev/null -X POST "$DOKPLOY_DEPLOY_HOOK"
       - name: Wait until production serves this commit
         run: |
-          for i in $(seq 60); do
-            version=$(curl -fsS --max-time 10 https://mastermind.vibea.dev/api/health | jq -r '.version' || true)
-            if [ "$version" = "$GITHUB_SHA" ]; then
-              echo "live: $version"
+          for i in $(seq 120); do
+            health=$(curl -sS --max-time 10 "$PUBLIC_URL/api/health" || true)
+            version=$(jq -r '.version // empty' <<<"$health" 2>/dev/null || true)
+            if [ "$version" = "$GITHUB_SHA" ] && [ "$(jq -r '.ok' <<<"$health")" = "true" ]; then
+              echo "live: $health"
               exit 0
             fi
-            echo "waiting ($i): serving ${version:-nothing}"
+            echo "waiting ($i): ${health:-no answer}"
             sleep 5
           done
-          echo "::error::production is not serving $GITHUB_SHA after 5 minutes"
+          echo "::error::production does not serve $GITHUB_SHA with ok=true after 10 minutes"
+          exit 1
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - name: The public NATS WebSocket answers and refuses unauthenticated clients
+        run: |
+          url="$(sed 's/^http/ws/' <<<"$PUBLIC_URL")/nats"
+          for i in $(seq 12); do
+            if bun deploy/nats/smoke.ts "$url"; then exit 0; fi
+            sleep 10
+          done
           exit 1
