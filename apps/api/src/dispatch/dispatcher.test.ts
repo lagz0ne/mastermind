@@ -254,6 +254,19 @@ describe("sweep", () => {
 		expect(work.beads.get("mm-3")?.status).toBe("in_progress");
 		expect(notices.map((n) => n.beadId)).toEqual(["mm-1"]);
 	});
+
+	test("a task that heartbeats outlives the lease TTL", async () => {
+		const { d, work, advance } = setup();
+		work.add({ id: "mm-1" }, "build");
+		await d.next("alice", "build", runner("a"));
+		for (let i = 0; i < 4; i++) {
+			advance(LEASE_MS / 2);
+			await d.heartbeat("alice", "mm-1", { actor: "alice/a" });
+		}
+		advance(LEASE_MS / 2);
+		expect(await d.sweep()).toEqual([]);
+		expect(work.beads.get("mm-1")?.status).toBe("in_progress");
+	});
 });
 
 describe("routing on journal events", () => {

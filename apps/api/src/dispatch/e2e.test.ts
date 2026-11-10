@@ -21,6 +21,7 @@ import {
 	writeWorkspace,
 } from "../bd-serve.ts";
 import { hasBeadsSchema, parseDoltUrl, serverUrl } from "../dolt.ts";
+import { bdHeartbeat } from "./heartbeat.ts";
 import { type DispatchService, startDispatch } from "./nats.ts";
 import { type NatsServer, startNats } from "./nats-server.ts";
 import { beadsWork } from "./work.ts";
@@ -48,6 +49,7 @@ describe.skipIf(!natsBin || !doltUrl)(
 		let sql: SQL;
 		let svc: DispatchService;
 		let bdClient: BdClient;
+		let heartbeat: ReturnType<typeof bdHeartbeat>;
 		let skew = 0;
 		const scratch = mkdtempSync(join(tmpdir(), "mm-dispatch-e2e-"));
 		const queue = `e2e${Date.now().toString(36)}`;
@@ -63,12 +65,14 @@ describe.skipIf(!natsBin || !doltUrl)(
 			await server.close();
 			const beadsDir = await writeWorkspace(scratch, target.database);
 			const port = 20_000 + Math.floor(Math.random() * 20_000);
+			const env = bdEnv(target, beadsDir);
 			bd = supervise({
 				cmd: serveCmd(bin, port),
 				port,
 				cwd: scratch,
-				env: bdEnv(target, beadsDir),
+				env,
 			});
+			heartbeat = bdHeartbeat({ bin, cwd: scratch, env });
 			const deadline = Date.now() + 20_000;
 			while ((await checkBd(bd.url)) !== "up") {
 				if (Date.now() > deadline) throw new Error("bd serve never got ready");
@@ -80,14 +84,14 @@ describe.skipIf(!natsBin || !doltUrl)(
 			mm = await connect({ servers: nats.url, name: "mm" });
 			client = await connect({ servers: nats.url, name: "runner" });
 			svc = await startDispatch(mm, {
-				work: beadsWork(bdClient, new DoltReader(sql)),
+				work: beadsWork(bdClient, new DoltReader(sql), heartbeat),
 				waitMs: 0,
 				sweepMs: 0,
 				kvRules: false,
 				// Lets the test age leases without waiting five minutes.
 				now: () => new Date(Date.now() + skew),
 			});
-		}, 60_000);
+		}, 180_000);
 
 		afterAll(async () => {
 			await svc?.stop();
@@ -127,6 +131,40 @@ describe.skipIf(!natsBin || !doltUrl)(
 				ok: true,
 			});
 			expect((await bdClient.get(bead.id)).status).toBe("closed");
+		}, 30_000);
+
+		test("heartbeat moves leases.lease_expires_at forward", async () => {
+			const bead = await create("e2e heartbeat");
+			const { dispatch } = await next("erin", "long");
+			expect(dispatch?.bead.id).toBe(bead.id);
+			const actor = dispatch?.actor as string;
+			const leaseOf = async () => {
+				const [row] = (await sql`
+					select lease_expires_at, heartbeat_at from leases where issue_id = ${bead.id}
+				`) as { lease_expires_at: Date; heartbeat_at: Date }[];
+				return {
+					expires: new Date(row?.lease_expires_at as Date).getTime(),
+					beat: new Date(row?.heartbeat_at as Date).getTime(),
+				};
+			};
+			const before = await leaseOf();
+			// Dolt stores seconds.
+			await Bun.sleep(1_100);
+			const reply = await request<object, { lease: { expiresAt: string } }>(
+				client,
+				subjects.bead("erin", bead.id, "heartbeat"),
+				{ actor },
+				{ timeout: 10_000 },
+			);
+			const after = await leaseOf();
+			expect(after.expires).toBeGreaterThan(before.expires);
+			expect(after.beat).toBeGreaterThan(before.beat);
+			expect(Date.parse(reply.lease.expiresAt)).toBe(after.expires);
+			// Another actor cannot renew it.
+			expect(
+				await heartbeat(bead.id, "erin/other").catch((e) => e.status),
+			).toBe(409);
+			await bdClient.close(bead.id, "e2e", "heartbeat over");
 		}, 30_000);
 
 		test("two clients at the same time never get the same bead", async () => {

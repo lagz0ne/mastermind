@@ -20,6 +20,11 @@ const problem = (status: number, code: string, extra = {}) => ({
 	...extra,
 });
 
+const lease = (t: Date) => ({
+	expiresAt: new Date(t.getTime() + LEASE_MS).toISOString(),
+	heartbeatAt: t.toISOString(),
+});
+
 export function fakeWork(now: () => Date = () => new Date()): FakeWork {
 	const beads = new Map<string, Bead>();
 	const comments: FakeWork["comments"] = [];
@@ -71,16 +76,29 @@ export function fakeWork(now: () => Date = () => new Date()): FakeWork {
 					problem(409, "already_claimed", { assignee: b.assignee }),
 				);
 			const already = b.status === "in_progress" && b.assignee === actor;
-			const t = now();
-			b.status = "in_progress";
-			b.assignee = actor;
-			b.lease = {
-				expiresAt: new Date(t.getTime() + LEASE_MS).toISOString(),
-				heartbeatAt: t.toISOString(),
-			};
-			b.updatedAt = t.toISOString();
+			// Like bd serve: the holder's second claim leaves the lease as it is.
+			if (!already) {
+				const t = now();
+				b.status = "in_progress";
+				b.assignee = actor;
+				b.lease = lease(t);
+				b.updatedAt = t.toISOString();
+			}
 			// bd omits labels from the claim reply.
 			return { bead: { ...copy(b), labels: [] }, alreadyClaimed: already };
+		},
+		async heartbeat(id, actor) {
+			const b = find(id);
+			if (b.status !== "in_progress")
+				throw new BdError(409, "heartbeat_refused", `${id} is ${b.status}`);
+			if (b.assignee !== actor)
+				throw new BdError(
+					409,
+					"heartbeat_refused",
+					`${id} already claimed by ${b.assignee}`,
+				);
+			b.lease = lease(now());
+			return copy(b);
 		},
 		async release(id) {
 			const b = find(id);

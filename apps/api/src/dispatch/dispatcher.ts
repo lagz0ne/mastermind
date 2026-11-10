@@ -259,8 +259,8 @@ export class Dispatcher {
 		if (bead.status !== "in_progress") {
 			throw new BusError("conflict", `${beadId} is ${bead.status}`);
 		}
-		const { bead: renewed } = await this.#work
-			.claim(beadId, actor)
+		const renewed = await this.#work
+			.heartbeat(beadId, actor)
 			.catch((e) => Promise.reject(busError(e)));
 		if (!renewed.lease) throw new Error(`claim of ${beadId} has no lease`);
 		this.#see({ kind: "holds", actor, beadId });

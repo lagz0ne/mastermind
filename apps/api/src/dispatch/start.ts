@@ -4,6 +4,7 @@ import { connect } from "@mastermind/bus";
 import type { BeadEvent } from "@mastermind/core";
 import type { NatsConnection } from "@nats-io/nats-core";
 import type { DispatchSeen } from "./dispatcher.ts";
+import { type BdCli, bdHeartbeat } from "./heartbeat.ts";
 import { type DispatchService, startDispatch } from "./nats.ts";
 import { beadsWork } from "./work.ts";
 
@@ -21,6 +22,8 @@ export type DispatchConfig = {
 	nats: DispatchNats;
 	/** Base URL of bd serve (writes). */
 	bdUrl: string;
+	/** The bd CLI in bd serve's workspace: renews leases (bd serve cannot). */
+	bdCli?: BdCli;
 	/** Dolt (reads: claimed beads for the sweep). */
 	dolt: SqlTag;
 	events?: (listener: (event: BeadEvent) => void) => () => void;
@@ -65,6 +68,7 @@ export function runDispatch(config: DispatchConfig): RunningDispatch {
 					work: beadsWork(
 						new BdClient({ baseUrl: config.bdUrl }),
 						new DoltReader(config.dolt),
+						config.bdCli && bdHeartbeat(config.bdCli),
 					),
 					events: config.events,
 					waitMs: config.waitMs,

@@ -132,8 +132,9 @@ export class BdClient {
 
 	/**
 	 * Atomic claim with a lease (5 minutes on bd 1.3.4). Claiming again as the
-	 * same actor renews the lease. Throws {@link AlreadyClaimed} when another
-	 * actor holds it.
+	 * same actor answers `alreadyClaimed` and does NOT renew the lease (bd serve
+	 * has no heartbeat route; the CLI `bd heartbeat` renews). Throws
+	 * {@link AlreadyClaimed} when another actor holds it.
 	 */
 	async claim(id: string, actor: string): Promise<ClaimResult> {
 		const res = await this.#call<{

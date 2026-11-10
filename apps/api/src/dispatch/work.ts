@@ -7,6 +7,7 @@ import {
 	queueLabel,
 	queueOf,
 } from "@mastermind/core";
+import type { Heartbeat } from "./heartbeat.ts";
 
 export type Work = {
 	/** Ready beads on one queue. */
@@ -14,6 +15,8 @@ export type Work = {
 	get(id: string): Promise<Bead>;
 	/** Atomic. Throws AlreadyClaimed when another actor holds the bead. */
 	claim(id: string, actor: string): Promise<ClaimResult>;
+	/** Pushes the lease forward and returns the bead with it. Only the holder may. */
+	heartbeat(id: string, actor: string): Promise<Bead>;
 	release(id: string, actor: string): Promise<Bead>;
 	close(id: string, actor: string, reason: string): Promise<Bead>;
 	comment(id: string, actor: string, text: string): Promise<unknown>;
@@ -27,11 +30,24 @@ export type Work = {
 	notes?(id: string): Promise<BeadComment[]>;
 };
 
-export function beadsWork(bd: BdClient, reader: DoltReader): Work {
+/**
+ * `heartbeat` renews leases (see bdHeartbeat). Without it a heartbeat only
+ * re-claims, which checks the holder but leaves the lease as it is.
+ */
+export function beadsWork(
+	bd: BdClient,
+	reader: DoltReader,
+	heartbeat?: Heartbeat,
+): Work {
 	return {
 		ready: (queue) => bd.ready({ label: queueLabel(queue) }),
 		get: (id) => bd.get(id),
 		claim: (id, actor) => bd.claim(id, actor),
+		heartbeat: async (id, actor) => {
+			if (heartbeat) await heartbeat(id, actor);
+			else await bd.claim(id, actor);
+			return bd.get(id);
+		},
 		release: (id, actor) => bd.release(id, actor),
 		close: (id, actor, reason) => bd.close(id, actor, reason),
 		comment: (id, actor, text) => bd.comment(id, actor, text),
