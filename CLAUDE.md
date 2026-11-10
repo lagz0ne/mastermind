@@ -82,7 +82,20 @@ scripts/ship.sh -m "<msg>" -i <bead> -- <paths>   # the only way to commit/push
 - `apps/api`: the deployable. A Bun.serve server that serves the UI at `/*` and JSON at `/api/*`, with Postgres via `Bun.sql` (`DATABASE_URL`). Shipped as `ghcr.io/lagz0ne/mastermind`.
 - `apps/web`: the React UI. Not deployed on its own: `apps/api` imports `@mastermind/web/index.html` and Bun bundles it (HMR in dev, hashed assets in the image).
 - `packages/*`: internal libraries named `@mastermind/<name>`, exporting TS source (no build step). `core` holds types shared by api and web.
-- `.github/workflows/ci.yml`: on every push to main: check → publish image → deploy.
+- `.github/workflows/ci.yml`: on every push to main: check → publish image → deploy → wait until production serves that commit.
+
+## Deployment
+
+- Production: https://mastermind.vibea.dev (`/api/health` shows the commit being served and the database state).
+- Hosting is **Dokploy, owned by the machine hub at `~/work`**: project `mastermind`, app `mastermind` (image `ghcr.io/lagz0ne/mastermind:latest`, port 3000), Postgres 16 `mastermind-db` (internal only).
+- Do not drive Dokploy from this repo. Anything machine-level (env vars, database, domains, redeploys, secrets) goes through the `hub-request` skill: `hubq send "..." --from mastermind`.
+- The app gets `DATABASE_URL` from the hub (`~/.config/secrets/mastermind-app.env`); never copy secret values into the repo, beads or logs.
+- CI redeploys through the GitHub environment secret `DOKPLOY_DEPLOY_HOOK` (environment `production`).
+
+## UI design (doop)
+
+The UI in `apps/web` is designed and reviewed on the doop canvas, through the `doop` MCP server
+(`.mcp.json`). Use the `doop-ui` skill for any UI work.
 
 ## Conventions & Patterns
 

@@ -66,10 +66,30 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # Placeholder until the Dokploy hook is wired (bead mm-ub0).
+  # Dokploy (managed by the ~/work hub) pulls :latest and restarts the app.
+  # The job is green only once the public site reports this commit.
   deploy:
     needs: publish
     runs-on: ubuntu-latest
-    environment: production
+    timeout-minutes: 10
+    environment:
+      name: production
+      url: https://mastermind.vibea.dev
     steps:
-      - run: echo "deploy ghcr.io/${{ github.repository }}:sha-${{ github.sha }}"
+      - name: Trigger Dokploy
+        env:
+          DOKPLOY_DEPLOY_HOOK: ${{ secrets.DOKPLOY_DEPLOY_HOOK }}
+        run: curl -fsS --retry 3 -o /dev/null -X POST "$DOKPLOY_DEPLOY_HOOK"
+      - name: Wait until production serves this commit
+        run: |
+          for i in $(seq 60); do
+            version=$(curl -fsS --max-time 10 https://mastermind.vibea.dev/api/health | jq -r '.version' || true)
+            if [ "$version" = "$GITHUB_SHA" ]; then
+              echo "live: $version"
+              exit 0
+            fi
+            echo "waiting ($i): serving ${version:-nothing}"
+            sleep 5
+          done
+          echo "::error::production is not serving $GITHUB_SHA after 5 minutes"
+          exit 1
