@@ -1,5 +1,6 @@
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { BdClient, DoltReader } from "@mastermind/beads";
 import { browserIngest, telemetryFromEnv, traced } from "@mastermind/telemetry";
 import index from "@mastermind/web/index.html";
 import { SQL } from "bun";
@@ -15,6 +16,7 @@ import {
 	supervise,
 	writeWorkspace,
 } from "./bd-serve.ts";
+import { beadsRoutes, beadsStore } from "./beads/routes.ts";
 import { boardRoutes, doltBoardSource } from "./board/routes.ts";
 import { type DispatchNats, runDispatch } from "./dispatch/start.ts";
 import {
@@ -188,6 +190,18 @@ const routingApi = routingRoutes({
 	onError: (error) => console.error(`routing: ${error}`),
 });
 
+// Work from the UI: /api/beads (create, detail with timeline, notes, reopen, close) and /api/activity.
+const beads = beadsRoutes(
+	deps.dolt && deps.bdUrl
+		? beadsStore(
+				new BdClient({ baseUrl: deps.bdUrl }),
+				new DoltReader(deps.dolt),
+				doltBoardSource(deps.dolt).head,
+			)
+		: null,
+	{ requireAccount, onError: (error) => console.error(`beads: ${error}`) },
+);
+
 const server = Bun.serve({
 	port,
 	development: env.NODE_ENV !== "production",
@@ -198,6 +212,7 @@ const server = Bun.serve({
 			...board.routes,
 			...people,
 			...routingApi,
+			...beads,
 			// Empty when auth is off; the cast only keeps the route keys typed.
 			...(auth?.routes ?? ({} as NonNullable<typeof auth>["routes"])),
 			// Browser vitals, errors and route timings, forwarded as mastermind-web.
