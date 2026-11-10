@@ -3,45 +3,37 @@
 // this script talks to the Dokploy API and needs nothing else on the machine.
 //
 //   bun deploy/dokploy.ts status     what runs, and which env keys exist (names only)
-//   bun deploy/dokploy.ts apply      create or update the infra stack + app env, deploy, verify
-//   bun deploy/dokploy.ts secrets    put the redeploy hooks into GitHub (needs `gh`)
+//   bun deploy/dokploy.ts apply      create or update Dolt, NATS and the app env; deploy; verify
+//   bun deploy/dokploy.ts secrets    put the redeploy hooks and the public URL into GitHub (needs `gh`)
 //
-// Auth: DOKPLOY_API_KEY, or a file named by DOKPLOY_API_KEY_FILE
-// (default ~/.config/secrets/dokploy-api). DOKPLOY_URL defaults to https://dokploy.vibea.dev.
+// Configuration, nothing is built in:
+//   deploy/site.json       the site: Dokploy URL, project, service names, public host.
+//                          MASTERMIND_SITE=<path> selects another file for another site.
+//   DOKPLOY_API_KEY        the Dokploy API key, or
+//   DOKPLOY_API_KEY_FILE   a file that holds it.
 // Secrets live only in Dokploy. This script never prints a secret value.
 
 import { randomBytes } from "node:crypto";
-import { homedir } from "node:os";
+import { join } from "node:path";
 import { createAccount, fromSeed } from "@nats-io/nkeys";
 import { probe } from "./nats/smoke.ts";
 import { mergeEnv, parseEnv, serializeEnv } from "./src/env.ts";
+import { loadSite } from "./src/site.ts";
 
-const cfg = {
-	url: (process.env.DOKPLOY_URL ?? "https://dokploy.vibea.dev").replace(
-		/\/$/,
-		"",
-	),
-	project: "mastermind",
-	app: "mastermind",
-	infra: "mastermind-infra",
-	nats: "mastermind-nats",
-	repo: "https://github.com/lagz0ne/mastermind.git",
-	branch: "main",
-	composePath: "./deploy/compose.yml",
-	host: "mastermind.vibea.dev",
-	githubEnvironment: "production",
-};
+const cfg = await loadSite(
+	process.env.MASTERMIND_SITE ?? join(import.meta.dir, "site.json"),
+);
 
 async function apiKey(): Promise<string> {
 	if (process.env.DOKPLOY_API_KEY) return process.env.DOKPLOY_API_KEY;
-	const file =
-		process.env.DOKPLOY_API_KEY_FILE ??
-		`${homedir()}/.config/secrets/dokploy-api`;
+	const file = process.env.DOKPLOY_API_KEY_FILE;
+	if (!file)
+		throw new Error(
+			"no Dokploy API key: set DOKPLOY_API_KEY, or DOKPLOY_API_KEY_FILE to a file that holds it",
+		);
 	const f = Bun.file(file);
 	if (!(await f.exists()))
-		throw new Error(
-			`no Dokploy API key: set DOKPLOY_API_KEY or put it in ${file}`,
-		);
+		throw new Error(`DOKPLOY_API_KEY_FILE points to a missing file: ${file}`);
 	return (await f.text()).trim();
 }
 
@@ -49,17 +41,14 @@ let key: string | undefined;
 async function api<T = unknown>(
 	proc: string,
 	input?: Record<string, unknown>,
-	method?: "GET" | "POST",
 ): Promise<T> {
 	key ??= await apiKey();
-	const get = method
-		? method === "GET"
-		: /\.(one|all|by[A-Z]\w*|get\w*|load\w*)$/.test(proc);
+	const get = /\.(one|all|by[A-Z]\w*|get\w*|load\w*)$/.test(proc);
 	const qs =
 		get && input
 			? `?${new URLSearchParams(input as Record<string, string>)}`
 			: "";
-	const res = await fetch(`${cfg.url}/api/${proc}${qs}`, {
+	const res = await fetch(`${cfg.dokployUrl}/api/${proc}${qs}`, {
 		method: get ? "GET" : "POST",
 		headers: { "x-api-key": key, "content-type": "application/json" },
 		body: get ? undefined : JSON.stringify(input ?? {}),
@@ -125,18 +114,22 @@ const secret = () => randomBytes(24).toString("hex");
 const log = (line: string) => console.log(line);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** An error that waiting cannot fix: stop at once. */
+class Fatal extends Error {}
+
 async function waitFor<T>(
 	what: string,
 	seconds: number,
-	probe: () => Promise<T | undefined>,
+	probeOnce: () => Promise<T | undefined>,
 ): Promise<T> {
 	const deadline = Date.now() + seconds * 1000;
 	let lastError = "";
 	while (Date.now() < deadline) {
 		try {
-			const value = await probe();
+			const value = await probeOnce();
 			if (value !== undefined) return value;
 		} catch (error) {
+			if (error instanceof Fatal) throw error;
 			lastError = String(error);
 		}
 		await sleep(3000);
@@ -146,8 +139,13 @@ async function waitFor<T>(
 	);
 }
 
+/** Where the infra compose is in this repo. */
+const composePath = "./deploy/compose.yml";
+const publicHost = new URL(cfg.publicUrl).host;
+const natsPublicUrl = `${cfg.publicUrl.replace(/^http/, "ws")}/nats`;
+
 async function health(): Promise<Record<string, unknown>> {
-	const res = await fetch(`https://${cfg.host}/api/health`, {
+	const res = await fetch(`${cfg.publicUrl}/api/health`, {
 		signal: AbortSignal.timeout(10_000),
 	});
 	return (await res.json()) as Record<string, unknown>;
@@ -158,7 +156,7 @@ const keys = (env: string | null) =>
 
 async function status() {
 	const ids = await findProject();
-	log(`dokploy ${cfg.url}  project ${cfg.project}`);
+	log(`dokploy ${cfg.dokployUrl}  project ${cfg.project}`);
 	for (const [label, id] of [
 		["app", ids.applicationId],
 		["nats", ids.natsId],
@@ -201,8 +199,8 @@ async function deployApp(applicationId: string, why: string) {
 	await waitFor(`the deploy of ${applicationId}`, 600, async () => {
 		const a = await api<App>("application.one", { applicationId });
 		if (a.applicationStatus === "error")
-			throw new Error(
-				"Dokploy reports the deploy failed; see its log in Dokploy",
+			throw new Fatal(
+				`Dokploy reports that the deploy of ${a.name} failed; read its build log in Dokploy`,
 			);
 		return a.applicationStatus === "done" ? true : undefined;
 	});
@@ -235,7 +233,7 @@ async function apply() {
 		sourceType: "git",
 		customGitUrl: cfg.repo,
 		customGitBranch: cfg.branch,
-		composePath: cfg.composePath,
+		composePath: composePath,
 		autoDeploy: true,
 		env: serializeEnv(infraEnv.env),
 	});
@@ -245,15 +243,15 @@ async function apply() {
 		log(`infra: removed dead route ${d.host}${d.path ?? ""}`);
 	}
 	log(
-		`infra: source ${cfg.repo}@${cfg.branch} ${cfg.composePath}; env ${infraEnv.changed.length ? `changed ${infraEnv.changed.join(", ")}` : "unchanged"}`,
+		`infra: source ${cfg.repo}@${cfg.branch} ${composePath}; env ${infraEnv.changed.length ? `changed ${infraEnv.changed.join(", ")}` : "unchanged"}`,
 	);
 	await api("compose.deploy", { composeId, title: "deploy/dokploy.ts apply" });
 	await sleep(3000);
 	await waitFor("the infra deploy", 600, async () => {
 		const c = await api<Compose>("compose.one", { composeId });
 		if (c.composeStatus === "error")
-			throw new Error(
-				"Dokploy reports the compose deploy failed; see its log in Dokploy",
+			throw new Fatal(
+				"Dokploy reports that the compose deploy failed; read its log in Dokploy",
 			);
 		return c.composeStatus === "done" ? true : undefined;
 	});
@@ -290,14 +288,14 @@ async function apply() {
 		applicationId: natsId,
 		customGitUrl: cfg.repo,
 		customGitBranch: cfg.branch,
-		customGitBuildPath: "/deploy/nats",
-		watchPaths: ["deploy/nats/**"],
+		customGitBuildPath: "/",
+		watchPaths: [],
 		enableSubmodules: false,
 	});
 	await api("application.saveBuildType", {
 		applicationId: natsId,
 		buildType: "dockerfile",
-		dockerfile: "Dockerfile",
+		dockerfile: "deploy/nats/Dockerfile",
 		dockerContextPath: ".",
 		dockerBuildStage: "",
 		herokuVersion: null,
@@ -335,9 +333,9 @@ async function apply() {
 	const natsDomains = await api<Domain[]>("domain.byApplicationId", {
 		applicationId: natsId,
 	});
-	if (!natsDomains.some((d) => d.host === cfg.host && d.path === "/nats")) {
+	if (!natsDomains.some((d) => d.host === publicHost && d.path === "/nats")) {
 		await api("domain.create", {
-			host: cfg.host,
+			host: publicHost,
 			path: "/nats",
 			port: 8080,
 			https: true,
@@ -345,7 +343,7 @@ async function apply() {
 			applicationId: natsId,
 		});
 		natsChanged = true;
-		log(`nats: route wss://${cfg.host}/nats → :8080`);
+		log(`nats: route ${natsPublicUrl} → :8080`);
 	}
 	if (natsChanged || nats.applicationStatus !== "done") {
 		await deployApp(natsId, "nats");
@@ -359,7 +357,8 @@ async function apply() {
 			DOLT_BACKUP_URL: "file:///backups/mastermind",
 			NATS_URL: `nats://${nats.appName}:4222`,
 			NATS_AUTH_USER: "mastermind",
-			NATS_PUBLIC_WS_URL: `wss://${cfg.host}/nats`,
+			...cfg.appEnv,
+			NATS_PUBLIC_WS_URL: `${natsPublicUrl}`,
 		},
 	});
 	const appChanged = [...withSecrets.changed, ...appEnv.changed];
@@ -384,11 +383,11 @@ async function apply() {
 	const reply = await waitFor(
 		"the public NATS WebSocket",
 		120,
-		async () => (await probe(`wss://${cfg.host}/nats`)).reply,
+		async () => (await probe(`${natsPublicUrl}`)).reply,
 	);
 	if (!reply.includes("Authorization Violation"))
 		throw new Error(`NATS let an unauthenticated client in: ${reply}`);
-	log(`ok: wss://${cfg.host}/nats answers and refuses unauthenticated clients`);
+	log(`ok: ${natsPublicUrl} answers and refuses unauthenticated clients`);
 }
 
 /** `gh` may be logged in to several accounts; use the one that owns the repo when it is there. */
@@ -415,9 +414,9 @@ async function secrets() {
 	const nats = await api<App>("application.one", { applicationId: ids.natsId });
 	const infra = await api<Compose>("compose.one", { composeId: ids.composeId });
 	const hooks = {
-		DOKPLOY_DEPLOY_HOOK: `${cfg.url}/api/deploy/${app.refreshToken}`,
-		DOKPLOY_NATS_HOOK: `${cfg.url}/api/deploy/${nats.refreshToken}`,
-		DOKPLOY_INFRA_HOOK: `${cfg.url}/api/deploy/compose/${infra.refreshToken}`,
+		DOKPLOY_DEPLOY_HOOK: `${cfg.dokployUrl}/api/deploy/${app.refreshToken}`,
+		DOKPLOY_NATS_HOOK: `${cfg.dokployUrl}/api/deploy/${nats.refreshToken}`,
+		DOKPLOY_INFRA_HOOK: `${cfg.dokployUrl}/api/deploy/compose/${infra.refreshToken}`,
 	};
 	const env = await ghEnv();
 	for (const [name, value] of Object.entries(hooks)) {
@@ -434,6 +433,24 @@ async function secrets() {
 			throw new Error(`gh secret set ${name} failed`);
 		log(`github: ${name} set on environment ${cfg.githubEnvironment}`);
 	}
+	const variable = Bun.spawn(
+		[
+			"gh",
+			"variable",
+			"set",
+			"PUBLIC_URL",
+			"--env",
+			cfg.githubEnvironment,
+			"--body",
+			cfg.publicUrl,
+		],
+		{ stdout: "ignore", stderr: "inherit", env },
+	);
+	if ((await variable.exited) !== 0)
+		throw new Error("gh variable set PUBLIC_URL failed");
+	log(
+		`github: variable PUBLIC_URL=${cfg.publicUrl} set on environment ${cfg.githubEnvironment}`,
+	);
 }
 
 const commands: Record<string, () => Promise<void>> = {
