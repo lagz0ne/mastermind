@@ -1,8 +1,8 @@
 // The contract of a work store as the dispatcher uses it (Work). One suite,
 // run against every implementation: the in-memory fake and the NATS store.
 import { describe, expect, test } from "bun:test";
-import { AlreadyClaimed, type CreateBead, NotFound } from "@mastermind/beads";
 import { type Bead, leaseState, queueLabel } from "@mastermind/core";
+import { AlreadyClaimed, type CreateBead, NotFound } from "@mastermind/work";
 import type { Work } from "../dispatch/work.ts";
 
 export type Clock = { now: () => Date; advance(ms: number): void };
@@ -12,7 +12,7 @@ export function clock(start = "2026-11-10T10:00:00Z"): Clock {
 	return { now: () => new Date(t), advance: (ms) => (t += ms) };
 }
 
-/** A store under test with a way to add an item (bd and NATS: create). */
+/** A store under test with a way to add an item (the fake: add; NATS: create). */
 export type Subject = {
 	work: Work;
 	add(input: CreateBead): Promise<Bead>;

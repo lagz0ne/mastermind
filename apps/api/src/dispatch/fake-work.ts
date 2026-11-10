@@ -1,6 +1,7 @@
 // In-memory Work with bd's claim semantics, for tests.
-import { AlreadyClaimed, BdError, NotFound } from "@mastermind/beads";
+
 import { type Bead, queueLabel, queueOf } from "@mastermind/core";
+import { AlreadyClaimed, NotFound, WorkError } from "@mastermind/work";
 import type { Work } from "./work.ts";
 
 export const LEASE_MS = 5 * 60_000;
@@ -76,7 +77,7 @@ export function fakeWork(now: () => Date = () => new Date()): FakeWork {
 					problem(409, "already_claimed", { assignee: b.assignee }),
 				);
 			const already = b.status === "in_progress" && b.assignee === actor;
-			// Like bd serve: the holder's second claim leaves the lease as it is.
+			// Like the NATS store: the holder's second claim leaves the lease as it is.
 			if (!already) {
 				const t = now();
 				b.status = "in_progress";
@@ -90,9 +91,9 @@ export function fakeWork(now: () => Date = () => new Date()): FakeWork {
 		async heartbeat(id, actor) {
 			const b = find(id);
 			if (b.status !== "in_progress")
-				throw new BdError(409, "heartbeat_refused", `${id} is ${b.status}`);
+				throw new WorkError(409, "heartbeat_refused", `${id} is ${b.status}`);
 			if (b.assignee !== actor)
-				throw new BdError(
+				throw new WorkError(
 					409,
 					"heartbeat_refused",
 					`${id} already claimed by ${b.assignee}`,
@@ -103,7 +104,7 @@ export function fakeWork(now: () => Date = () => new Date()): FakeWork {
 		async release(id) {
 			const b = find(id);
 			if (b.status !== "in_progress")
-				throw new BdError(409, "not_releasable", "holds no claim");
+				throw new WorkError(409, "not_releasable", "holds no claim");
 			b.status = "open";
 			delete b.assignee;
 			delete b.lease;

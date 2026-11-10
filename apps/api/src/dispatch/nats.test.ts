@@ -1,6 +1,6 @@
 // The dispatcher over a real nats-server (WebSocket + JetStream). Opt in with
 // NATS_SERVER=/path/to/nats-server (or nats-server on PATH); skipped otherwise.
-// Work is the in-memory fake here; dolt.e2e.test.ts runs it against bd serve.
+// Work is the in-memory fake here; store/flow.test.ts runs it on the NATS store.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { BusError, connect, request, Store, subjects } from "@mastermind/bus";
 import type {

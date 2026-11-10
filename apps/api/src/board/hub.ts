@@ -1,5 +1,5 @@
-import { type JournalSource, tailJournal } from "@mastermind/beads";
 import type { BeadEvent } from "@mastermind/core";
+import { type JournalSource, tailJournal } from "./tail.ts";
 
 export type HubOptions = {
 	/** Journal head at start: the tail follows from here. */

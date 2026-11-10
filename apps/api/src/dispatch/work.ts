@@ -1,13 +1,7 @@
-// The work store as the dispatcher sees it: writes through bd serve, the
-// list of claimed beads from Dolt. A fake implements it in tests.
-import type { BdClient, ClaimResult, DoltReader } from "@mastermind/beads";
-import {
-	type Bead,
-	type BeadComment,
-	queueLabel,
-	queueOf,
-} from "@mastermind/core";
-import type { Heartbeat } from "./heartbeat.ts";
+// The work store as the dispatcher sees it: the NATS store (@mastermind/work)
+// in production, a fake in tests.
+import type { Bead, BeadComment } from "@mastermind/core";
+import type { ClaimResult } from "@mastermind/work";
 
 export type Work = {
 	/** Ready beads on one queue. */
@@ -29,35 +23,3 @@ export type Work = {
 	/** Comments on a bead, oldest first; humans' notes go into the prompt. */
 	notes?(id: string): Promise<BeadComment[]>;
 };
-
-/**
- * `heartbeat` renews leases (see bdHeartbeat). Without it a heartbeat only
- * re-claims, which checks the holder but leaves the lease as it is.
- */
-export function beadsWork(
-	bd: BdClient,
-	reader: DoltReader,
-	heartbeat?: Heartbeat,
-): Work {
-	return {
-		ready: (queue) => bd.ready({ label: queueLabel(queue) }),
-		get: (id) => bd.get(id),
-		claim: (id, actor) => bd.claim(id, actor),
-		heartbeat: async (id, actor) => {
-			if (heartbeat) await heartbeat(id, actor);
-			else await bd.claim(id, actor);
-			return bd.get(id);
-		},
-		release: (id, actor) => bd.release(id, actor),
-		close: (id, actor, reason) => bd.close(id, actor, reason),
-		comment: (id, actor, text) => bd.comment(id, actor, text),
-		setLabels: (id, actor, labels) => bd.update(id, actor, { labels }),
-		claimed: async () =>
-			(await reader.board()).filter((b) => b.status === "in_progress"),
-		notes: (id) => reader.comments(id),
-		unrouted: async () =>
-			(await reader.board()).filter(
-				(b) => b.status === "open" && queueOf(b) === null,
-			),
-	};
-}

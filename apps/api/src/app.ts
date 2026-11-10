@@ -1,50 +1,34 @@
 import { type Health, isHealthy, type Probe } from "@mastermind/core";
-import type { SQL } from "bun";
 import type { JetStreamHealth } from "./backup/start.ts";
-import { checkBd } from "./bd-serve.ts";
-import { checkSql } from "./dolt.ts";
 
 export type Deps = {
-	/** Postgres: Mastermind's own state. */
-	db: SQL | null;
-	/** Dolt: the work, read directly. */
-	dolt: SQL | null;
-	/** Base URL of the supervised `bd serve`. */
-	bdUrl: string | null;
 	/** Probe of the dispatcher's NATS connection; null while the dispatcher is off. */
 	nats: (() => Promise<Probe>) | null;
-	/** Probe of the NATS work store (WORK_STORE=nats); absent with beads. */
-	work?: (() => Promise<Probe>) | null;
+	/** Probe of the NATS work store; null without NATS. */
+	work: (() => Promise<Probe>) | null;
 	/** JetStream storage use (warn above 80%) and the last backup; absent without auth's NATS. */
 	jetstream?: (() => Promise<JetStreamHealth>) | null;
 };
 
-export const noDeps: Deps = { db: null, dolt: null, bdUrl: null, nats: null };
+export const noDeps: Deps = { nats: null, work: null };
 
-async function probeNats(probe: Deps["nats"]): Promise<Probe> {
-	if (!probe) return "unconfigured";
-	return probe().catch(() => "down");
+async function probe(check: (() => Promise<Probe>) | null): Promise<Probe> {
+	if (!check) return "unconfigured";
+	return check().catch(() => "down");
 }
 
 export async function health(deps: Deps, version: string): Promise<Response> {
-	const [db, dolt, bd, nats, work, jetstream] = await Promise.all([
-		checkSql(deps.db),
-		checkSql(deps.dolt),
-		checkBd(deps.bdUrl),
-		probeNats(deps.nats),
-		deps.work ? probeNats(deps.work) : undefined,
+	const [nats, work, jetstream] = await Promise.all([
+		probe(deps.nats),
+		probe(deps.work),
 		deps.jetstream?.().catch(() => undefined),
 	]);
-	// `work` (the NATS work store) shows only when WORK_STORE=nats.
 	// `jetstream` is a warning: it never makes health a 503.
-	const body: Health & { work?: Probe; jetstream?: JetStreamHealth } = {
-		ok: isHealthy(db, dolt, bd, nats, ...(work ? [work] : [])),
+	const body: Health & { jetstream?: JetStreamHealth } = {
+		ok: isHealthy(nats, work),
 		version,
-		db,
-		dolt,
-		bd,
 		nats,
-		...(work ? { work } : {}),
+		work,
 		...(jetstream ? { jetstream } : {}),
 	};
 	return Response.json(body, { status: body.ok ? 200 : 503 });

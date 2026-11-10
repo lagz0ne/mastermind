@@ -20,7 +20,7 @@ workContract(
 			stop() {},
 		};
 	},
-	// The fake lets anyone release; NATS and bd serve check the holder.
+	// The fake lets anyone release; the NATS store checks the holder.
 	{ leaseMs: LEASE_MS, releaseChecksHolder: false },
 );
 

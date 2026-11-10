@@ -1,6 +1,6 @@
 // Work from the UI: create a bead, read it with its timeline, add a note,
-// reopen or close it, and read the activity feed. Writes go to bd serve; reads
-// come from Dolt. Every route needs a session (requireAccount).
+// reopen or close it, and read the activity feed, on the work store (NATS
+// JetStream). Every route needs a session (requireAccount).
 //
 //   POST /api/beads                 NewWork            -> 201 Bead
 //   GET  /api/beads/:id                                -> BeadDetail
@@ -8,13 +8,6 @@
 //   POST /api/beads/:id/reopen      {reason?}          -> Bead
 //   POST /api/beads/:id/close       {reason?}          -> Bead
 //   GET  /api/activity?before=&limit=                  -> ActivityPage
-import {
-	type BdClient,
-	BdError,
-	type CreateBead,
-	type DoltReader,
-	NotFound,
-} from "@mastermind/beads";
 import {
 	type ActivityPage,
 	type Bead,
@@ -27,10 +20,11 @@ import {
 	type Priority,
 	type TimelineEntry,
 } from "@mastermind/core";
+import { type CreateBead, NotFound, WorkError } from "@mastermind/work";
 import type { RequireAccount } from "../auth/session.ts";
 import { envLabels } from "./env.ts";
 
-/** What the routes read and write. {@link beadsStore} in production; a fake in tests. */
+/** What the routes read and write. The NATS work store in production; a fake in tests. */
 export type BeadsStore = {
 	create(actor: string, input: CreateBead): Promise<Bead>;
 	get(id: string): Promise<Bead>;
@@ -43,24 +37,6 @@ export type BeadsStore = {
 	journalRecent(limit: number, before?: number): Promise<BeadEvent[]>;
 	comments(id: string): Promise<BeadComment[]>;
 };
-
-export function beadsStore(
-	bd: BdClient,
-	reader: DoltReader,
-	head: () => Promise<number>,
-): BeadsStore {
-	return {
-		create: (actor, input) => bd.create(actor, input),
-		get: (id) => bd.get(id),
-		comment: (id, actor, text) => bd.comment(id, actor, text),
-		close: (id, actor, reason) => bd.close(id, actor, reason),
-		reopen: (id, actor, reason) => bd.reopen(id, actor, reason),
-		head,
-		journalOf: (id) => reader.journalOf(id),
-		journalRecent: (limit, before) => reader.journalRecent(limit, before),
-		comments: (id) => reader.comments(id),
-	};
-}
 
 export type BeadsRoutesOptions = {
 	requireAccount: RequireAccount;
@@ -184,7 +160,7 @@ export function olderComments(
 		}));
 }
 
-/** Routes for Bun.serve. A null store (no Dolt) answers 503. */
+/** Routes for Bun.serve. A null store (no work store) answers 503. */
 export function beadsRoutes(
 	store: BeadsStore | null,
 	opts: BeadsRoutesOptions,
@@ -197,14 +173,18 @@ export function beadsRoutes(
 			const who = await opts.requireAccount(req);
 			if (who instanceof Response) return who;
 			if (!store)
-				return fail(503, "beads unconfigured", "Set DOLT_URL to serve work.");
+				return fail(
+					503,
+					"beads unconfigured",
+					"Set NATS (auth or DISPATCH_NATS_URL) to serve work.",
+				);
 			try {
 				return await fn(req, who, store);
 			} catch (error) {
 				if (error instanceof Invalid) return fail(400, error.message);
 				if (error instanceof NotFound) return fail(404, "no such bead");
 				if (
-					error instanceof BdError &&
+					error instanceof WorkError &&
 					error.status >= 400 &&
 					error.status < 500
 				)

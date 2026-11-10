@@ -1,9 +1,7 @@
 // Open the routing store from config, in the background, retrying until NATS is up.
-import { BdClient } from "@mastermind/beads";
 import { connect, Store } from "@mastermind/bus";
 import type { NatsConnection } from "@nats-io/nats-core";
 import { CONFIG_BUCKET } from "./model.ts";
-import type { RoutingBeads } from "./routes.ts";
 import { RoutingStore } from "./store.ts";
 
 export type RoutingNats =
@@ -53,14 +51,5 @@ export function startRoutingInBackground(
 			stopped = true;
 			await own?.drain().catch(() => {});
 		},
-	};
-}
-
-/** Bead reads and label writes through bd serve. */
-export function bdRoutingBeads(baseUrl: string): RoutingBeads {
-	const bd = new BdClient({ baseUrl });
-	return {
-		get: (id) => bd.get(id),
-		setLabels: (id, actor, labels) => bd.update(id, actor, { labels }),
 	};
 }

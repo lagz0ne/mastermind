@@ -12,7 +12,6 @@
 		"typecheck": "tsc --noEmit"
 	},
 	"dependencies": {
-		"@mastermind/beads": "workspace:*",
 		"@mastermind/bus": "workspace:*",
 		"@mastermind/core": "workspace:*",
 		"@nats-io/jetstream": "^3.4.0",

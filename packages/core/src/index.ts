@@ -5,14 +5,10 @@ export type Probe = "up" | "down" | "unconfigured";
 export type Health = {
 	ok: boolean;
 	version: string;
-	/** Postgres: Mastermind's own state. */
-	db: Probe;
-	/** Dolt sql-server: the work (beads), read with Bun.SQL. */
-	dolt: Probe;
-	/** `bd serve` on loopback: the write path for beads. */
-	bd: Probe;
 	/** NATS for the dispatcher; unconfigured while the dispatcher is off. */
 	nats: Probe;
+	/** The work store on NATS JetStream; unconfigured without NATS. */
+	work: Probe;
 };
 
 /** Healthy unless something configured is down; unconfigured is fine. */

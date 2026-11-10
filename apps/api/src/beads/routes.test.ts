@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { type CreateBead, NotFound } from "@mastermind/beads";
 import type {
 	ActivityPage,
 	Bead,
@@ -7,12 +6,13 @@ import type {
 	BeadDetail,
 	BeadEvent,
 } from "@mastermind/core";
+import { type CreateBead, NotFound } from "@mastermind/work";
 import { envOf } from "./env.ts";
 import { type BeadsStore, beadsRoutes, parseNewWork } from "./routes.ts";
 
 const at = "2026-11-10T08:00:00.000Z";
 
-/** An in-memory bd: every write appends to the journal, like bd serve does. */
+/** An in-memory store: every write appends to the journal, like the work store does. */
 class FakeStore implements BeadsStore {
 	beads = new Map<string, Bead>();
 	journal: BeadEvent[] = [];
@@ -296,7 +296,7 @@ describe("notes, reopen, close, activity", () => {
 		expect(page.events.map((e) => e.seq)).toEqual([3, 2]);
 	});
 
-	test("no Dolt: 503 once the session is good", async () => {
+	test("no work store: 503 once the session is good", async () => {
 		const routes = beadsRoutes(null, { requireAccount: asAccount("duke") });
 		const res = await routes["/api/activity"].GET(req("GET", "/api/activity"));
 		expect(res.status).toBe(503);

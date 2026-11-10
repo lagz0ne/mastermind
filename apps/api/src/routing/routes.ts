@@ -12,18 +12,19 @@
  *                                (it wins over the rules); null removes it and
  *                                the rules decide again
  */
-import { NotFound } from "@mastermind/beads";
+
 import {
 	type Bead,
 	type Priority,
 	QUEUE_LABEL_PREFIX,
 	queueLabel,
 } from "@mastermind/core";
+import { NotFound } from "@mastermind/work";
 import type { RequireAccount } from "../auth/session.ts";
 import { explain, isQueueName, queueNamed, validate } from "./model.ts";
 import { type RoutingStore, StaleRevision } from "./store.ts";
 
-/** The bead reads and writes that routing needs (bd serve in production). */
+/** The bead reads and writes that routing needs (the work store in production). */
 export type RoutingBeads = {
 	get(id: string): Promise<Bead>;
 	/** Replaces the whole label set. */
@@ -33,7 +34,7 @@ export type RoutingBeads = {
 export type RoutingRoutesOptions = {
 	/** Null while NATS is not ready (or not configured): 503. */
 	store: () => RoutingStore | null;
-	/** Null without bd serve: bead routes answer 503. */
+	/** Null without a work store: bead routes answer 503. */
 	beads: RoutingBeads | null;
 	requireAccount: RequireAccount;
 	onError?: (error: unknown) => void;
@@ -137,7 +138,7 @@ export function routingRoutes(opts: RoutingRoutesOptions) {
 					null;
 				if (typeof b?.beadId === "string" && b.beadId) {
 					const beads = opts.beads;
-					if (!beads) return fail(503, "beads unconfigured: set DOLT_URL");
+					if (!beads) return fail(503, "beads unconfigured: set NATS");
 					bead = await beads.get(b.beadId);
 				} else {
 					bead = sketch(b?.bead);
@@ -158,7 +159,7 @@ export function routingRoutes(opts: RoutingRoutesOptions) {
 		"/api/beads/:id/queue": {
 			POST: guarded(async (req, account, store) => {
 				const beads = opts.beads;
-				if (!beads) return fail(503, "beads unconfigured: set DOLT_URL");
+				if (!beads) return fail(503, "beads unconfigured: set NATS");
 				const b = await body(req);
 				if (!b || !("queue" in b))
 					return fail(400, "queue required (a name or null)");

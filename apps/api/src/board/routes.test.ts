@@ -102,7 +102,7 @@ describe("parseSeq", () => {
 	});
 });
 
-describe("without Dolt", () => {
+describe("without a work store", () => {
 	test("both routes answer 503 with a clear body", async () => {
 		const { routes } = boardRoutes(null);
 		for (const res of [
@@ -110,7 +110,7 @@ describe("without Dolt", () => {
 			await routes["/api/events"](get("/api/events")),
 		]) {
 			expect(res.status).toBe(503);
-			expect(await res.json()).toMatchObject({ error: "dolt unconfigured" });
+			expect(await res.json()).toMatchObject({ error: "work unconfigured" });
 		}
 	});
 });
@@ -139,14 +139,14 @@ describe("GET /api/board", () => {
 		expect(stale.status).toBe(200);
 	});
 
-	test("answers 503 when Dolt fails", async () => {
+	test("answers 503 when the store fails", async () => {
 		const { source, "/api/board": board } = setup();
 		source.head = async () => {
 			throw new Error("connection refused");
 		};
 		const res = await board(get("/api/board"));
 		expect(res.status).toBe(503);
-		expect(await res.json()).toMatchObject({ error: "dolt unavailable" });
+		expect(await res.json()).toMatchObject({ error: "work unavailable" });
 	});
 });
 

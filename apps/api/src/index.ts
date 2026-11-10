@@ -1,32 +1,13 @@
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { BdClient, DoltReader } from "@mastermind/beads";
 import { browserIngest, telemetryFromEnv, traced } from "@mastermind/telemetry";
 import index from "@mastermind/web/index.html";
-import { SQL } from "bun";
 import { type Deps, health } from "./app.ts";
 import type { Auth } from "./auth/service.ts";
 import { requireAccountFromEnv } from "./auth/session.ts";
 import { startAuthInBackground } from "./auth/start.ts";
 import { backupsFromEnv, jetstreamHealth } from "./backup/start.ts";
-import {
-	bdEnv,
-	bootstrap,
-	type Supervisor,
-	serveCmd,
-	supervise,
-	writeWorkspace,
-} from "./bd-serve.ts";
-import { beadsRoutes, beadsStore } from "./beads/routes.ts";
-import { boardRoutes, doltBoardSource } from "./board/routes.ts";
-import { type DispatchNats, runDispatch } from "./dispatch/start.ts";
-import {
-	ensureBackup,
-	hasBeadsSchema,
-	parseDoltUrl,
-	serverUrl,
-	syncBackup,
-} from "./dolt.ts";
+import { beadsRoutes } from "./beads/routes.ts";
+import { boardRoutes } from "./board/routes.ts";
+import type { DispatchNats } from "./dispatch/start.ts";
 import { downloadRoutes } from "./download/routes.ts";
 import { environmentRoutes } from "./environments/routes.ts";
 import { startEnvironmentsInBackground } from "./environments/start.ts";
@@ -34,12 +15,11 @@ import { RunnerRegistry } from "./people/registry.ts";
 import { peopleRoutes } from "./people/routes.ts";
 import { runnerScript } from "./people/runner-script.ts";
 import { routingRoutes } from "./routing/routes.ts";
-import { bdRoutingBeads, startRoutingInBackground } from "./routing/start.ts";
+import { startRoutingInBackground } from "./routing/start.ts";
 import { startNatsWork } from "./store/nats-work.ts";
 
 const env = process.env;
 const version = env.GIT_SHA ?? "dev";
-const bdPort = Number(env.BD_SERVE_PORT ?? 3010);
 // OTLP logs, traces and metrics: no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set.
 const telemetry = telemetryFromEnv(env, {
 	serviceName: env.OTEL_SERVICE_NAME || "mastermind",
@@ -50,83 +30,7 @@ const webTelemetry = telemetryFromEnv(env, {
 	serviceVersion: version,
 });
 
-// Where work lives: nats (JetStream, @mastermind/work: no bd serve child, no
-// Dolt connection; the default) or beads (bd serve + Dolt, until it is
-// removed). See docs/deploy.md.
-const workStore = env.WORK_STORE === "beads" ? "beads" : "nats";
-const doltUrl = workStore === "beads" ? env.DOLT_URL : undefined;
-
-const deps: Deps = {
-	db: env.DATABASE_URL ? new SQL(env.DATABASE_URL) : null,
-	// Configured means probed: until bd serve is up, health reports it down.
-	dolt: doltUrl ? new SQL(doltUrl) : null,
-	bdUrl: doltUrl ? `http://127.0.0.1:${bdPort}` : null,
-	nats: null,
-};
-
-let bd: Supervisor | null = null;
-let backupTimer: ReturnType<typeof setInterval> | null = null;
-
-/** bd serve's workspace; the bd CLI runs there too (dispatch: lease heartbeats). */
-const bdRoot = env.BD_WORKSPACE ?? join(tmpdir(), "mastermind-beads");
-
-/** Bootstrap the beads database if needed, then supervise bd serve. */
-async function startBeads(doltUrl: string): Promise<void> {
-	const target = parseDoltUrl(doltUrl);
-	const bin = env.BD_BIN ?? "bd";
-	const server = new SQL(serverUrl(doltUrl));
-	try {
-		if (!(await hasBeadsSchema(server, target.database))) {
-			console.log(`dolt: creating beads database ${target.database}`);
-			await bootstrap(bin, target, env.BD_PREFIX ?? "mm");
-		}
-	} finally {
-		await server.close();
-	}
-	const root = bdRoot;
-	const beadsDir = await writeWorkspace(root, target.database);
-	bd = supervise({
-		cmd: serveCmd(bin, bdPort),
-		port: bdPort,
-		cwd: root,
-		env: bdEnv(target, beadsDir),
-	});
-}
-
-async function backup(sql: SQL, url: string): Promise<void> {
-	const started = performance.now();
-	await ensureBackup(sql, url);
-	await syncBackup(sql);
-	console.log(
-		`dolt: backup synced to ${url} in ${Math.round(performance.now() - started)}ms`,
-	);
-}
-
-async function startDolt(doltUrl: string): Promise<void> {
-	// Dolt may come up after the app; keep trying instead of crashing.
-	for (let attempt = 1; ; attempt++) {
-		try {
-			await startBeads(doltUrl);
-			break;
-		} catch (error) {
-			const wait = Math.min(1_000 * 2 ** attempt, 60_000);
-			console.error(`dolt: start failed (${error}); retrying in ${wait}ms`);
-			await Bun.sleep(wait);
-		}
-	}
-	const backupUrl = env.DOLT_BACKUP_URL;
-	const sql = deps.dolt;
-	if (!backupUrl || !sql) return;
-	const run = () =>
-		backup(sql, backupUrl).catch((error) =>
-			console.error(`dolt: backup failed: ${error}`),
-		);
-	await run();
-	const minutes = Number(env.DOLT_BACKUP_INTERVAL_MINUTES ?? 360);
-	backupTimer = setInterval(run, minutes * 60_000);
-}
-
-if (doltUrl) void startDolt(doltUrl);
+const deps: Deps = { nats: null, work: null };
 
 // Auth (NATS auth callout + /api/auth/*): off unless NATS_WS_URL (ws/wss), the issuer seed and the auth password are set.
 const port = Number(env.PORT ?? 3000);
@@ -166,8 +70,8 @@ const people = peopleRoutes({
 	onError: (error) => console.error(`people: ${error}`),
 });
 
-// Dispatcher on NATS, on auth's APP connection; without auth, on DISPATCH_NATS_URL (ws/wss, local dev).
-// Off when neither is set; needs Dolt and bd serve, or WORK_STORE=nats.
+// The work store and its dispatcher on NATS, on auth's APP connection; without
+// auth, on DISPATCH_NATS_URL (ws/wss, local dev). Off when neither is set.
 const dispatchNats: DispatchNats | null = auth
 	? { connection: auth.ready.then((service) => service.app) }
 	: env.DISPATCH_NATS_URL
@@ -177,58 +81,28 @@ const dispatchNats: DispatchNats | null = auth
 				pass: env.DISPATCH_NATS_PASSWORD,
 			}
 		: null;
-// WORK_STORE=nats: the store and its dispatcher open in the background on this NATS.
-const natsWork =
-	workStore === "nats" && dispatchNats
-		? startNatsWork({
-				nats: dispatchNats,
-				observe: runners.observe,
-				onError: (error) => console.error(`work: ${error}`),
-			})
-		: null;
-if (workStore === "nats" && !natsWork)
+// The store and its dispatcher open in the background on this NATS.
+const natsWork = dispatchNats
+	? startNatsWork({
+			nats: dispatchNats,
+			observe: runners.observe,
+			onError: (error) => console.error(`work: ${error}`),
+		})
+	: null;
+if (!natsWork)
 	console.error(
-		"work: the nats work store needs NATS (auth or DISPATCH_NATS_URL); work is off",
+		"work: the work store needs NATS (auth or DISPATCH_NATS_URL); work is off",
 	);
 deps.work = natsWork ? natsWork.probe : null;
-const board = boardRoutes(
-	natsWork ? natsWork.board : deps.dolt ? doltBoardSource(deps.dolt) : null,
-	{ onError: (error) => console.error(`board: ${error}`) },
-);
-const hub = board.hub;
-const dispatch =
-	!natsWork && dispatchNats && deps.dolt && deps.bdUrl
-		? runDispatch({
-				nats: dispatchNats,
-				bdUrl: deps.bdUrl,
-				bdCli: {
-					bin: env.BD_BIN ?? "bd",
-					cwd: bdRoot,
-					env: bdEnv(parseDoltUrl(env.DOLT_URL ?? ""), join(bdRoot, ".beads")),
-				},
-				dolt: deps.dolt,
-				events: hub
-					? (listener) => hub.subscribe(listener).unsubscribe
-					: undefined,
-				observe: runners.observe,
-				onError: (error) => console.error(`dispatch: ${error}`),
-			})
-		: null;
-deps.nats = natsWork
-	? natsWork.dispatchProbe
-	: dispatch
-		? () => dispatch.probe()
-		: null;
-
+deps.nats = natsWork ? natsWork.dispatchProbe : null;
+const board = boardRoutes(natsWork ? natsWork.board : null, {
+	onError: (error) => console.error(`board: ${error}`),
+});
 // Routing (queues, members, ordered rules) in NATS KV, on the dispatcher's NATS.
 const routing = dispatchNats ? startRoutingInBackground(dispatchNats) : null;
 const routingApi = routingRoutes({
 	store: () => routing?.store() ?? null,
-	beads: natsWork
-		? natsWork.routing
-		: deps.bdUrl
-			? bdRoutingBeads(deps.bdUrl)
-			: null,
+	beads: natsWork ? natsWork.routing : null,
 	requireAccount,
 	onError: (error) => console.error(`routing: ${error}`),
 });
@@ -249,18 +123,10 @@ const backups = appNats ? backupsFromEnv(env, appNats) : null;
 deps.jetstream = appNats ? () => jetstreamHealth(appNats, backups) : null;
 
 // Work from the UI: /api/beads (create, detail with timeline, notes, reopen, close) and /api/activity.
-const beads = beadsRoutes(
-	natsWork
-		? natsWork.beads
-		: deps.dolt && deps.bdUrl
-			? beadsStore(
-					new BdClient({ baseUrl: deps.bdUrl }),
-					new DoltReader(deps.dolt),
-					doltBoardSource(deps.dolt).head,
-				)
-			: null,
-	{ requireAccount, onError: (error) => console.error(`beads: ${error}`) },
-);
+const beads = beadsRoutes(natsWork ? natsWork.beads : null, {
+	requireAccount,
+	onError: (error) => console.error(`beads: ${error}`),
+});
 
 const server = Bun.serve({
 	port,
@@ -292,18 +158,13 @@ const server = Bun.serve({
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
 	process.on(signal, async () => {
-		if (backupTimer) clearInterval(backupTimer);
 		backups?.stop();
-		await dispatch?.stop();
 		await natsWork?.stop();
 		await routing?.stop();
 		await environments?.stop();
 		await auth?.stop();
 		board.stop();
 		await server.stop();
-		await bd?.stop();
-		await deps.db?.close();
-		await deps.dolt?.close();
 		await Promise.all([telemetry.shutdown(), webTelemetry.shutdown()]);
 		process.exit(0);
 	});

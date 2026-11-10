@@ -1,19 +1,5 @@
-import { afterAll, expect, test } from "bun:test";
-import type { SQL } from "bun";
+import { expect, test } from "bun:test";
 import { health, noDeps } from "./app.ts";
-
-const failing = (() =>
-	Promise.reject(new Error("connection refused"))) as unknown as SQL;
-const working = (() => Promise.resolve([{ "?column?": 1 }])) as unknown as SQL;
-
-const bdReady = Bun.serve({
-	port: 0,
-	fetch: (req) =>
-		new URL(req.url).pathname === "/v0/beads/ready"
-			? Response.json([])
-			: new Response("not found", { status: 404 }),
-});
-afterAll(() => bdReady.stop(true));
 
 test("health without dependencies is ok and reports the version", async () => {
 	const res = await health(noDeps, "abc123");
@@ -21,52 +7,23 @@ test("health without dependencies is ok and reports the version", async () => {
 	expect(await res.json()).toEqual({
 		ok: true,
 		version: "abc123",
-		db: "unconfigured",
-		dolt: "unconfigured",
-		bd: "unconfigured",
 		nats: "unconfigured",
+		work: "unconfigured",
 	});
 });
 
 test("health with reachable dependencies reports them up", async () => {
 	const res = await health(
-		{
-			db: working,
-			dolt: working,
-			bdUrl: bdReady.url.origin,
-			nats: async () => "up",
-		},
+		{ nats: async () => "up", work: async () => "up" },
 		"abc123",
 	);
 	expect(res.status).toBe(200);
-	expect(await res.json()).toMatchObject({
+	expect(await res.json()).toEqual({
 		ok: true,
-		db: "up",
-		dolt: "up",
-		bd: "up",
+		version: "abc123",
 		nats: "up",
+		work: "up",
 	});
-});
-
-test("health with an unreachable database is 503", async () => {
-	const res = await health({ ...noDeps, db: failing }, "abc123");
-	expect(res.status).toBe(503);
-	expect(await res.json()).toMatchObject({ ok: false, db: "down" });
-});
-
-test("health with dolt down is 503", async () => {
-	const res = await health({ ...noDeps, dolt: failing }, "abc123");
-	expect(res.status).toBe(503);
-	expect(await res.json()).toMatchObject({ ok: false, dolt: "down" });
-});
-
-test("health with bd serve not listening is 503", async () => {
-	const res = await health(
-		{ ...noDeps, bdUrl: "http://127.0.0.1:1" },
-		"abc123",
-	);
-	expect(res.status).toBe(503);
-	expect(await res.json()).toMatchObject({ ok: false, bd: "down" });
 });
 
 test("health with the dispatcher's NATS down is 503", async () => {
@@ -78,11 +35,8 @@ test("health with the dispatcher's NATS down is 503", async () => {
 	expect(await res.json()).toMatchObject({ ok: false, nats: "down" });
 });
 
-test("health shows the NATS work store only when it is on (WORK_STORE=nats)", async () => {
-	const up = await health({ ...noDeps, work: async () => "up" }, "abc123");
-	expect(up.status).toBe(200);
-	expect(await up.json()).toMatchObject({ ok: true, work: "up" });
-	const down = await health({ ...noDeps, work: async () => "down" }, "abc123");
-	expect(down.status).toBe(503);
-	expect(await down.json()).toMatchObject({ ok: false, work: "down" });
+test("health with the work store down is 503", async () => {
+	const res = await health({ ...noDeps, work: async () => "down" }, "abc123");
+	expect(res.status).toBe(503);
+	expect(await res.json()).toMatchObject({ ok: false, work: "down" });
 });

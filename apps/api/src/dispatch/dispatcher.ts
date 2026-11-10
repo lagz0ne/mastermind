@@ -11,7 +11,7 @@
  * - onEvent: a journal event routes a bead with no queue and wakes the waiters
  *   of a queue that has ready work.
  */
-import { AlreadyClaimed, BdError, NotFound } from "@mastermind/beads";
+
 import { BusError } from "@mastermind/bus";
 import {
 	type Ack,
@@ -44,6 +44,7 @@ import {
 	selectBead,
 	selectWaiter,
 } from "@mastermind/router";
+import { AlreadyClaimed, NotFound, WorkError } from "@mastermind/work";
 import { envOf } from "../beads/env.ts";
 import type { Work } from "./work.ts";
 
@@ -179,7 +180,7 @@ export function busError(error: unknown): unknown {
 	if (error instanceof BusError) return error;
 	if (error instanceof NotFound)
 		return new BusError("not_found", error.message, { cause: error });
-	if (error instanceof BdError && error.status >= 400 && error.status < 500)
+	if (error instanceof WorkError && error.status >= 400 && error.status < 500)
 		return new BusError("conflict", `${error.code}: ${error.message}`, {
 			cause: error,
 		});

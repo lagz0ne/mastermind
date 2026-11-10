@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { NotFound } from "@mastermind/beads";
 import { BusError, type StoreEntry } from "@mastermind/bus";
 import type { Bead } from "@mastermind/core";
+import { NotFound } from "@mastermind/work";
 import {
 	defaultEnvironment,
 	explain,

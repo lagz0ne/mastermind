@@ -17,7 +17,7 @@ export function HealthFooter() {
 			{failed
 				? "api unreachable"
 				: health
-					? `api ${health.ok ? "ok" : "degraded"} · db ${health.db} · ${health.version.slice(0, 7)}`
+					? `api ${health.ok ? "ok" : "degraded"} · work ${health.work} · ${health.version.slice(0, 7)}`
 					: "…"}
 		</footer>
 	);

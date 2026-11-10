@@ -1,10 +1,4 @@
-// GET /api/board (snapshot) and GET /api/events (SSE), both read from Dolt.
-import {
-	DoltReader,
-	iso,
-	type JournalSource,
-	type SqlTag,
-} from "@mastermind/beads";
+// GET /api/board (snapshot) and GET /api/events (SSE), both read from the work store.
 import {
 	type Bead,
 	type BeadEvent,
@@ -14,44 +8,15 @@ import {
 import type { Server } from "bun";
 import { type HubOptions, JournalHub } from "./hub.ts";
 import { type LeaseChange, type LeaseSource, LeaseWatch } from "./leases.ts";
+import type { JournalSource } from "./tail.ts";
 
-/** What the board routes read. {@link doltBoardSource} in production. */
+/** What the board routes read. The NATS work store in production (natsBoardSource). */
 export type BoardSource = JournalSource &
 	Partial<LeaseSource> & {
 		board(): Promise<Bead[]>;
 		/** Highest journal seq, 0 when the journal is empty. */
 		head(): Promise<number>;
 	};
-
-export function doltBoardSource(sql: SqlTag): BoardSource {
-	const reader = new DoltReader(sql);
-	return {
-		board: () => reader.board(),
-		journalSince: (seq) => reader.journalSince(seq),
-		async head() {
-			const rows = (await sql`
-				select coalesce(max(seq), 0) as head from bd_events_journal
-			`) as { head: number | bigint | string }[];
-			return Number(rows[0]?.head ?? 0);
-		},
-		async leases() {
-			const rows = (await sql`
-				select issue_id, lease_expires_at, heartbeat_at from leases
-			`) as {
-				issue_id: string;
-				lease_expires_at: Date | string;
-				heartbeat_at: Date | string | null;
-			}[];
-			return rows.map((r) => ({
-				beadId: r.issue_id,
-				lease: {
-					expiresAt: iso(r.lease_expires_at),
-					heartbeatAt: iso(r.heartbeat_at ?? r.lease_expires_at),
-				},
-			}));
-		},
-	};
-}
 
 export type BoardRoutesOptions = Omit<HubOptions, "head"> & {
 	/** SSE comment sent this often so proxies keep the stream open. Default 8 s. */
@@ -64,7 +29,7 @@ type Handler = (req: Request, server?: Server<unknown>) => Promise<Response>;
 
 export type BoardRoutes = {
 	routes: { "/api/board": Handler; "/api/events": Handler };
-	/** The shared journal tail; null without Dolt. */
+	/** The shared journal tail; null without a work store. */
 	hub: JournalHub | null;
 	stop(): void;
 };
@@ -72,15 +37,15 @@ export type BoardRoutes = {
 const unconfigured = () =>
 	Response.json(
 		{
-			error: "dolt unconfigured",
-			detail: "Set DOLT_URL (mysql://...) to serve the board.",
+			error: "work unconfigured",
+			detail: "Set NATS (auth or DISPATCH_NATS_URL) to serve the board.",
 		},
 		{ status: 503 },
 	);
 
 const unavailable = (error: unknown) =>
 	Response.json(
-		{ error: "dolt unavailable", detail: String(error) },
+		{ error: "work unavailable", detail: String(error) },
 		{ status: 503 },
 	);
 
@@ -104,8 +69,8 @@ export function leaseFrame(change: LeaseChange): Uint8Array {
 }
 
 /**
- * Routes for Bun.serve. With a null source (no DOLT_URL) both answer 503 and
- * nothing else changes, so the app stays deployable without Dolt.
+ * Routes for Bun.serve. With a null source (no work store) both answer 503 and
+ * nothing else changes, so the app stays deployable without NATS.
  */
 export function boardRoutes(
 	source: BoardSource | null,

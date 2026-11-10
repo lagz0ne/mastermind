@@ -1,7 +1,6 @@
-// WORK_STORE=nats: the work store on JetStream (@mastermind/work) behind the
-// api's existing interfaces: Work (dispatcher), BoardSource (/api/board and
-// /api/events), BeadsStore (/api/beads, /api/activity), RoutingBeads. No bd
-// serve, no Dolt. The store opens in the background; until then every route
+// The work store on JetStream (@mastermind/work) behind the api's
+// interfaces: Work (dispatcher), BoardSource (/api/board and /api/events),
+// BeadsStore (/api/beads, /api/activity), RoutingBeads. The store opens in the background; until then every route
 // answers 503 and the dispatcher waits.
 import { connect } from "@mastermind/bus";
 import type { BeadEvent, Probe } from "@mastermind/core";

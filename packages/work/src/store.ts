@@ -18,13 +18,6 @@
  * history. Closed items leave the board (and memory) `doneForMs` after they
  * close; they stay in the stream, so get, timeline and activity still read them.
  */
-import {
-	AlreadyClaimed,
-	BdError,
-	type ClaimResult,
-	type CreateBead,
-	NotFound,
-} from "@mastermind/beads";
 import { Store, type StoreWatch } from "@mastermind/bus";
 import {
 	type Bead,
@@ -48,6 +41,13 @@ import {
 	type StoredMsg,
 } from "@nats-io/jetstream";
 import type { NatsConnection } from "@nats-io/nats-core";
+import {
+	AlreadyClaimed,
+	type ClaimResult,
+	type CreateBead,
+	NotFound,
+	WorkError,
+} from "./errors.ts";
 
 export type WorkOp =
 	| "create"
@@ -597,7 +597,7 @@ export class NatsWork {
 				if (!isWrongLast(error)) throw error;
 			}
 		}
-		throw new BdError(409, "conflict", `${id}: too many concurrent writes`);
+		throw new WorkError(409, "conflict", `${id}: too many concurrent writes`);
 	}
 
 	#newId(attempt: number): string {
@@ -632,7 +632,7 @@ export class NatsWork {
 				if (!isWrongLast(error)) throw error;
 			}
 		}
-		throw new BdError(409, "conflict", "no free id");
+		throw new WorkError(409, "conflict", "no free id");
 	}
 
 	/** Atomic. Throws AlreadyClaimed while another actor holds a live lease. */
@@ -660,7 +660,7 @@ export class NatsWork {
 						}),
 					);
 				if (b.status !== "open" && b.status !== "in_progress")
-					throw new BdError(409, "not_claimable", `${id} is ${b.status}`);
+					throw new WorkError(409, "not_claimable", `${id} is ${b.status}`);
 				b.status = "in_progress";
 				b.assignee = actor;
 				b.lease = this.#lease(at);
@@ -684,9 +684,9 @@ export class NatsWork {
 		if (!cur) throw notFound(id);
 		const b = cur.bead;
 		if (b.status !== "in_progress")
-			throw new BdError(409, "heartbeat_refused", `${id} is ${b.status}`);
+			throw new WorkError(409, "heartbeat_refused", `${id} is ${b.status}`);
 		if (b.assignee !== actor)
-			throw new BdError(
+			throw new WorkError(
 				409,
 				"heartbeat_refused",
 				`${id} already claimed by ${b.assignee}`,
@@ -705,9 +705,9 @@ export class NatsWork {
 	async release(id: string, actor: string): Promise<Bead> {
 		const { bead } = await this.#mutate(id, "release", actor, (b, at) => {
 			if (b.status !== "in_progress")
-				throw new BdError(409, "not_releasable", `${id} holds no claim`);
+				throw new WorkError(409, "not_releasable", `${id} holds no claim`);
 			if (b.assignee !== actor)
-				throw new BdError(
+				throw new WorkError(
 					409,
 					"not_releasable",
 					`${id} is held by ${b.assignee}`,

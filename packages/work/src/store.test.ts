@@ -4,7 +4,6 @@
 // apps/api/src/store/contract.test.ts; this file covers what only the
 // stream store has: journal, timeline, projection, ids, lease renewals.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { AlreadyClaimed, NotFound } from "@mastermind/beads";
 import { connect } from "@mastermind/bus";
 import {
 	type BeadEvent,
@@ -13,6 +12,7 @@ import {
 	queueLabel,
 } from "@mastermind/core";
 import type { NatsConnection } from "@nats-io/nats-core";
+import { AlreadyClaimed, NotFound } from "./errors.ts";
 import { natsAvailable, type TestNats, testNats } from "./nats-server.ts";
 import { NatsWork, type NatsWorkOptions } from "./store.ts";
 

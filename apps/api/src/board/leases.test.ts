@@ -57,7 +57,7 @@ test("a failing read is reported, not thrown", async () => {
 	const watch = new LeaseWatch(
 		{
 			leases: async () => {
-				throw new Error("dolt down");
+				throw new Error("store down");
 			},
 		},
 		{ onError: (e) => errors.push(e) },
