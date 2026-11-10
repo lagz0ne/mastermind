@@ -17,6 +17,7 @@
 		"@mastermind/router": "workspace:*",
 		"@mastermind/telemetry": "workspace:*",
 		"@mastermind/web": "workspace:*",
+		"@mastermind/work": "workspace:*",
 		"@nats-io/jwt": "0.0.10-5",
 		"@nats-io/nats-core": "^3.4.0",
 		"@nats-io/nkeys": "^2.0.3"

@@ -67,6 +67,20 @@ So the app deploy has two modes:
 `GET /api/health` reports `version` (the commit) and one probe per dependency: `db`, `dolt`, `bd`.
 Each is `up`, `down` or `unconfigured`; any `down` makes it a 503.
 
+## Work store: `WORK_STORE`
+
+| `WORK_STORE` | Where work lives |
+|---|---|
+| `beads` (default) | Dolt + `bd serve`, below. Needs `DOLT_URL`. |
+| `nats` | JetStream (`packages/work`), on the dispatcher's NATS (auth's APP connection, or `DISPATCH_NATS_URL`). No `bd serve` child and no Dolt connection: `DOLT_URL` is ignored. Health shows `work: up`. |
+
+With `nats`, one stream `MM_WORK` (subjects `mm.work.<id>`, file storage, 1 replica, no age limit,
+`max_bytes` 1 GiB with discard `new`) holds every item and its history: one message per change. A write
+is a compare-and-set on the item's subject, so a claim race has one winner. Lease renewals go to the KV
+bucket `mm_work_leases`, not to the stream. Each replica keeps the board in memory, loaded from the last
+message of each item and kept live by an ordered consumer. A full stream refuses writes; it never drops
+items. Not available on this store: dependencies (`blocked` is always false), the `bd` CLI, Dolt history.
+
 ## Beads: Dolt + bd serve
 
 Mastermind reads beads straight from Dolt with `Bun.SQL` (MySQL protocol) and writes through `bd serve`,

@@ -77,3 +77,12 @@ test("health with the dispatcher's NATS down is 503", async () => {
 	expect(res.status).toBe(503);
 	expect(await res.json()).toMatchObject({ ok: false, nats: "down" });
 });
+
+test("health shows the NATS work store only when it is on (WORK_STORE=nats)", async () => {
+	const up = await health({ ...noDeps, work: async () => "up" }, "abc123");
+	expect(up.status).toBe(200);
+	expect(await up.json()).toMatchObject({ ok: true, work: "up" });
+	const down = await health({ ...noDeps, work: async () => "down" }, "abc123");
+	expect(down.status).toBe(503);
+	expect(await down.json()).toMatchObject({ ok: false, work: "down" });
+});

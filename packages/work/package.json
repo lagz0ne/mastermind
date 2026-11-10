@@ -1,0 +1,21 @@
+{
+	"name": "@mastermind/work",
+	"version": "0.0.0",
+	"private": true,
+	"type": "module",
+	"exports": {
+		".": "./src/index.ts",
+		"./test": "./src/nats-server.ts"
+	},
+	"scripts": {
+		"test": "bun test",
+		"typecheck": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@mastermind/beads": "workspace:*",
+		"@mastermind/bus": "workspace:*",
+		"@mastermind/core": "workspace:*",
+		"@nats-io/jetstream": "^3.4.0",
+		"@nats-io/nats-core": "^3.4.0"
+	}
+}
