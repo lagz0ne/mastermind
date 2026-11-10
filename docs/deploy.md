@@ -8,6 +8,7 @@ at `~/work`. Do not drive Dokploy from this repo: ask the hub (`hubq send "..." 
 | `mastermind` | the app image `ghcr.io/lagz0ne/mastermind:latest`: UI, `/api/*`, and `bd serve` as a child | https://mastermind.vibea.dev, port 3000 |
 | `mastermind-db` | Postgres 16: Mastermind's own state (`DATABASE_URL`) | internal only |
 | `mastermind-dolt` | `dolthub/dolt-sql-server:2.7.2`: the work (beads). Volumes: data `/var/lib/dolt`, backups `/backups` | internal only, port 3306 |
+| `nats` | `nats:2.15.2`: the bus between Mastermind and runner adapters. JetStream volume `/data/jetstream` | client 4222 and monitoring 8222 internal only; WebSocket 8080 public as `wss://mastermind.vibea.dev/nats` |
 
 `GET /api/health` reports `version` (the commit) and one probe per dependency: `db`, `dolt`, `bd`.
 Each is `up`, `down` or `unconfigured`; any `down` makes it a 503.
@@ -88,3 +89,40 @@ project network as the root user). They were drilled on dolt 2.7.2 with bd 1.3.4
 What you lose: writes after the last sync, up to `DOLT_BACKUP_INTERVAL_MINUTES`. Event journal `seq`
 numbers go back to the backup's, so clients that tail `/v0/beads/events?since=<seq>` must reset their
 cursor after a restore.
+
+## NATS
+
+Mastermind and every runner adapter talk over NATS: request/reply, subscriptions and JetStream KV.
+Adapters connect from outside over WebSocket; the app connects inside the project network. The config
+is `deploy/nats/nats.conf`, mounted at `/etc/nats/nats.conf`. Details and checks: `deploy/nats/README.md`.
+
+```
+adapter ──wss://mastermind.vibea.dev/nats──▶ Cloudflare ─▶ Traefik ─▶ nats:8080 (no TLS inside)
+mastermind app ──NATS_URL (nats://…:4222, internal)──▶ nats:4222
+```
+
+Accounts: `AUTH` (one user, `mastermind`: the auth callout service), `APP` (JetStream on; every admitted
+client), `SYS`. Every other login goes through the NATS auth callout: Mastermind answers
+`$SYS.REQ.USER.AUTH` and issues a user JWT for `APP`, signed with `NATS_ISSUER_SEED` (mm-210.12).
+
+**Safe state.** Until Mastermind runs the auth callout service, NATS refuses every client connection
+except the `mastermind` user, with `Authorization Violation`. This is correct. It is not an outage.
+
+### Env
+
+| Var | On | Notes |
+|---|---|---|
+| `NATS_AUTH_PASSWORD` | nats, app | password of the `mastermind` user. Secret, made by the hub |
+| `NATS_ISSUER_PUBLIC` | nats | public nkey (`A…`) of the issuer account key |
+| `NATS_ISSUER_SEED` | app | seed (`SA…`) of the same key. Secret, made by the hub |
+| `NATS_URL` | app | `nats://<nats host>:4222` |
+| `NATS_AUTH_USER` | app | `mastermind` |
+| `NATS_PUBLIC_WS_URL` | app | `wss://mastermind.vibea.dev/nats`; given to adapters |
+
+### Check
+
+```bash
+NATS_SERVER=/path/to/nats-server bun test deploy/nats          # the config in a real 2.15 server
+bun deploy/nats/smoke.ts wss://mastermind.vibea.dev/nats       # public endpoint, from outside
+# OK: INFO received, unauthenticated connect refused
+```
