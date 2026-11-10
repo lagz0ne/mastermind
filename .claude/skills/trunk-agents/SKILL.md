@@ -124,8 +124,19 @@ paseo send <id> "..."                      # steer or ask (e.g. the holder of a 
   spawn one agent per **ready** bead. Slices must not share files; if they must, make them dependent.
 - Need a file another agent declared? `paseo send <their id> "need <path> for <bead>, when do you ship?"`
   and work on something else meanwhile. Don't edit it.
-- `paseo.json` scripts (`check`, `test`, `status`, `api` service) are available from the Paseo UI
+- `paseo.json` scripts (`check`, `test`, `status`, `app` service) are available from the Paseo UI
   and `paseo script start <name> --workspace <id>`.
+
+**Temporary things (probes, experiments, smoke runs).** The human sees every Paseo project,
+workspace and agent in the app, and every temporary resource on a remote service. Label them and
+remove them when you are done:
+
+- Name: the title starts with `probe:`. Agents also get `--label purpose=probe --label bead=<id>`.
+- Record: `bd -q note <bead> "probe: <project id> <workspace id> <agent ids>"`, so anyone can clean up.
+- Remove, before you close the bead: `paseo archive <agent>` for each probe agent,
+  `paseo workspace archive <workspace id>`, `paseo project delete <project id>` (the directory stays;
+  delete it too if you made it). The same rule holds for a probe on a remote service
+  (a Dokploy schedule, a test bead in the hosted queue): name it as a probe and remove or close it.
 
 ## 7. Recovery
 
