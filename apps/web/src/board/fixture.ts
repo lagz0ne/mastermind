@@ -4,7 +4,7 @@ const minutes = (now: Date, m: number) =>
 	new Date(now.getTime() + m * 60_000).toISOString();
 
 /**
- * Board fixture until GET /api/board exists (mm-210.7). Times are relative to
+ * Sample board for tests (the page reads GET /api/board since mm-210.7). Times are relative to
  * `now` so live and expired leases stay that way whenever it renders.
  */
 export function fixtureBeads(now: Date = new Date()): Bead[] {
