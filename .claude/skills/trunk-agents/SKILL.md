@@ -44,9 +44,11 @@ someone else**. Do not edit, format, revert, stash, or commit them.
 
 ## 2. Claim: one issue, explicit file scope
 
+Pick from `scripts/status.sh` ("ready to claim"). Never use `bd ready --claim`: the merge slot is
+itself a ready bead and that command would grab it and block every ship.
+
 ```bash
 bd -q update <id> --claim     # atomic; "already claimed" → pick another
-# or: bd ready --claim --json   # claim next ready issue
 # no issue yet? create it first:
 bd create "Add X" -t feature -p 2 -d "why + acceptance" --json
 bd note <id> "files: packages/core/src/x.ts, apps/api/src/routes/x.ts"
@@ -65,10 +67,15 @@ bd note <id> "files: packages/core/src/x.ts, apps/api/src/routes/x.ts"
 scripts/ship.sh -m "feat(core): add x parser" -i <id> -- <your paths...>
 ```
 
-`ship.sh` takes the merge slot, rebases on origin/main, builds a snapshot of
-**HEAD + only your paths**, runs `bun run check` on it, commits only those paths,
-pushes, runs `bd dolt push`, and releases the slot. If it fails, nothing was
-committed and the failure is in **your** change.
+`ship.sh` takes the merge slot, fast-forwards to origin/main (it never stashes or rebases),
+builds a snapshot of **HEAD + only your paths**, runs `bun run check` on it, commits only those
+paths, pushes, releases the slot and runs `bd dolt push`. If trunk moved while it was checking, it
+undoes the commit and re-verifies on the new trunk. If it fails, nothing stays committed and the
+failure is in **your** change. Paths are relative to where you run it.
+
+If it says it cannot fast-forward, someone's uncommitted file overlaps a commit that landed from
+outside this checkout. Find the owner with `scripts/status.sh` and tell them (`paseo send`); do not
+stash or discard their file.
 
 - Conventional commits: `feat|fix|refactor|test|chore|docs(scope): ...`
 - Unfinished feature? Still ship it, but keep it unreachable: don't wire it up yet,
@@ -86,14 +93,15 @@ bd close <id> -r "shipped <sha>: what changed"
 
 `git checkout -b`, `git switch`, `git worktree`, `git stash`, `git add -A` / `git add .`,
 `git commit -a`, `git reset --hard`, `git clean`, `git checkout -- <file>` / `git restore`
-on files you don't own, `git push --force`, interactive rebase, and committing outside `ship.sh`.
+on files you don't own, `git push --force`, `git pull`, `git rebase`, `git revert`, and committing outside `ship.sh`.
 Each of these destroys or captures another agent's uncommitted work.
 
 ## 5. Red trunk = stop the line
 
 If `gh run list -b main -L 3` shows a failure:
 1. If it's your commit: fix forward within ~10 min, or revert it
-   (`git revert --no-edit <sha>` then ship the touched paths). Reverting is cheap and fine.
+   (`scripts/ship.sh -r <sha>`: a gated revert of exactly that commit). Never use `git revert`;
+   it commits outside the gate. Reverting is cheap and fine.
 2. Otherwise check whether a P0 already exists (`bd list -p 0`). If not, create one:
    `bd create "main red: <job>" -t bug -p 0 -d "<run url>"`. Hold non-fix ships until it's closed.
 
@@ -122,7 +130,7 @@ paseo send <id> "..."                      # steer or ask (e.g. the holder of a 
 ## 7. Recovery
 
 - Merge slot stuck: `bd merge-slot check`. If the holder has no live in_progress
-  work, run `bd merge-slot release --holder <holder>`.
+  work, run `bd merge-slot release --holder <holder>` (if the holder is empty: `bd merge-slot release`).
 - Dead agent's claims: `bd reclaim`. To hand off: `bd unclaim <id> -r "why"`.
 - Ending your session with unshipped work: ship what's green. For the rest, leave a
   `bd note <id> "state: ..., next: ..."`, then either keep the claim (if you'll resume)

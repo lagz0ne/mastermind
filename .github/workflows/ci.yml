@@ -6,9 +6,11 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# One run at a time, never cancelled mid-deploy. While one runs, GitHub keeps only the
+# newest waiting run, so trunk always converges on the latest commit without starving.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true # newer trunk commits supersede older ones
+  group: ci-main
+  cancel-in-progress: false
 
 permissions:
   contents: read
