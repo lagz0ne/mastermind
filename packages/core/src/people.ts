@@ -40,7 +40,11 @@ export type RunnerView = {
 };
 
 export type AccountsReply = { accounts: AccountView[] };
-export type RunnersReply = { runners: RunnerView[] };
+export type RunnersReply = {
+	runners: RunnerView[];
+	/** The server's commit; a runner with another `version` is out of date. */
+	serverVersion?: string;
+};
 
 /**
  * Public state for the login page. `auth`: `on` (sessions), `off`

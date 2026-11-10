@@ -163,6 +163,7 @@ async function setup(
 		mode,
 		registry,
 		runnerScript: async () => new Response("// runner"),
+		version: "sha1",
 		tickMs: opts.tickMs,
 	});
 	return { auth, registry, routes };
@@ -226,6 +227,10 @@ describe("routes", () => {
 		expect((await runners()).map((r) => [r.runner, r.online])).toEqual([
 			[null, false],
 		]);
+		const reply = (await (
+			await routes["/api/runners"].GET(get("/api/runners"))
+		).json()) as RunnersReply;
+		expect(reply.serverVersion).toBe("sha1");
 		registry.observe({
 			kind: "next",
 			queue: "build",
@@ -280,7 +285,9 @@ describe("routes", () => {
 				text += decoder.decode(value);
 			}
 		};
-		await until((t) => t.includes('data: {"runners":[]}'));
+		await until((t) =>
+			t.includes('data: {"runners":[],"serverVersion":"sha1"}'),
+		);
 		registry.observe({
 			kind: "next",
 			queue: "q",

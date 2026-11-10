@@ -4,7 +4,11 @@
 FROM docker.io/oven/bun:1.4.4 AS build
 WORKDIR /repo
 COPY . .
-RUN bun install --frozen-lockfile && bun run --filter @mastermind/api build
+# The runner binaries (served at /download/mastermind-runner) carry GIT_SHA as their version.
+ARG GIT_SHA=dev
+ARG RUNNER_TARGETS=all
+RUN bun install --frozen-lockfile \
+ && GIT_SHA=$GIT_SHA RUNNER_TARGETS=$RUNNER_TARGETS bun run --filter @mastermind/api build
 
 # bd, pinned by version and checksum (checksums.txt of the GitHub release).
 FROM docker.io/oven/bun:1.4.4 AS bd

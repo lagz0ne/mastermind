@@ -31,6 +31,8 @@ export type PeopleOptions = {
 	mode: "on" | "off" | "unconfigured";
 	registry: RunnerRegistry;
 	runnerScript: RunnerScript;
+	/** The server's commit, sent with the runner list so the UI marks other versions. */
+	version?: string;
 	/** The stream re-checks online state this often. Default 5 s. */
 	tickMs?: number;
 	/** SSE comment so proxies keep the stream open. Default 8 s. */
@@ -147,7 +149,11 @@ export function peopleRoutes(opts: PeopleOptions) {
 					try {
 						do {
 							again = false;
-							const body = JSON.stringify({ runners: await runners() });
+							const reply: RunnersReply = {
+								runners: await runners(),
+								serverVersion: opts.version,
+							};
+							const body = JSON.stringify(reply);
 							if (!closed && body !== last) {
 								last = body;
 								controller.enqueue(
@@ -235,7 +241,10 @@ export function peopleRoutes(opts: PeopleOptions) {
 		"/api/runners": {
 			GET: session(async () => {
 				try {
-					const body: RunnersReply = { runners: await runners() };
+					const body: RunnersReply = {
+						runners: await runners(),
+						serverVersion: opts.version,
+					};
 					return Response.json(body);
 				} catch (error) {
 					if (error instanceof Starting) return fail(503, "auth is starting");

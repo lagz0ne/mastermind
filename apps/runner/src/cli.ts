@@ -8,6 +8,7 @@
  *   mastermind-runner start [settings] [--save]
  *   mastermind-runner check [settings]
  *   mastermind-runner status
+ *   mastermind-runner --version
  *
  * Settings: --queue <q> (repeat), --capacity <n>, --capability <c> (repeat),
  * --providers a,b, --workdir <dir>, --repo <url>=<dir> (repeat), --id <id>,
@@ -38,7 +39,11 @@ import { EnrolError, enrol } from "./enroll.ts";
 import { PaseoLauncher } from "./launcher.ts";
 import { Runner } from "./runner.ts";
 
-export const VERSION = "0.1.0";
+/**
+ * The Mastermind commit this runner was built from. The api build (apps/api/build.ts)
+ * replaces the expression with the server's GIT_SHA; run from source it is "dev".
+ */
+export const VERSION = process.env.MASTERMIND_RUNNER_VERSION || "dev";
 
 /** Exit codes. */
 export const EXIT = { ok: 0, error: 1, usage: 2, revoked: 3 } as const;
@@ -61,6 +66,7 @@ const OPTIONS = {
 	"paseo-host": { type: "string" },
 	save: { type: "boolean" },
 	force: { type: "boolean" },
+	version: { type: "boolean", short: "v" },
 	help: { type: "boolean", short: "h" },
 } as const;
 
@@ -77,6 +83,7 @@ const USAGE = `usage:
   mastermind-runner start [settings] [--save]
   mastermind-runner check [settings]
   mastermind-runner status
+  mastermind-runner --version
 
 settings: --queue <q>... --capacity <n> --capability <c>... --providers a,b
   --workdir <dir> --repo <url>=<dir>... --id <id> --provider <p> --model <m>
@@ -176,6 +183,10 @@ export async function main(argv: string[], io: Io): Promise<number> {
 	}
 	const { values: f, positionals } = parsed;
 	const [cmd, ...rest] = positionals;
+	if (f.version || cmd === "version") {
+		io.out(VERSION);
+		return EXIT.ok;
+	}
 	if (f.help || !cmd) {
 		io.out(USAGE);
 		return f.help ? EXIT.ok : EXIT.usage;

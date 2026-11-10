@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applyFlags, EXIT, main, runnerInfo } from "../src/cli.ts";
+import { applyFlags, EXIT, main, runnerInfo, VERSION } from "../src/cli.ts";
 import {
 	configPath,
 	defaultSettings,
@@ -192,4 +192,12 @@ test("runnerInfo announces the runner with its capacity and queues", async () =>
 		capacity: 2,
 		queues: ["a", "b"],
 	});
+});
+
+test("--version and version print the build version", async () => {
+	for (const argv of [["--version"], ["-v"], ["version"]]) {
+		const o = io();
+		expect(await main(argv, o.io)).toBe(EXIT.ok);
+		expect(o.out).toEqual([VERSION]);
+	}
 });
