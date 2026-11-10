@@ -6,6 +6,7 @@ import {
 	Outlet,
 	redirect,
 } from "@tanstack/react-router";
+import { ActivityPage } from "./activity/activity-page.tsx";
 import { BeadSheet } from "./board/bead-sheet.tsx";
 import { BoardPage } from "./board/board-page.tsx";
 import { TooltipProvider } from "./components/ui/tooltip.tsx";
@@ -14,6 +15,7 @@ import { LoginPage } from "./login/login-page.tsx";
 import { PeoplePage } from "./people/people-page.tsx";
 import { AccountMenu } from "./session/account-menu.tsx";
 import { ensureSession } from "./session/session.ts";
+import { NewWorkButton } from "./work/new-work-dialog.tsx";
 
 function Layout() {
 	return (
@@ -36,7 +38,14 @@ function Layout() {
 						>
 							People
 						</Link>
+						<Link
+							to="/activity"
+							className="ml-3 text-muted-foreground [&.active]:font-semibold [&.active]:text-foreground"
+						>
+							Activity
+						</Link>
 					</nav>
+					<NewWorkButton />
 					<AccountMenu />
 				</header>
 				<main className="min-h-0 flex-1">
@@ -98,6 +107,12 @@ const peopleRoute = createRoute({
 	component: PeoplePage,
 });
 
+const activityRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/activity",
+	component: ActivityPage,
+});
+
 const loginRoute = createRoute({
 	getParentRoute: () => rootRoute,
 	path: "/login",
@@ -108,6 +123,7 @@ export const routeTree = rootRoute.addChildren([
 	indexRoute,
 	loginRoute,
 	peopleRoute,
+	activityRoute,
 	boardRoute.addChildren([beadRoute]),
 ]);
 
