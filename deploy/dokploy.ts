@@ -43,6 +43,7 @@ import {
 	type QueueJob,
 	releaseTitle,
 } from "./src/release.ts";
+import { findRetired, ID_KEY, type Retired } from "./src/retire.ts";
 import { loadSite } from "./src/site.ts";
 
 const cfg = await loadSite(
@@ -104,10 +105,8 @@ type Compose = Service & {
 	composeStatus: string;
 	env: string | null;
 };
-type Postgres = Service & {
-	postgresId: string;
-	applicationStatus: string;
-};
+/** project.all lists a postgres database by id only (no name). */
+type Postgres = { postgresId: string };
 type Domain = {
 	domainId: string;
 	host: string;
@@ -207,7 +206,7 @@ async function status() {
 				`  route    https://${d.host}${d.path && d.path !== "/" ? d.path : ""} → ${app.name}:${d.port}`,
 			);
 	}
-	for (const r of retiredServices(ids.env))
+	for (const r of await retiredServices(ids.env))
 		log(`  retired  ${r.name} (${r.kind}): ${r.status}`);
 	log(
 		`  health   ${JSON.stringify(await health().catch((e) => ({ error: String(e) })))}`,
@@ -615,42 +614,13 @@ const RETIRED_APP_KEYS = [
 	"BD_PREFIX",
 ];
 
-type Retired = {
-	name: string;
-	kind: "compose" | "postgres" | "application";
-	id: string;
-	status: string;
-};
-
 type ProjectEnv = Awaited<ReturnType<typeof findProject>>["env"];
 
 /** The services named in site.json "retired" that still exist, with their status. */
-function retiredServices(env: ProjectEnv): Retired[] {
-	const found: Retired[] = [];
-	for (const name of cfg.retired) {
-		for (const c of env.compose.filter((c) => c.name === name))
-			found.push({
-				name,
-				kind: "compose",
-				id: c.composeId,
-				status: c.composeStatus,
-			});
-		for (const d of (env.postgres ?? []).filter((d) => d.name === name))
-			found.push({
-				name,
-				kind: "postgres",
-				id: d.postgresId,
-				status: d.applicationStatus,
-			});
-		for (const a of env.applications.filter((a) => a.name === name))
-			found.push({
-				name,
-				kind: "application",
-				id: a.applicationId,
-				status: a.applicationStatus,
-			});
-	}
-	return found;
+function retiredServices(env: ProjectEnv): Promise<Retired[]> {
+	return findRetired(cfg.retired, env, (kind, id) =>
+		api(`${kind}.one`, { [ID_KEY[kind]]: id }),
+	);
 }
 
 /**
@@ -659,18 +629,13 @@ function retiredServices(env: ProjectEnv): Retired[] {
  */
 async function retire(argv: string[]) {
 	const stop = argv.includes("--stop");
-	const found = retiredServices((await findProject()).env);
+	const found = await retiredServices((await findProject()).env);
 	const missing = cfg.retired.filter((n) => !found.some((r) => r.name === n));
 	for (const name of missing) log(`retired  ${name}: not in Dokploy (gone)`);
 	for (const r of found) {
 		log(`retired  ${r.name} (${r.kind}): ${r.status}`);
 		if (!stop) continue;
-		const idKey = {
-			compose: "composeId",
-			postgres: "postgresId",
-			application: "applicationId",
-		}[r.kind];
-		await api(`${r.kind}.stop`, { [idKey]: r.id });
+		await api(`${r.kind}.stop`, { [ID_KEY[r.kind]]: r.id });
 		log(`retired  ${r.name}: stop requested (volumes and data are kept)`);
 	}
 	if (!stop && found.length) log("run with --stop to stop them");
