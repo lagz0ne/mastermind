@@ -114,3 +114,13 @@ export function leaseState(
 	if (!lease) return "none";
 	return Date.parse(lease.expiresAt) > now.getTime() ? "live" : "expired";
 }
+
+/**
+ * Shape of `GET /api/board`. `seq` is the journal head the snapshot is at
+ * least as new as: open `GET /api/events?since=<seq>` to stay current.
+ */
+export type BoardSnapshot = {
+	columns: readonly BoardColumn[];
+	beads: Bead[];
+	seq: number;
+};
