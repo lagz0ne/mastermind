@@ -1,0 +1,20 @@
+{
+	"name": "@mastermind/runner",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"bin": {
+		"mastermind-runner": "./src/cli.ts"
+	},
+	"scripts": {
+		"start": "bun src/cli.ts",
+		"build": "bun build src/cli.ts --target=bun --outdir dist",
+		"typecheck": "tsc --noEmit",
+		"test": "bun test"
+	},
+	"dependencies": {
+		"@mastermind/bus": "workspace:*",
+		"@mastermind/core": "workspace:*",
+		"@nats-io/nats-core": "^3.4.0"
+	}
+}

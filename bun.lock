@@ -29,6 +29,18 @@
         "bun-plugin-tailwind": "^0.1.2",
       },
     },
+    "apps/runner": {
+      "name": "@mastermind/runner",
+      "version": "0.1.0",
+      "bin": {
+        "mastermind-runner": "./src/cli.ts",
+      },
+      "dependencies": {
+        "@mastermind/bus": "workspace:*",
+        "@mastermind/core": "workspace:*",
+        "@nats-io/nats-core": "^3.4.0",
+      },
+    },
     "apps/web": {
       "name": "@mastermind/web",
       "version": "0.0.0",
@@ -134,6 +146,8 @@
     "@mastermind/deploy": ["@mastermind/deploy@workspace:deploy"],
 
     "@mastermind/router": ["@mastermind/router@workspace:packages/router"],
+
+    "@mastermind/runner": ["@mastermind/runner@workspace:apps/runner"],
 
     "@mastermind/telemetry": ["@mastermind/telemetry@workspace:packages/telemetry"],
 
