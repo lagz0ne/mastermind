@@ -21,4 +21,6 @@ export function isHealthy(...probes: Probe[]): boolean {
 }
 
 export * from "./dispatch.ts";
+export * from "./people.ts";
+export * from "./timeline.ts";
 export * from "./work.ts";

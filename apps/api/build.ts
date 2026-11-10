@@ -12,9 +12,18 @@ const result = await Bun.build({
 	plugins: [tailwind],
 });
 
-for (const log of result.logs) console.error(log);
-if (!result.success) process.exit(1);
-for (const out of result.outputs) {
+// The runner adapter as one file, served at GET /runner.js (src/people/runner-script.ts).
+const runner = await Bun.build({
+	entrypoints: ["../runner/src/cli.ts"],
+	outdir: "dist",
+	target: "bun",
+	naming: "runner.js",
+	minify: true,
+});
+
+for (const log of [...result.logs, ...runner.logs]) console.error(log);
+if (!result.success || !runner.success) process.exit(1);
+for (const out of [...result.outputs, ...runner.outputs]) {
 	console.log(
 		`${out.path.slice(process.cwd().length + 1)}  ${(out.size / 1024).toFixed(1)} KiB`,
 	);
