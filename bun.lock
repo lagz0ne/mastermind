@@ -56,6 +56,13 @@
       "name": "@mastermind/core",
       "version": "0.0.0",
     },
+    "packages/router": {
+      "name": "@mastermind/router",
+      "version": "0.0.0",
+      "dependencies": {
+        "@mastermind/core": "workspace:*",
+      },
+    },
   },
   "packages": {
     "@biomejs/biome": ["@biomejs/biome@2.6.6", "", { "optionalDependencies": { "@biomejs/cli-android-arm64": "2.6.6", "@biomejs/cli-android-x64": "2.6.6", "@biomejs/cli-darwin-arm64": "2.6.6", "@biomejs/cli-darwin-x64": "2.6.6", "@biomejs/cli-linux-arm64": "2.6.6", "@biomejs/cli-linux-arm64-musl": "2.6.6", "@biomejs/cli-linux-x64": "2.6.6", "@biomejs/cli-linux-x64-musl": "2.6.6", "@biomejs/cli-win32-arm64": "2.6.6", "@biomejs/cli-win32-x64": "2.6.6" }, "bin": { "biome": "bin/biome" } }, "sha512-NCgVJRyrU1+hsW1ILNaRqNAb9fRL4n49bwyef+wjVJQ488/bXbp0BfnNqTTExkiNQT3ugkgYKR1vK8NxsjlNSQ=="],
@@ -93,6 +100,8 @@
     "@mastermind/beads": ["@mastermind/beads@workspace:packages/beads"],
 
     "@mastermind/core": ["@mastermind/core@workspace:packages/core"],
+
+    "@mastermind/router": ["@mastermind/router@workspace:packages/router"],
 
     "@mastermind/web": ["@mastermind/web@workspace:apps/web"],
 

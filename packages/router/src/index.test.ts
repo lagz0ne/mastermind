@@ -1,0 +1,286 @@
+import { describe, expect, test } from "bun:test";
+import type { Bead } from "@mastermind/core";
+import {
+	type RoutingRule,
+	type RunnerState,
+	requirementsOf,
+	route,
+	selectBead,
+	selectWaiter,
+} from "./index.ts";
+
+function bead(over: Partial<Bead> = {}): Bead {
+	return {
+		id: "mm-1",
+		title: "t",
+		status: "open",
+		priority: 2,
+		type: "task",
+		labels: [],
+		blocked: false,
+		createdAt: "2026-11-10T00:00:00Z",
+		updatedAt: "2026-11-10T00:00:00Z",
+		...over,
+	};
+}
+
+function runner(over: Partial<RunnerState> = {}): RunnerState {
+	return {
+		user: "duke",
+		runner: "r1",
+		queues: ["dev"],
+		capabilities: [],
+		capacity: 1,
+		running: 0,
+		...over,
+	};
+}
+
+describe("route", () => {
+	const rules: RoutingRule[] = [
+		{ match: { labels: ["ui", "web"] }, queue: "design" },
+		{ match: { type: "bug", maxPriority: 1 }, queue: "hotfix" },
+		{ match: { idPrefix: "ops-" }, queue: "ops" },
+		{ match: { type: "bug" }, queue: "bugs" },
+	];
+
+	const cases: [string, Partial<Bead>, RoutingRule[], string | null][] = [
+		[
+			"keeps an existing queue label",
+			{ labels: ["queue:x", "ui", "web"] },
+			rules,
+			"x",
+		],
+		[
+			"ignores an empty queue label",
+			{ labels: ["queue:", "ui", "web"] },
+			rules,
+			"design",
+		],
+		[
+			"labels: all present matches",
+			{ labels: ["web", "ui", "extra"] },
+			rules,
+			"design",
+		],
+		["labels: one missing does not match", { labels: ["ui"] }, rules, null],
+		[
+			"type + maxPriority: more urgent matches",
+			{ type: "bug", priority: 0 },
+			rules,
+			"hotfix",
+		],
+		[
+			"type + maxPriority: equal matches",
+			{ type: "bug", priority: 1 },
+			rules,
+			"hotfix",
+		],
+		[
+			"maxPriority: less urgent falls through",
+			{ type: "bug", priority: 2 },
+			rules,
+			"bugs",
+		],
+		["idPrefix matches", { id: "ops-7" }, rules, "ops"],
+		[
+			"first matching rule wins",
+			{ id: "ops-7", type: "bug", priority: 3 },
+			rules,
+			"ops",
+		],
+		["no rule matches: triage", { type: "feature" }, rules, null],
+		["no rules: triage", {}, [], null],
+		[
+			"empty match is a catch-all",
+			{},
+			[{ match: {}, queue: "default" }],
+			"default",
+		],
+	];
+	test.each(cases)("%s", (_name, over, rs, want) => {
+		expect(route(bead(over), rs)).toBe(want);
+	});
+});
+
+describe("requirementsOf", () => {
+	const cases: [string, string[], string[]][] = [
+		["no labels", [], []],
+		[
+			"req labels only",
+			["req:docker", "ui", "queue:dev", "req:gpu"],
+			["docker", "gpu"],
+		],
+		["empty req label is ignored", ["req:"], []],
+		["duplicates collapse", ["req:docker", "req:docker"], ["docker"]],
+	];
+	test.each(cases)("%s", (_name, labels, want) => {
+		expect(requirementsOf({ labels })).toEqual(want);
+	});
+});
+
+describe("selectBead", () => {
+	const ready = [
+		bead({
+			id: "a",
+			priority: 2,
+			createdAt: "2026-11-01T00:00:00Z",
+			labels: ["queue:dev"],
+		}),
+		bead({
+			id: "b",
+			priority: 1,
+			createdAt: "2026-11-05T00:00:00Z",
+			labels: ["queue:dev"],
+		}),
+		bead({
+			id: "c",
+			priority: 1,
+			createdAt: "2026-11-03T00:00:00Z",
+			labels: ["queue:dev", "req:docker"],
+		}),
+		bead({
+			id: "d",
+			priority: 0,
+			createdAt: "2026-11-01T00:00:00Z",
+			labels: ["queue:other"],
+		}),
+		bead({
+			id: "e",
+			priority: 2,
+			createdAt: "2026-11-01T00:00:00Z",
+			labels: ["queue:dev"],
+		}),
+	];
+
+	const cases: [string, Partial<RunnerState>, string, Bead[], string | null][] =
+		[
+			["refuses: not on the queue", { queues: ["other"] }, "dev", ready, null],
+			["refuses: at capacity", { capacity: 2, running: 2 }, "dev", ready, null],
+			[
+				"refuses: over capacity",
+				{ capacity: 1, running: 3 },
+				"dev",
+				ready,
+				null,
+			],
+			["priority, then age; skips unmet requirement", {}, "dev", ready, "b"],
+			[
+				"capability unlocks older bead at same priority",
+				{ capabilities: ["docker"] },
+				"dev",
+				ready,
+				"c",
+			],
+			[
+				"only beads on the asked queue",
+				{ queues: ["dev", "other"] },
+				"dev",
+				ready,
+				"b",
+			],
+			[
+				"same priority and age: id breaks the tie",
+				{},
+				"dev",
+				[ready[4], ready[0]] as Bead[],
+				"a",
+			],
+			["nothing ready", {}, "dev", [], null],
+			["nothing the runner can do", {}, "dev", [ready[2]] as Bead[], null],
+		];
+	test.each(cases)("%s", (_name, over, queue, rs, want) => {
+		expect(selectBead(runner(over), queue, rs)?.id ?? null).toBe(want);
+	});
+
+	test("does not reorder the input", () => {
+		const input = [...ready];
+		selectBead(runner(), "dev", input);
+		expect(input.map((b) => b.id)).toEqual(ready.map((b) => b.id));
+	});
+});
+
+describe("selectWaiter", () => {
+	const dev = { labels: ["queue:dev"] };
+	const docker = { labels: ["queue:dev", "req:docker"] };
+	const t = (h: number) => `2026-11-10T0${h}:00:00Z`;
+
+	const cases: [
+		string,
+		Pick<Bead, "labels">,
+		Partial<RunnerState>[],
+		string | null,
+	][] = [
+		["no waiters", dev, [], null],
+		["bead has no queue", { labels: [] }, [{ runner: "r1" }], null],
+		[
+			"skips runner not on the queue",
+			dev,
+			[{ runner: "r1", queues: ["x"] }, { runner: "r2" }],
+			"r2",
+		],
+		[
+			"skips runner at capacity",
+			dev,
+			[{ runner: "r1", running: 1 }, { runner: "r2" }],
+			"r2",
+		],
+		[
+			"skips runner without capability",
+			docker,
+			[{ runner: "r1" }, { runner: "r2", capabilities: ["docker"] }],
+			"r2",
+		],
+		["nobody eligible", docker, [{ runner: "r1" }], null],
+		[
+			"user served least recently wins",
+			dev,
+			[
+				{ user: "a", runner: "a1", lastServedAt: t(5) },
+				{ user: "b", runner: "b1", lastServedAt: t(3) },
+			],
+			"b1",
+		],
+		[
+			"never-served user wins",
+			dev,
+			[
+				{ user: "a", runner: "a1", lastServedAt: t(1) },
+				{ user: "b", runner: "b1" },
+			],
+			"b1",
+		],
+		[
+			"fairness is per user, not per runner",
+			dev,
+			[
+				// user a has a stale runner, but a was served at 5 through a2.
+				{ user: "a", runner: "a1", lastServedAt: t(1) },
+				{ user: "a", runner: "a2", lastServedAt: t(5), running: 1 },
+				{ user: "b", runner: "b1", lastServedAt: t(3) },
+			],
+			"b1",
+		],
+		[
+			"same user: least recently served runner",
+			dev,
+			[
+				{ user: "a", runner: "a1", lastServedAt: t(4) },
+				{ user: "a", runner: "a2", lastServedAt: t(2) },
+			],
+			"a2",
+		],
+		[
+			"full tie: first waiter",
+			dev,
+			[
+				{ user: "a", runner: "a1" },
+				{ user: "b", runner: "b1" },
+			],
+			"a1",
+		],
+	];
+	test.each(cases)("%s", (_name, b, ws, want) => {
+		expect(selectWaiter(b, ws.map(runner))?.runner ?? null).toBe(want);
+	});
+});
