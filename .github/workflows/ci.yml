@@ -69,22 +69,31 @@ jobs:
   # Dokploy runs the site. Its hooks and PUBLIC_URL are in the GitHub environment
   # (`bun deploy/dokploy.ts secrets` puts them there). The job is green only when
   # the public site serves this commit and every dependency is up.
+  # With the secret DOKPLOY_API_KEY in that environment, the app deploy is
+  # `bun deploy/dokploy.ts release <sha>`: it pins the image of THIS commit, shows the
+  # Dokploy queue and status, and fails with the Dokploy log tail. Without it, the app
+  # hook deploys :latest and the job can only watch /api/health.
   deploy:
     needs: publish
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     environment:
       name: production
       url: ${{ vars.PUBLIC_URL }}
     env:
       PUBLIC_URL: ${{ vars.PUBLIC_URL }}
+      DOKPLOY_API_KEY: ${{ secrets.DOKPLOY_API_KEY }}
+      DOKPLOY_DEPLOY_HOOK: ${{ secrets.DOKPLOY_DEPLOY_HOOK }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - run: bun install --frozen-lockfile
       - name: Redeploy what changed since the live commit
         env:
-          DOKPLOY_DEPLOY_HOOK: ${{ secrets.DOKPLOY_DEPLOY_HOOK }}
           DOKPLOY_INFRA_HOOK: ${{ secrets.DOKPLOY_INFRA_HOOK }}
           DOKPLOY_NATS_HOOK: ${{ secrets.DOKPLOY_NATS_HOOK }}
         run: |
@@ -102,24 +111,33 @@ jobs:
           }
           if changed deploy/compose.yml; then echo "infra changed"; git_hook "$DOKPLOY_INFRA_HOOK"; fi
           if changed deploy/nats; then echo "nats changed"; git_hook "$DOKPLOY_NATS_HOOK"; fi
-          curl -fsS --retry 3 -o /dev/null -X POST "$DOKPLOY_DEPLOY_HOOK"
+          if [ -n "$DOKPLOY_API_KEY" ]; then
+            bun deploy/dokploy.ts release "$GITHUB_SHA"
+          else
+            echo "no DOKPLOY_API_KEY: app hook (:latest); Dokploy status is not visible from here"
+            curl -fsS --retry 3 -o /dev/null -X POST "$DOKPLOY_DEPLOY_HOOK"
+          fi
       - name: Wait until production serves this commit
         run: |
-          for i in $(seq 120); do
+          # Dokploy runs one deployment at a time for ALL its projects, so ours may queue
+          # behind other builds. Without the API key we cannot see that queue: post the hook
+          # once more after 5 minutes in case Dokploy dropped the first call.
+          for i in $(seq 180); do
             health=$(curl -sS --max-time 10 "$PUBLIC_URL/api/health" || true)
             version=$(jq -r '.version // empty' <<<"$health" 2>/dev/null || true)
             if [ "$version" = "$GITHUB_SHA" ] && [ "$(jq -r '.ok' <<<"$health")" = "true" ]; then
               echo "live: $health"
               exit 0
             fi
+            if [ "$i" = 60 ] && [ -z "$DOKPLOY_API_KEY" ]; then
+              echo "still not live after 5 min: posting the app hook again"
+              curl -fsS --retry 3 -o /dev/null -X POST "$DOKPLOY_DEPLOY_HOOK" || true
+            fi
             echo "waiting ($i): ${health:-no answer}"
             sleep 5
           done
-          echo "::error::production does not serve $GITHUB_SHA with ok=true after 10 minutes"
+          echo "::error::production does not serve $GITHUB_SHA with ok=true after 15 minutes. Dokploy runs one deployment at a time for all projects; check its queue. If the app image is pinned to a sha tag (bun deploy/dokploy.ts release), the hook redeploys that pin: run 'bun deploy/dokploy.ts release latest' or add DOKPLOY_API_KEY to the environment."
           exit 1
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version-file: package.json
       - name: The public NATS WebSocket answers and refuses unauthenticated clients
         run: |
           url="$(sed 's/^http/ws/' <<<"$PUBLIC_URL")/nats"

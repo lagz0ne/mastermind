@@ -10,6 +10,8 @@ bun deploy/dokploy.ts status          # what runs, env key names, health
 bun deploy/dokploy.ts apply           # create or update Dolt, NATS and the app env; deploy; verify
 bun deploy/dokploy.ts secrets         # redeploy hooks + PUBLIC_URL into the GitHub environment
 bun deploy/dokploy.ts first-login     # the single-use login URL for the first account (no account yet)
+bun deploy/dokploy.ts release <sha>   # deploy the image of one commit (sha-<sha> tag), show queue/status/log
+bun deploy/dokploy.ts release latest  # unpin: back to :latest (what the app hook deploys)
 ```
 
 `apply` is safe to run again: it keeps existing secrets, changes only what differs, and ends with a
@@ -49,6 +51,18 @@ Every push to `main`: check → publish the image → deploy. The deploy job ask
 is live, calls the Dokploy hook of the infra compose and of NATS only when `deploy/compose.yml` or
 `deploy/nats` changed since that commit, calls the app hook, then waits until `/api/health` reports
 this commit with `ok: true`, and checks the public NATS WebSocket.
+
+Dokploy runs one deployment at a time for **all** its projects. An accepted hook can wait minutes
+behind other projects' builds, and a `:latest` deployment record does not say which commit it ran.
+So the app deploy has two modes:
+
+- **`DOKPLOY_API_KEY` is a secret of the GitHub environment**: CI runs `bun deploy/dokploy.ts release
+  <sha>`. It pins the image to `sha-<sha>` (the tag CI published), deploys it, prints the Dokploy queue
+  while ours waits, fails with the deployment log tail on error, and with the app log when health does
+  not reach the commit.
+- **No key** (hooks only): CI posts the app hook (`:latest`), posts it once more after 5 minutes if the
+  commit is not live, and fails after 15 minutes. It cannot see the queue or the log. If someone ran
+  `release <sha>` by hand, the hook keeps deploying that pin: run `release latest` to undo it.
 
 `GET /api/health` reports `version` (the commit) and one probe per dependency: `db`, `dolt`, `bd`.
 Each is `up`, `down` or `unconfigured`; any `down` makes it a 503.

@@ -5,6 +5,9 @@
 //   bun deploy/dokploy.ts status     what runs, and which env keys exist (names only)
 //   bun deploy/dokploy.ts apply      create or update Dolt, NATS and the app env; deploy; verify
 //   bun deploy/dokploy.ts secrets    put the redeploy hooks and the public URL into GitHub (needs `gh`)
+//   bun deploy/dokploy.ts release <sha|latest>
+//                                    pin the app image to the CI tag of <sha>, deploy it, show the
+//                                    Dokploy queue and status, fail with the log tail, wait for health
 //   bun deploy/dokploy.ts first-login  print the newest first-login URL from the app log (no account yet)
 //
 // Configuration, nothing is built in:
@@ -21,6 +24,14 @@ import { createAccount, fromSeed } from "@nats-io/nkeys";
 import { probe } from "./nats/smoke.ts";
 import { mergeEnv, parseEnv, serializeEnv } from "./src/env.ts";
 import { FIRST_LOGIN, newestFirstLogin } from "./src/first-login.ts";
+import {
+	type Deployment,
+	describeQueue,
+	findOurs,
+	pinImage,
+	type QueueJob,
+	releaseTitle,
+} from "./src/release.ts";
 import { loadSite } from "./src/site.ts";
 
 const cfg = await loadSite(
@@ -73,6 +84,10 @@ type App = Service & {
 	refreshToken: string;
 	serverId?: string | null;
 	mounts?: { mountPath: string }[];
+	dockerImage?: string | null;
+	username?: string | null;
+	password?: string | null;
+	registryUrl?: string | null;
 };
 type Compose = Service & {
 	composeId: string;
@@ -397,6 +412,110 @@ async function apply() {
 	log(`ok: ${natsPublicUrl} answers and refuses unauthenticated clients`);
 }
 
+async function deploymentLog(deploymentId: string, tail: number) {
+	const text = await api<string>("deployment.readLogs", {
+		deploymentId,
+		tail: String(tail),
+	}).catch((e) => `(no log: ${e})`);
+	return String(text)
+		.trimEnd()
+		.split("\n")
+		.map((l) => `  | ${l}`)
+		.join("\n");
+}
+
+/**
+ * Deploy the image of ONE commit (not :latest), so the record says what runs. Dokploy runs one
+ * deployment at a time for all its projects, so ours may wait behind other builds: say so.
+ */
+async function release(ref = "") {
+	const { applicationId } = await findProject();
+	if (!applicationId)
+		throw new Error(`app '${cfg.app}' not found in project '${cfg.project}'`);
+	const app = await api<App>("application.one", { applicationId });
+	const image = pinImage(app.dockerImage ?? "", ref);
+	if (app.dockerImage !== image) {
+		await api("application.saveDockerProvider", {
+			applicationId,
+			dockerImage: image,
+			username: app.username ?? null,
+			password: app.password ?? null,
+			registryUrl: app.registryUrl ?? null,
+		});
+	}
+	log(`app: image ${image}`);
+	const title = releaseTitle(ref);
+	const askedAt = Date.now();
+	await api("application.deploy", {
+		applicationId,
+		title,
+		description: `Commit: ${ref}`,
+	});
+
+	const minutes = Number(process.env.RELEASE_WAIT_MINUTES ?? 20);
+	const deadline = askedAt + minutes * 60_000;
+	let said = "";
+	const say = (line: string) => {
+		if (line !== said) log(`${new Date().toISOString().slice(11, 19)} ${line}`);
+		said = line;
+	};
+	let ours: Deployment | undefined;
+	while (Date.now() < deadline) {
+		ours = findOurs(
+			await api<Deployment[]>("deployment.all", { applicationId }),
+			title,
+			askedAt,
+		);
+		if (ours?.status === "error") {
+			log(await deploymentLog(ours.deploymentId, 60));
+			throw new Error(
+				`Dokploy deployment ${ours.deploymentId} failed${ours.errorMessage ? `: ${ours.errorMessage}` : ""}`,
+			);
+		}
+		if (ours?.status === "done") break;
+		say(
+			ours
+				? `dokploy: ${ours.status} (${ours.deploymentId})`
+				: describeQueue(
+						await api<QueueJob[]>("deployment.queueList").catch(() => []),
+						applicationId,
+					),
+		);
+		await sleep(5000);
+	}
+	if (ours?.status !== "done")
+		throw new Error(
+			`no finished Dokploy deployment after ${minutes} min (last: ${said || "none"})`,
+		);
+	log(`dokploy: done (${ours.deploymentId})`);
+	log(await deploymentLog(ours.deploymentId, 15));
+	if (ref === "latest") return;
+
+	// Done means the swarm service was updated. It serves the commit only once the new task is up.
+	let last: unknown;
+	try {
+		const h = await waitFor(
+			`health version ${ref.slice(0, 7)}`,
+			300,
+			async () => {
+				last = await health();
+				const now = last as Record<string, unknown>;
+				return now.version === ref && now.ok === true ? now : undefined;
+			},
+		);
+		log(`ok: health ${JSON.stringify(h)}`);
+	} catch (error) {
+		log(`last health: ${JSON.stringify(last)}`);
+		const tail = await api<string>("application.readLogs", {
+			applicationId,
+			tail: "40",
+			since: "10m",
+		}).catch((e) => `(no log: ${e})`);
+		log(`app log (last 10 min):\n${String(tail).trimEnd()}`);
+		throw error;
+	}
+}
+
 /** `gh` may be logged in to several accounts; use the one that owns the repo when it is there. */
 async function ghEnv(): Promise<Record<string, string | undefined>> {
 	const owner = new URL(cfg.repo).pathname.split("/")[1] ?? "";
@@ -574,11 +693,12 @@ const commands: Record<string, () => Promise<void>> = {
 	apply,
 	secrets,
 	"first-login": firstLogin,
+	release: () => release(process.argv[3]),
 };
 const command = commands[process.argv[2] ?? ""];
 if (!command) {
 	console.error(
-		"usage: bun deploy/dokploy.ts status | apply | secrets | first-login",
+		"usage: bun deploy/dokploy.ts status | apply | secrets | first-login | release <sha|latest>",
 	);
 	process.exit(2);
 }
