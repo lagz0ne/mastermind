@@ -16,6 +16,8 @@ export type PeopleStatus = "loading" | "live" | "reconnecting" | "offline";
 export type People = {
 	accounts: AccountView[];
 	runners: RunnerView[];
+	/** The server's commit (runners on another one are out of date). */
+	serverVersion?: string;
 	status: PeopleStatus;
 	error?: string;
 	/** Read accounts and runners again (after an invite or a revoke). */
@@ -52,11 +54,16 @@ export function usePeople(): People {
 		])
 			.then(([a, r]) => {
 				if (cancelled) return;
-				setState({ accounts: a.accounts, runners: r.runners, status: "live" });
+				setState({
+					accounts: a.accounts,
+					runners: r.runners,
+					serverVersion: r.serverVersion,
+					status: "live",
+				});
 				source = new EventSource("/api/people/events");
 				source.addEventListener("runners", (m) => {
-					const { runners } = JSON.parse(m.data) as RunnersReply;
-					setState((s) => ({ ...s, runners, status: "live" }));
+					const { runners, serverVersion } = JSON.parse(m.data) as RunnersReply;
+					setState((s) => ({ ...s, runners, serverVersion, status: "live" }));
 				});
 				source.addEventListener("open", () =>
 					setState((s) => ({ ...s, status: "live" })),
@@ -151,21 +158,30 @@ function sh(word: string): string {
 		: `'${word.replaceAll("'", "'\\''")}'`;
 }
 
+/** Where /install.sh puts the runner (its default MASTERMIND_RUNNER_DIR). */
+export const RUNNER_BIN = "~/.local/bin/mastermind-runner";
+
 /**
- * The ONE command a machine runs to get the runner, enrol it with the
- * single-use token and start it. Needs bun and a running Paseo daemon.
+ * The ONE command a machine runs to install the runner (a compiled binary of
+ * this server's commit, sha256-checked), enrol it with the single-use token and
+ * start it. Needs no clone and no bun; the agents need a running Paseo daemon
+ * and a provider that is logged in.
  */
 export function runnerCommand(
 	origin: string,
 	token: string,
 	queue: string,
 ): string {
-	const file = "mastermind-runner.js";
 	return [
-		`curl -fsSL ${sh(`${origin}/runner.js`)} -o ${file}`,
-		`bun ${file} enroll ${sh(token)} --url ${sh(origin)} --queue ${sh(queue)} --workdir .`,
-		`bun ${file} start`,
+		`curl -fsSL ${sh(`${origin}/install.sh`)} | sh`,
+		`${RUNNER_BIN} enroll ${sh(token)} --url ${sh(origin)} --queue ${sh(queue)} --workdir .`,
+		`${RUNNER_BIN} start`,
 	].join(" && ");
+}
+
+/** The runner reports a commit other than the server's: reinstall it. */
+export function outdated(r: RunnerView, serverVersion?: string): boolean {
+	return Boolean(r.runner && serverVersion && r.version !== serverVersion);
 }
 
 /** POST /api/auth/tokens {kind: invite}: the single-use login URL for a new account. */

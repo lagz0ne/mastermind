@@ -5,7 +5,27 @@ NATS (WebSocket) as a **service account** of the user's account, takes work from
 queues and runs agents for it through Paseo. Agents never talk to Mastermind;
 the runner reports for them.
 
-Needs: `bun`, and `paseo` with its daemon running.
+Needs: `paseo` with its daemon running, and a provider that is logged in.
+
+## Install (no clone, no bun)
+
+Mastermind serves the runner compiled for linux and darwin (x64, arm64), built from
+the same commit as the server. `/people` → **Add runner** shows the one command:
+
+```bash
+curl -fsSL <mastermind url>/install.sh | sh \
+  && ~/.local/bin/mastermind-runner enroll <mme_token> --url <mastermind url> --queue <q> --workdir . \
+  && ~/.local/bin/mastermind-runner start
+```
+
+`install.sh` downloads `<url>/download/mastermind-runner?os=&arch=`, checks it against
+`<url>/download/mastermind-runner.sha256?os=&arch=`, and installs nothing on a mismatch.
+`MASTERMIND_RUNNER_DIR` changes the directory (default `~/.local/bin`). The runner reports
+its commit (`mastermind-runner --version`); `/people` marks a runner on another commit
+than the server as `old version`: run the install line again. The image build compiles
+the targets in `RUNNER_TARGETS` (build arg, default `all`; ~45 MiB gzipped each).
+
+## From source
 
 ```bash
 # 1. In Mastermind, the account mints an enrol token (POST /api/auth/tokens {kind: "enrol", name}).

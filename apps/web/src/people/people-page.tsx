@@ -11,7 +11,9 @@ import {
 	enrolToken,
 	groupByAccount,
 	invite,
+	outdated,
 	type People,
+	RUNNER_BIN,
 	revoke,
 	runnerCommand,
 	statsOf,
@@ -123,10 +125,24 @@ function AddRunnerPanel({ onDone }: { onDone: () => void }) {
 	};
 	if (command)
 		return (
-			<Secret
-				label="Run this on the machine of the runner. It needs bun and a running Paseo daemon."
-				value={command}
-			/>
+			<div className="flex flex-col gap-2" data-doop-id="runner-command">
+				<Secret
+					label="Run this in the work directory on the machine of the runner (Linux or macOS). It installs the runner, enrols it and starts it."
+					value={command}
+				/>
+				<ul className="list-inside list-disc text-muted-foreground text-xs">
+					<li>
+						Before: a running Paseo daemon (<code>paseo daemon start</code>) and
+						a provider that is logged in (for example <code>claude</code>).
+					</li>
+					<li>
+						Test the machine: <code>{RUNNER_BIN} check</code>
+					</li>
+					<li>
+						Start again later: <code>{RUNNER_BIN} start</code>
+					</li>
+				</ul>
+			</div>
 		);
 	return (
 		<form onSubmit={submit} className="flex flex-wrap items-center gap-2">
@@ -194,10 +210,12 @@ function RunnerRow({
 	r,
 	now,
 	mine,
+	serverVersion,
 	onRevoked,
 }: {
 	r: RunnerView;
 	now: number;
+	serverVersion?: string;
 	mine: boolean;
 	onRevoked: () => void;
 }) {
@@ -231,6 +249,14 @@ function RunnerRow({
 				{sa && sa.name !== r.runner && (
 					<span className="font-normal text-[11px] text-muted-foreground">
 						{sa.name}
+					</span>
+				)}
+				{outdated(r, serverVersion) && (
+					<span
+						className="font-normal text-[11px] text-signal"
+						title={`runner ${r.version ?? "unknown"}, server ${serverVersion}: install it again`}
+					>
+						old version
 					</span>
 				)}
 			</span>
@@ -287,11 +313,13 @@ function AccountRows({
 	g,
 	now,
 	me,
+	serverVersion,
 	onChange,
 }: {
 	g: AccountGroup;
 	now: number;
 	me: string | null;
+	serverVersion?: string;
 	onChange: () => void;
 }) {
 	return (
@@ -331,6 +359,7 @@ function AccountRows({
 					r={r}
 					now={now}
 					mine={g.account === me}
+					serverVersion={serverVersion}
 					onRevoked={onChange}
 				/>
 			))}
@@ -464,6 +493,7 @@ export function PeoplePage() {
 							g={g}
 							now={now}
 							me={me?.account ?? null}
+							serverVersion={people.serverVersion}
 							onChange={people.reload}
 						/>
 					))}

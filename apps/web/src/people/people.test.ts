@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import type { AccountView, RunnerView } from "@mastermind/core";
-import { ago, groupByAccount, runnerCommand, statsOf } from "./people.ts";
+import {
+	ago,
+	groupByAccount,
+	outdated,
+	runnerCommand,
+	statsOf,
+} from "./people.ts";
 
 const account = (id: string, invitedBy: string | null = null): AccountView => ({
 	id,
@@ -75,9 +81,9 @@ describe("ago", () => {
 });
 
 describe("runnerCommand", () => {
-	test("download, enrol with the token against this site, start", () => {
+	test("install from this site, enrol with the token, start", () => {
 		expect(runnerCommand("https://mm.example", "mme_abc-_1", "build")).toBe(
-			"curl -fsSL https://mm.example/runner.js -o mastermind-runner.js && bun mastermind-runner.js enroll mme_abc-_1 --url https://mm.example --queue build --workdir . && bun mastermind-runner.js start",
+			"curl -fsSL https://mm.example/install.sh | sh && ~/.local/bin/mastermind-runner enroll mme_abc-_1 --url https://mm.example --queue build --workdir . && ~/.local/bin/mastermind-runner start",
 		);
 	});
 
@@ -86,4 +92,12 @@ describe("runnerCommand", () => {
 			"--queue 'a b'\\''c'",
 		);
 	});
+});
+
+test("outdated: a connected runner on another commit than the server", () => {
+	expect(outdated(runner("a", "r", { version: "abc" }), "abc")).toBe(false);
+	expect(outdated(runner("a", "r", { version: "old" }), "abc")).toBe(true);
+	expect(outdated(runner("a", "r"), "abc")).toBe(true);
+	expect(outdated(runner("a", null), "abc")).toBe(false);
+	expect(outdated(runner("a", "r", { version: "old" }), undefined)).toBe(false);
 });
