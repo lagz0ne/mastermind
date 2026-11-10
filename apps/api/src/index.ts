@@ -3,6 +3,7 @@ import { join } from "node:path";
 import index from "@mastermind/web/index.html";
 import { SQL } from "bun";
 import { type Deps, health } from "./app.ts";
+import { startAuthInBackground } from "./auth/start.ts";
 import {
 	bdEnv,
 	bootstrap,
@@ -116,12 +117,31 @@ const dispatch =
 		: null;
 deps.nats = dispatch ? () => dispatch.probe() : null;
 
+// Auth (NATS auth callout + /api/auth/*): off unless NATS_WS_URL (ws/wss), the issuer seed and the auth password are set.
+const port = Number(env.PORT ?? 3000);
+const auth =
+	env.NATS_WS_URL && env.NATS_ISSUER_SEED && env.NATS_AUTH_PASSWORD
+		? startAuthInBackground({
+				natsUrl: env.NATS_WS_URL,
+				authUser: env.NATS_AUTH_USER ?? "mastermind",
+				authPassword: env.NATS_AUTH_PASSWORD,
+				issuerSeed: env.NATS_ISSUER_SEED,
+				publicUrl: (env.PUBLIC_URL ?? `http://localhost:${port}`).replace(
+					/\/$/,
+					"",
+				),
+				publicNatsUrl: env.NATS_PUBLIC_WS_URL,
+			})
+		: null;
+
 const server = Bun.serve({
-	port: Number(env.PORT ?? 3000),
+	port,
 	development: env.NODE_ENV !== "production",
 	routes: {
 		"/api/health": () => health(deps, version),
 		...board.routes,
+		// Empty when auth is off; the cast only keeps the route keys typed.
+		...(auth?.routes ?? ({} as NonNullable<typeof auth>["routes"])),
 		"/api/*": () => Response.json({ error: "not found" }, { status: 404 }),
 		"/*": index,
 	},
@@ -131,6 +151,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 	process.on(signal, async () => {
 		if (backupTimer) clearInterval(backupTimer);
 		await dispatch?.stop();
+		await auth?.stop();
 		board.stop();
 		await server.stop();
 		await bd?.stop();
