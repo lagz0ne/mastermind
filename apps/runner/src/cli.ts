@@ -7,20 +7,27 @@
  *   mastermind-runner enroll <token> --url <mastermind url> [settings]
  *   mastermind-runner start [settings] [--save]
  *   mastermind-runner check [settings]
+ *   mastermind-runner route [dispatch.json] [--env e --queue q --stage s --type t --label l --priority n]
  *   mastermind-runner status
  *   mastermind-runner --version
  *
  * Settings: --queue <q> (repeat), --capacity <n>, --capability <c> (repeat),
  * --providers a,b, --workdir <dir>, --repo <url>=<dir> (repeat), --id <id>,
  * --provider <p>, --model <m>, --mode <m>, --assistant-provider <p>,
- * --allow-setup, --paseo-host <host>.
+ * --allow-setup, --paseo-host <host>, --routing <file>.
  *
- * Environment: MASTERMIND_URL, MASTERMIND_NATS_URL, MASTERMIND_RUNNER_CONFIG.
+ * Environment: MASTERMIND_URL, MASTERMIND_NATS_URL, MASTERMIND_RUNNER_CONFIG,
+ * MASTERMIND_RUNNER_ROUTING.
  */
-import { isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import type { RunnerInfo } from "@mastermind/core";
-import { checkRequirement } from "./check.ts";
+import {
+	DISPATCH_STAGES,
+	type Dispatch,
+	type DispatchStage,
+	type RunnerInfo,
+} from "@mastermind/core";
+import { checkRequirement, FileSetupMemory } from "./check.ts";
 import {
 	connectRunner,
 	isAuthFailure,
@@ -30,6 +37,7 @@ import {
 import {
 	ConfigError,
 	configPath,
+	defaultSettings,
 	loadConfig,
 	type RunnerConfig,
 	type RunnerSettings,
@@ -37,6 +45,14 @@ import {
 } from "./config.ts";
 import { EnrolError, enrol } from "./enroll.ts";
 import { PaseoLauncher } from "./launcher.ts";
+import {
+	decisionLine,
+	lintRouting,
+	loadRouting,
+	type Routing,
+	route,
+	routingPath,
+} from "./routing.ts";
 import { Runner } from "./runner.ts";
 
 /**
@@ -64,6 +80,12 @@ const OPTIONS = {
 	"assistant-provider": { type: "string" },
 	"allow-setup": { type: "boolean" },
 	"paseo-host": { type: "string" },
+	routing: { type: "string" },
+	env: { type: "string" },
+	stage: { type: "string" },
+	type: { type: "string" },
+	label: { type: "string", multiple: true },
+	priority: { type: "string" },
 	save: { type: "boolean" },
 	force: { type: "boolean" },
 	version: { type: "boolean", short: "v" },
@@ -82,13 +104,17 @@ const USAGE = `usage:
   mastermind-runner enroll <token> --url <mastermind url> [settings]
   mastermind-runner start [settings] [--save]
   mastermind-runner check [settings]
+  mastermind-runner route [dispatch.json] [--env <name>] [--queue <q>]
+      [--stage work] [--type <t>] [--label <l>]... [--priority <n>]
   mastermind-runner status
   mastermind-runner --version
 
 settings: --queue <q>... --capacity <n> --capability <c>... --providers a,b
   --workdir <dir> --repo <url>=<dir>... --id <id> --provider <p> --model <m>
   --mode <m> --assistant-provider <p> --allow-setup --paseo-host <host>
-env: MASTERMIND_URL, MASTERMIND_NATS_URL, MASTERMIND_RUNNER_CONFIG`;
+  --routing <file> (default: routing.json next to the config)
+env: MASTERMIND_URL, MASTERMIND_NATS_URL, MASTERMIND_RUNNER_CONFIG,
+  MASTERMIND_RUNNER_ROUTING`;
 
 /** Settings with the command-line flags applied. */
 export function applyFlags(
@@ -132,7 +158,14 @@ export function applyFlags(
 	return s;
 }
 
-export function runnerInfo(cfg: RunnerConfig, s: RunnerSettings): RunnerInfo {
+/** RunnerInfo plus the environments bound here, so Mastermind can skip this runner. */
+export type RunnerInfoWithEnvs = RunnerInfo & { environments?: string[] };
+
+export function runnerInfo(
+	cfg: RunnerConfig,
+	s: RunnerSettings,
+	routing?: Routing,
+): RunnerInfoWithEnvs {
 	return {
 		id: s.id,
 		account: cfg.account,
@@ -142,7 +175,74 @@ export function runnerInfo(cfg: RunnerConfig, s: RunnerSettings): RunnerInfo {
 		capacity: s.capacity,
 		queues: s.queues,
 		version: VERSION,
+		...(routing && !routing.implicit
+			? { environments: Object.keys(routing.environments) }
+			: {}),
 	};
+}
+
+async function routingFor(path: string, s: RunnerSettings, f: Flags, io: Io) {
+	return loadRouting(
+		f.routing ? resolve(io.cwd, f.routing) : routingPath(path, io.env),
+		s,
+		f["paseo-host"],
+	);
+}
+
+/** A dispatch for `route`: from a JSON file, then the flags on top. */
+async function sampleDispatch(
+	file: string | undefined,
+	f: Flags,
+	io: Io,
+): Promise<Dispatch> {
+	let d: Partial<Dispatch> = {};
+	if (file) {
+		try {
+			d = JSON.parse(await Bun.file(resolve(io.cwd, file)).text());
+		} catch (error) {
+			throw new UsageError(`cannot read dispatch ${file}: ${error}`);
+		}
+	}
+	const bead = {
+		id: "dry-run",
+		title: "dry run",
+		status: "open",
+		priority: 2,
+		type: "task",
+		labels: [],
+		blocked: false,
+		createdAt: "",
+		updatedAt: "",
+		...d.bead,
+	} as Dispatch["bead"];
+	const env = { repo: "", ref: "", requires: [], ...d.env };
+	if (f.env) env.name = f.env;
+	if (f.type) bead.type = f.type;
+	if (f.label?.length) bead.labels = [...bead.labels, ...f.label];
+	if (f.priority !== undefined) {
+		const n = Number(f.priority);
+		if (!Number.isInteger(n))
+			throw new UsageError("--priority must be an integer");
+		bead.priority = n as Dispatch["bead"]["priority"];
+	}
+	const stage = (f.stage ?? d.stage ?? "work") as DispatchStage;
+	if (!DISPATCH_STAGES.includes(stage))
+		throw new UsageError(
+			`--stage must be one of ${DISPATCH_STAGES.join(", ")}`,
+		);
+	const queue = f.queue?.[0] ?? d.queue;
+	if (!queue)
+		throw new UsageError("route needs --queue or a dispatch with a queue");
+	return {
+		actor: "",
+		lease: { expiresAt: "", heartbeatAt: "" },
+		prompt: "",
+		...d,
+		bead,
+		env,
+		stage,
+		queue,
+	} as Dispatch;
 }
 
 /** The config without its secret, for printing. */
@@ -201,6 +301,8 @@ export async function main(argv: string[], io: Io): Promise<number> {
 				return await cmdStart(path, f, io);
 			case "check":
 				return await cmdCheck(path, f, io);
+			case "route":
+				return await cmdRoute(path, rest[0], f, io);
 			case "status": {
 				const cfg = await loadConfig(path);
 				io.out(
@@ -270,20 +372,52 @@ async function cmdCheck(path: string, f: Flags, io: Io): Promise<number> {
 		bad++;
 		io.out("✗ no queues (--queue)");
 	}
-	if (!s.workdir && !Object.keys(s.repos).length) {
+	const { routing, source } = await routingFor(path, s, f, io);
+	const problems = lintRouting(routing, s);
+	for (const p of problems) io.out(`✗ ${p}`);
+	bad += problems.length;
+	if (routing.implicit && !s.workdir && !Object.keys(s.repos).length) {
 		bad++;
 		io.out("✗ no workdir and no repos (--workdir, --repo)");
 	}
+	io.out(
+		`routing ${source}: ${Object.keys(routing.targets).length} targets, ${routing.rules.length} rules, environments ${Object.keys(routing.environments).join(",") || "-"}`,
+	);
 	io.out(
 		`runner ${cfg.account}/${s.id}: queues ${s.queues.join(",") || "-"}, capacity ${s.capacity}, nats ${cfg.natsUrl}`,
 	);
 	return bad ? EXIT.error : EXIT.ok;
 }
 
+/** Dry run: which target would take this dispatch, and why. */
+async function cmdRoute(
+	path: string,
+	file: string | undefined,
+	f: Flags,
+	io: Io,
+): Promise<number> {
+	const cfg = await loadConfig(path);
+	const s = applyFlags(cfg?.runner ?? defaultSettings("dry-run"), f, io.cwd);
+	const { routing, source } = await routingFor(path, s, f, io);
+	const d = await sampleDispatch(file, f, io);
+	const r = route(d, routing, s.providers);
+	if (r.ok) {
+		io.out(decisionLine(r, s.id));
+		if (r.binding)
+			io.out(
+				`checkout ${r.binding.dir}${r.binding.allowSetup ? " (setup allowed)" : ""}`,
+			);
+	} else io.out(`decline: ${r.reason}`);
+	for (const w of r.why) io.out(`  ${w}`);
+	io.out(`  routing: ${source}`);
+	return r.ok ? EXIT.ok : EXIT.error;
+}
+
 async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 	const cfg = await requireConfig(path);
 	const settings = applyFlags(cfg.runner, f, io.cwd);
 	if (!settings.queues.length) throw new UsageError("no queues (--queue)");
+	const { routing, source } = await routingFor(path, settings, f, io);
 	if (f.save) await saveConfig(path, { ...cfg, runner: settings });
 	const natsUrl = io.env.MASTERMIND_NATS_URL ?? cfg.natsUrl;
 	const log = (line: string) => io.err(`${stamp()} ${line}`);
@@ -308,14 +442,16 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 			throw error;
 		}
 		const runner = new Runner({
-			client: natsClient(nc, runnerInfo(cfg, settings)),
+			client: natsClient(nc, runnerInfo(cfg, settings, routing)),
 			launcher: new PaseoLauncher({ host: f["paseo-host"] }),
 			settings,
+			routing,
+			setupMemory: new FileSetupMemory(join(dirname(path), "setup-state.json")),
 			log,
 		});
 		runner.start();
 		log(
-			`runner ${cfg.account}/${settings.id} up: queues ${settings.queues.join(",")}, capacity ${settings.capacity}`,
+			`runner ${cfg.account}/${settings.id} up: queues ${settings.queues.join(",")}, capacity ${settings.capacity}, routing ${source}`,
 		);
 		const closed = nc.closed();
 		const stopped = new Promise<"stop">((r) =>

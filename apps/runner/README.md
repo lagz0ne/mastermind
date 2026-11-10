@@ -34,7 +34,8 @@ bun src/cli.ts enroll <mme_token> --url <mastermind url> --queue <q> --workdir <
   [--provider claude] [--mode bypassPermissions] [--capacity 1] [--capability git]...
 # 3. Run.
 bun src/cli.ts start          # flags here override the saved settings; --save keeps them
-bun src/cli.ts check          # are the declared capabilities real?
+bun src/cli.ts check          # are the declared capabilities and the routing right?
+bun src/cli.ts route --env web --queue q   # dry run: which target, and why
 bun src/cli.ts status         # config without the secret
 ```
 
@@ -42,14 +43,95 @@ Config: `$MASTERMIND_RUNNER_CONFIG`, else `$XDG_CONFIG_HOME/mastermind/runner.js
 else `~/.config/mastermind/runner.json`. `MASTERMIND_URL` and `MASTERMIND_NATS_URL`
 override the URLs. There is no default host.
 
-Per dispatch: check `env.requires` (`os:`, `arch:`, `<tool>`, `<tool>>=<version>`,
-opaque `ns:x`), the checkout (`--workdir`, or `--repo <url>=<dir>` when the dispatch
-names a repo), secrets by name, and `env.setup` (only with `--allow-setup`). A failed
-check releases the bead with the reason. Else `paseo run --output-schema` starts the
-agent (labels `mastermind.execution`, `mastermind.bead`; never two agents for one
-execution), the runner heartbeats the lease, and the agent's own answer decides:
-`done` completes the bead with its summary, `failed` releases it with the reason.
-A lost lease stops the agent. Stop (Ctrl-C) stops agents and releases their beads.
+## Routing: which Paseo runs a dispatch
+
+The user who runs the runner decides where work runs. Put `routing.json` next to the
+config (or set `MASTERMIND_RUNNER_ROUTING`, or pass `--routing <file>`). It holds no secrets.
+
+```jsonc
+{
+  // Named Paseo destinations.
+  "targets": {
+    "laptop": { "provider": "claude", "mode": "bypassPermissions" },
+    "gpu": {
+      "paseoHost": "gpu-box:6767",   // paseo --host; absent: the local daemon
+      "provider": "codex",            // provider or provider/model; also "model", "mode"
+      "labels": { "pool": "gpu" },    // extra labels on the agent
+      "capacity": 1                   // agents at once on this target (runner capacity still applies)
+    }
+  },
+  // Your binding of a Mastermind environment NAME (env:<name>) to this machine.
+  "environments": {
+    "web": {
+      "dir": "/home/me/src/web",      // absolute path of the checkout
+      "allowSetup": true,             // run the environment's setup commands (default false)
+      "env": {                        // where each declared secret comes from
+        "NPM_TOKEN": "file:/home/me/.secrets/npm",
+        "GH_TOKEN": "env:MY_GH_TOKEN"  // unlisted secrets: the env var of the same name
+      }
+    },
+    "ml": { "dir": "/home/me/src/ml" }
+  },
+  // Ordered; the first match wins. Every match field is optional; {} matches anything.
+  "rules": [
+    { "match": { "labels": ["secret-project"] }, "decline": "not on this machine" },
+    { "match": { "env": "ml" }, "target": "gpu" },
+    { "match": { "queue": "q", "maxPriority": 2 }, "target": "laptop", "mode": "auto" }
+  ]
+}
+```
+
+Match fields: `env` (environment name), `queue`, `stage` (`enrich_input`, `work`,
+`enrich_output`), `type` (bead type), `labels` (all on the bead), `maxPriority` (this
+priority or more urgent; 0 is the most urgent). A rule has `target` (plus optional
+`provider`, `model`, `mode`) or `decline: <reason>`. Optional `defaults` per stage
+(`{"work": {"provider": "claude"}}`) apply last.
+
+Decision order:
+
+| step | who decides | result |
+|---|---|---|
+| a. hard requirements | the instruction | `env.name` must be bound here (else declined); `env.requires`, secrets by name and `env.check` must pass. Met, or declined. |
+| b. target | the user's rules | the first matching rule picks the target, or declines |
+| c. agent fields | rule, then target, then the instruction (`env.agent.provider/mode`), then `defaults` | per field (provider, model, mode), the first that sets it wins; a provider from the instruction must be in `--providers` |
+| d. no rule matches | the user | declined with the reason; Mastermind gets the bead back |
+
+A declined dispatch is released with the reason. The first report of an accepted dispatch
+names the decision, so the bead timeline shows where the work runs:
+`target gpu on gpu-box:6767, provider codex (runner laptop, rule 2)`.
+
+Per dispatch, after routing: the checkout is the binding's `dir` (a dispatch without a
+bound environment uses `--workdir`, or `--repo <url>=<dir>` when it names a repo);
+`env.requires` (`os:`, `arch:`, `<tool>`, `<tool>>=<version>`, opaque `ns:x`) must be
+capabilities of the runner; the secrets must resolve (they go to the agent with
+`paseo run --env`, so they are visible in the local process list while the CLI runs);
+`env.setup` runs once per checkout and per setup (hash of the commands, kept in
+`setup-state.json` next to the config) and only when the binding has `allowSetup`
+(`--allow-setup` without a binding); `env.check` runs before every start. A failed step
+releases the bead with the reason and the output tail. The lease is renewed from routing
+on, so a long setup does not lose it.
+
+```bash
+mastermind-runner route --env ml --queue q          # dry run: the target and why
+mastermind-runner route dispatch.json --label x     # a dispatch from a file, flags on top
+mastermind-runner check                             # capabilities + routing: unknown targets,
+                                                    # unbound environments, queues no rule takes
+```
+
+Without `routing.json` the old flags make one implicit target `default` (`--paseo-host`)
+and two rules (work, and enrichment when `--assistant-provider` is set); `--provider`,
+`--mode` and the assistant are the defaults, so the instruction's provider still wins over
+`--provider`; a named environment uses `--workdir`/`--repo`. The runner tells Mastermind
+the bound environments (`RunnerInfo.environments`), so it can skip a runner that cannot
+take one.
+
+## Running agents
+
+`paseo run --output-schema` starts the agent (labels `mastermind.execution`,
+`mastermind.bead`; never two agents for one execution), the runner heartbeats the lease,
+and the agent's own answer decides: `done` completes the bead with its summary, `failed`
+releases it with the reason. A lost lease stops the agent. Stop (Ctrl-C) stops agents
+and releases their beads.
 
 Exit codes: 0 stopped, 1 error, 2 usage, 3 revoked (the credential was refused;
 the config is marked `revoked`, enroll again).

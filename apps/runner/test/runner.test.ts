@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { CheckResult } from "../src/check.ts";
 import { defaultSettings, type RunnerSettings } from "../src/config.ts";
+import { parseRouting, type Routing } from "../src/routing.ts";
 import { agentPrompt, executionId, Runner } from "../src/runner.ts";
 import { dispatch, FakeLauncher, FakeMastermind, until } from "./fakes.ts";
 
@@ -8,12 +9,13 @@ const settings = (over: Partial<RunnerSettings> = {}): RunnerSettings => ({
 	...defaultSettings("laptop"),
 	queues: ["q"],
 	workdir: "/tmp",
+	agent: { provider: "claude" },
 	...over,
 });
 const pass = async (): Promise<CheckResult> => ({
 	ok: true,
 	cwd: "/work",
-	agent: { provider: "claude" },
+	env: {},
 });
 
 let runner: Runner | undefined;
@@ -27,12 +29,14 @@ function make(
 	launcher: FakeLauncher,
 	over: Partial<RunnerSettings> = {},
 	check = pass,
+	routing?: Routing,
 ) {
 	runner = new Runner({
 		client: mm,
 		launcher,
 		settings: settings(over),
 		check,
+		...(routing ? { routing } : {}),
 		idleMs: 10,
 		heartbeatMs: 20,
 		backoff: { minMs: 5, maxMs: 20 },
@@ -54,7 +58,9 @@ describe("Runner", () => {
 			actor: "alice/laptop",
 			text: "fixed it",
 		});
-		expect(mm.verbs("report")[0]?.text).toContain("starting a claude agent");
+		expect(mm.verbs("report")[0]?.text).toBe(
+			"target default on local, provider claude (runner laptop, rule 1)",
+		);
 		const spec = agents.specs[0];
 		expect(spec?.cwd).toBe("/work");
 		expect(spec?.prompt).toContain("do mm-1");
@@ -175,6 +181,80 @@ describe("Runner", () => {
 		make(mm, agents);
 		await until(() => mm.verbs("release").length === 1);
 		expect(mm.verbs("release")[0]?.text).toContain("daemon is not running");
+	});
+});
+
+describe("Runner with routing", () => {
+	const routing = () =>
+		parseRouting({
+			targets: {
+				gpu: {
+					paseoHost: "gpu-box:6767",
+					provider: "codex",
+					labels: { pool: "gpu" },
+					capacity: 1,
+				},
+			},
+			environments: { ml: { dir: "/tmp" } },
+			rules: [{ match: { env: "ml" }, target: "gpu" }],
+		});
+	const ml = (id: string) =>
+		dispatch(id, {
+			env: { name: "ml", repo: "", ref: "main", requires: [] },
+		});
+
+	test("the routed target, labels and secrets reach the launcher; the first report names the target", async () => {
+		const mm = new FakeMastermind();
+		const agents = new FakeLauncher({ status: "done", summary: "ok" });
+		mm.push(ml("mm-r1"));
+		const check = async (): Promise<CheckResult> => ({
+			ok: true,
+			cwd: "/tmp",
+			env: { HF_TOKEN: "t" },
+		});
+		make(mm, agents, { providers: ["claude", "codex"] }, check, routing());
+		await until(() => mm.verbs("complete").length === 1);
+		expect(agents.specs[0]).toMatchObject({
+			host: "gpu-box:6767",
+			labels: { pool: "gpu" },
+			env: { HF_TOKEN: "t" },
+			agent: { provider: "codex" },
+		});
+		expect(mm.verbs("report")[0]?.text).toBe(
+			"target gpu on gpu-box:6767, provider codex (runner laptop, rule 1)",
+		);
+	});
+
+	test("an unbound environment is released with the reason, no agent starts", async () => {
+		const mm = new FakeMastermind();
+		const agents = new FakeLauncher({ status: "done", summary: "ok" });
+		mm.push(
+			dispatch("mm-r2", {
+				env: { name: "web", repo: "", ref: "main", requires: [] },
+			}),
+		);
+		make(mm, agents, {}, pass, routing());
+		await until(() => mm.verbs("release").length === 1);
+		expect(mm.verbs("release")[0]?.text).toBe(
+			"environment web is not bound on this runner",
+		);
+		expect(agents.specs).toHaveLength(0);
+	});
+
+	test("a target's capacity holds the second agent until the first ends", async () => {
+		const mm = new FakeMastermind();
+		const agents = new FakeLauncher();
+		mm.push(ml("a"));
+		mm.push(ml("b"));
+		make(mm, agents, { capacity: 3 }, pass, routing());
+		await until(() => agents.specs.length === 1);
+		// b waits for the target, with its lease kept alive (heartbeats >= 200 ms apart).
+		await until(() => mm.verbs("heartbeat").some((c) => c.bead === "b"));
+		expect(agents.specs).toHaveLength(1);
+		expect(mm.verbs("heartbeat").some((c) => c.bead === "b")).toBe(true);
+		agents.finish("a", { status: "done", summary: "ok" });
+		await until(() => agents.specs.length === 2);
+		expect(agents.maxActive).toBe(1);
 	});
 });
 

@@ -47,6 +47,22 @@ describe("PaseoLauncher (fake paseo CLI)", () => {
 		expect(args.at(-1)).toBe("fix the bug");
 	});
 
+	test("a routed target's host, labels and the agent env go to ls and run", async () => {
+		const before = fake.calls().length;
+		const s = spec("routed", {
+			host: "gpu-box:6767",
+			labels: { pool: "gpu" },
+			env: { HF_TOKEN: "t" },
+		});
+		await launcher.run(s, never);
+		const calls = fake.calls().slice(before);
+		for (const c of calls)
+			expect(c.args[c.args.indexOf("--host") + 1]).toBe("gpu-box:6767");
+		const args = calls.find((c) => c.args[0] === "run")?.args ?? [];
+		expect(args[args.indexOf("--env") + 1]).toBe("HF_TOKEN=t");
+		expect(args).toContain("pool=gpu");
+	});
+
 	test("does not pass the caller's Paseo agent scope to the CLI", async () => {
 		const scoped = new PaseoLauncher({
 			command: FAKE_PASEO,

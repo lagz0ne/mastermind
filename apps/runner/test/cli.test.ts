@@ -16,6 +16,7 @@ import {
 	loadConfig,
 	modeOf,
 } from "../src/config.ts";
+import { parseRouting } from "../src/routing.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "mm-runner-cli-"));
 let server: ReturnType<typeof Bun.serve>;
@@ -200,4 +201,80 @@ test("--version and version print the build version", async () => {
 		expect(await main(argv, o.io)).toBe(EXIT.ok);
 		expect(o.out).toEqual([VERSION]);
 	}
+});
+
+describe("route and check with routing.json", () => {
+	const routingDir = mkdtempSync(join(tmpdir(), "mm-routing-"));
+	const file = join(routingDir, "routing.json");
+	writeFileSync(
+		file,
+		JSON.stringify({
+			targets: {
+				laptop: { provider: "claude" },
+				gpu: { paseoHost: "gpu-box:6767", provider: "codex" },
+			},
+			environments: { web: { dir: routingDir }, ml: { dir: routingDir } },
+			rules: [
+				{ match: { labels: ["secret"] }, decline: "not here" },
+				{ match: { env: "ml" }, target: "gpu" },
+				{ match: { queue: "q" }, target: "laptop" },
+			],
+		}),
+	);
+	const env = { MASTERMIND_RUNNER_ROUTING: file };
+
+	test("route prints the target and why", async () => {
+		const t = io(env);
+		const code = await main(["route", "--env", "ml", "--queue", "q"], t.io);
+		expect(code).toBe(EXIT.ok);
+		expect(t.out[0]).toBe(
+			"target gpu on gpu-box:6767, provider codex (runner laptop, rule 2)",
+		);
+		expect(t.out).toContain(`checkout ${routingDir}`);
+		expect(t.out).toContain("  rule 1 skipped: no label secret");
+	});
+
+	test("route reads a dispatch file; a decline exits 1 with the reason", async () => {
+		const d = join(routingDir, "d.json");
+		writeFileSync(
+			d,
+			JSON.stringify({
+				queue: "q",
+				stage: "work",
+				env: { name: "mobile", repo: "", ref: "", requires: [] },
+			}),
+		);
+		const t = io(env);
+		expect(await main(["route", d], t.io)).toBe(EXIT.error);
+		expect(t.out[0]).toBe(
+			"decline: environment mobile is not bound on this runner",
+		);
+		const s = io(env);
+		expect(
+			await main(["route", d, "--env", "web", "--label", "secret"], s.io),
+		).toBe(EXIT.error);
+		expect(s.out[0]).toBe("decline: declined by rule 1: not here");
+	});
+
+	test("check validates the routing for the runner's queues", async () => {
+		const t = io(env);
+		const code = await main(["check", "--queue", "other"], t.io);
+		expect(code).toBe(EXIT.error);
+		expect(t.out).toContain(
+			"✗ rule 3: queue q is not one of this runner's queues",
+		);
+		expect(t.out.join("\n")).toContain(
+			`routing ${file}: 2 targets, 3 rules, environments web,ml`,
+		);
+		const ok = io(env);
+		expect(await main(["check", "--queue", "q"], ok.io)).toBe(EXIT.ok);
+	});
+
+	test("runnerInfo lists the bound environments", async () => {
+		const cfg = await loadConfig(join(dir, "c", "runner.json"));
+		if (!cfg) throw new Error("no config");
+		const routing = parseRouting({ environments: { web: { dir: "/w" } } });
+		expect(runnerInfo(cfg, cfg.runner, routing).environments).toEqual(["web"]);
+		expect(runnerInfo(cfg, cfg.runner).environments).toBeUndefined();
+	});
 });

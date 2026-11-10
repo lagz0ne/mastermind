@@ -2,7 +2,9 @@
  * The runner loop. One poller per queue asks `next` while a slot is free
  * (capacity slots in total, never more agents than that). Each dispatch:
  *
- *   check env  -> fail: release with the reason
+ *   route (routing.ts) -> declined: release with the reason
+ *   check env, setup, check commands -> fail: release with the reason
+ *   report "target <name> on <host>, provider <p>"
  *   start agent, heartbeat the lease while it runs (lost lease: stop agent)
  *   agent says done   -> complete with its summary
  *   agent says failed -> release with its reason
@@ -10,7 +12,7 @@
  * Agents never talk to Mastermind; the runner reports for them.
  */
 import type { Dispatch } from "@mastermind/core";
-import { type CheckResult, checkDispatch } from "./check.ts";
+import { type CheckResult, checkDispatch, type SetupMemory } from "./check.ts";
 import {
 	BACKOFF,
 	type Backoff,
@@ -20,12 +22,29 @@ import {
 } from "./client.ts";
 import type { RunnerSettings } from "./config.ts";
 import type { AgentLauncher } from "./launcher.ts";
+import {
+	type Decision,
+	decisionLine,
+	implicitRouting,
+	type Routing,
+	route,
+} from "./routing.ts";
+
+type RoutedDecision = Extract<Decision, { ok: true }>;
 
 export type RunnerOptions = {
 	client: MastermindClient;
 	launcher: AgentLauncher;
 	settings: RunnerSettings;
-	check?: (d: Dispatch, s: RunnerSettings) => Promise<CheckResult>;
+	/** The user's routing; default: the implicit routing of the settings. */
+	routing?: Routing;
+	check?: (
+		d: Dispatch,
+		s: RunnerSettings,
+		decision: RoutedDecision,
+	) => Promise<CheckResult>;
+	/** Where setup runs are remembered; default: in this process only. */
+	setupMemory?: SetupMemory;
 	log?: (line: string) => void;
 	/** Longest gap between heartbeats. Default 60 s (bd leases last 5 min). */
 	heartbeatMs?: number;
@@ -44,12 +63,26 @@ class Slots {
 	get free() {
 		return this.#free;
 	}
-	acquire(): Promise<void> {
+	/** Resolves with a slot; on abort it resolves without one (check the signal). */
+	acquire(signal?: AbortSignal): Promise<void> {
 		if (this.#free > 0) {
 			this.#free--;
 			return Promise.resolve();
 		}
-		return new Promise((resolve) => this.#waiters.push(resolve));
+		if (signal?.aborted) return Promise.resolve();
+		return new Promise((resolve) => {
+			const waiter = () => {
+				signal?.removeEventListener("abort", onAbort);
+				resolve();
+			};
+			const onAbort = () => {
+				const i = this.#waiters.indexOf(waiter);
+				if (i >= 0) this.#waiters.splice(i, 1);
+				resolve();
+			};
+			signal?.addEventListener("abort", onAbort, { once: true });
+			this.#waiters.push(waiter);
+		});
 	}
 	release(): void {
 		const next = this.#waiters.shift();
@@ -101,10 +134,15 @@ type Execution = {
 	done: Promise<void>;
 };
 
+/** Read at call time (the heartbeat sets `why` concurrently). */
+const lost = (e: Execution) => e.why === "lost";
+
 export class Runner {
 	readonly #o: RunnerOptions;
 	readonly #log: (line: string) => void;
 	readonly #slots: Slots;
+	readonly #routing: Routing;
+	readonly #targets = new Map<string, Slots>();
 	readonly #running = new Map<string, Execution>();
 	readonly #stop = new AbortController();
 	readonly #wake = new Map<string, AbortController>();
@@ -115,6 +153,7 @@ export class Runner {
 		this.#o = options;
 		this.#log = options.log ?? (() => {});
 		this.#slots = new Slots(options.settings.capacity);
+		this.#routing = options.routing ?? implicitRouting(options.settings);
 	}
 
 	/** Beads with a running agent. */
@@ -212,27 +251,41 @@ export class Runner {
 		const id = d.bead.id;
 		this.#log(`${id}: dispatched (${d.queue}, ${d.stage})`);
 
-		const check = await (this.#o.check ?? checkDispatch)(d, settings).catch(
-			(error): CheckResult => ({ ok: false, reason: `check failed: ${error}` }),
-		);
-		if (!check.ok) {
-			this.#log(`${id}: refused: ${check.reason}`);
-			await this.#safe(d, "release", check.reason);
+		const decision = route(d, this.#routing, settings.providers);
+		if (!decision.ok) {
+			this.#log(`${id}: declined: ${decision.reason}`);
+			await this.#safe(d, "release", decision.reason);
 			return;
 		}
-
-		if (exec.abort.signal.aborted) {
-			await this.#safe(d, "release", "runner stopped");
-			return;
-		}
+		// Setup may take longer than a lease: heartbeat from here on.
 		const beating = this.#heartbeat(exec);
+		let target: Slots | undefined;
 		try {
-			const provider = check.agent.provider ?? "default";
-			await this.#safe(
+			const check = await (this.#o.check ?? this.#check)(
 				d,
-				"report",
-				`runner ${settings.id}: starting a ${provider} agent`,
+				settings,
+				decision,
+			).catch(
+				(error): CheckResult => ({
+					ok: false,
+					reason: `check failed: ${error}`,
+				}),
 			);
+			if (lost(exec)) return;
+			if (!check.ok) {
+				this.#log(`${id}: refused: ${check.reason}`);
+				await this.#safe(d, "release", check.reason);
+				return;
+			}
+			target = this.#targetSlots(decision.target);
+			if (target) {
+				await target.acquire(exec.abort.signal);
+			}
+			if (exec.abort.signal.aborted) {
+				if (!lost(exec)) await this.#safe(d, "release", "runner stopped");
+				return;
+			}
+			await this.#safe(d, "report", decisionLine(decision, settings.id));
 			let result: { status: "done" | "failed"; summary: string };
 			try {
 				result = await launcher.run(
@@ -242,7 +295,10 @@ export class Runner {
 						title: `${id}: ${d.bead.title}`.slice(0, 120),
 						cwd: check.cwd,
 						prompt: agentPrompt(d),
-						agent: check.agent,
+						agent: decision.agent,
+						labels: decision.labels,
+						...(decision.host ? { host: decision.host } : {}),
+						...(Object.keys(check.env).length ? { env: check.env } : {}),
 					},
 					exec.abort.signal,
 				);
@@ -252,7 +308,7 @@ export class Runner {
 					summary: `agent did not finish: ${error instanceof Error ? error.message : error}`,
 				};
 			}
-			if (exec.why === "lost") {
+			if (lost(exec)) {
 				this.#log(`${id}: lease lost; result dropped`);
 				return;
 			}
@@ -265,9 +321,29 @@ export class Runner {
 				await this.#safe(d, "complete", result.summary || "done");
 			else await this.#safe(d, "release", result.summary || "agent failed");
 		} finally {
+			target?.release();
 			exec.abort.abort();
 			await beating;
 		}
+	}
+
+	readonly #check = (
+		d: Dispatch,
+		s: RunnerSettings,
+		decision: RoutedDecision,
+	): Promise<CheckResult> =>
+		checkDispatch(d, s, decision, { setupMemory: this.#o.setupMemory });
+
+	/** Slots of a target with a capacity; undefined when unlimited. */
+	#targetSlots(name: string): Slots | undefined {
+		const cap = this.#routing.targets[name]?.capacity;
+		if (!cap) return undefined;
+		let slots = this.#targets.get(name);
+		if (!slots) {
+			slots = new Slots(cap);
+			this.#targets.set(name, slots);
+		}
+		return slots;
 	}
 
 	/** Renew the lease until the execution ends; a lost claim stops the agent. */

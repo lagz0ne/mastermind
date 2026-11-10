@@ -18,6 +18,10 @@ export type AgentSpec = {
 	agent: AgentSettings;
 	/** Extra labels for the agent (the launcher adds its own). */
 	labels?: Record<string, string>;
+	/** `paseo --host` of the routed target; default: the launcher's host. */
+	host?: string;
+	/** Environment for the agent process (the declared secrets). */
+	env?: Record<string, string>;
 };
 
 /** What the agent says it did. Completion comes from the agent, not from idle. */
@@ -104,8 +108,8 @@ export class PaseoLauncher implements AgentLauncher {
 		return { ...env, ...this.#opts.env };
 	}
 
-	#host(): string[] {
-		return this.#opts.host ? ["--host", this.#opts.host] : [];
+	#host(host = this.#opts.host): string[] {
+		return host ? ["--host", host] : [];
 	}
 
 	async #exec(args: string[], signal?: AbortSignal) {
@@ -124,7 +128,7 @@ export class PaseoLauncher implements AgentLauncher {
 	}
 
 	/** Ids of agents labelled with this execution id. */
-	async find(executionId: string): Promise<string[]> {
+	async find(executionId: string, host?: string): Promise<string[]> {
 		const res = await this.#exec([
 			"ls",
 			"-a",
@@ -132,7 +136,7 @@ export class PaseoLauncher implements AgentLauncher {
 			"--label",
 			`${LABEL.execution}=${executionId}`,
 			"--json",
-			...this.#host(),
+			...this.#host(host),
 		]);
 		if (res.code !== 0)
 			throw new LaunchError(`paseo ls failed: ${res.stderr.trim()}`);
@@ -142,7 +146,7 @@ export class PaseoLauncher implements AgentLauncher {
 
 	async run(spec: AgentSpec, signal: AbortSignal): Promise<AgentResult> {
 		if (signal.aborted) throw new LaunchError("agent stopped");
-		if ((await this.find(spec.executionId)).length > 0) {
+		if ((await this.find(spec.executionId, spec.host)).length > 0) {
 			throw new LaunchError(
 				`an agent for execution ${spec.executionId} already exists`,
 			);
@@ -166,7 +170,11 @@ export class PaseoLauncher implements AgentLauncher {
 			...(a.model ? ["--model", a.model] : []),
 			...(a.mode ? ["--mode", a.mode] : []),
 			...Object.entries(labels).flatMap(([k, v]) => ["--label", `${k}=${v}`]),
-			...this.#host(),
+			...Object.entries(spec.env ?? {}).flatMap(([k, v]) => [
+				"--env",
+				`${k}=${v}`,
+			]),
+			...this.#host(spec.host),
 			spec.prompt,
 		];
 		const child = new AbortController();
@@ -175,7 +183,7 @@ export class PaseoLauncher implements AgentLauncher {
 		try {
 			const res = await this.#exec(args, child.signal);
 			if (signal.aborted) {
-				await this.#stop(spec.executionId);
+				await this.#stop(spec.executionId, spec.host);
 				throw new LaunchError("agent stopped");
 			}
 			if (res.code !== 0) {
@@ -189,11 +197,11 @@ export class PaseoLauncher implements AgentLauncher {
 		}
 	}
 
-	async #stop(executionId: string): Promise<void> {
-		const ids = await this.find(executionId).catch(() => []);
+	async #stop(executionId: string, host?: string): Promise<void> {
+		const ids = await this.find(executionId, host).catch(() => []);
 		await Promise.all(
 			ids.map((id) =>
-				this.#exec(["stop", id, ...this.#host()]).catch(() => {}),
+				this.#exec(["stop", id, ...this.#host(host)]).catch(() => {}),
 			),
 		);
 	}

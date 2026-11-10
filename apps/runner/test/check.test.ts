@@ -1,11 +1,14 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
-	agentFor,
 	type CheckDeps,
 	checkDispatch,
 	checkRequirement,
 	compareVersions,
+	FileSetupMemory,
+	MemorySetupMemory,
 	repoDir,
 	versionIn,
 } from "../src/check.ts";
@@ -72,24 +75,12 @@ test("repoDir tolerates .git and trailing slashes", () => {
 	expect(repoDir(repos, "https://github.com/o/x")).toBeUndefined();
 });
 
-test("agentFor: work uses the agent, enrichment needs the assistant", () => {
-	const s = settings({ agent: { provider: "claude", mode: "auto" } });
-	expect(agentFor(dispatch("a"), s)).toEqual({
-		provider: "claude",
-		mode: "auto",
-	});
-	expect(agentFor(dispatch("a", { stage: "enrich_input" }), s)).toBe(
-		"no assistant agent configured for stage enrich_input",
-	);
-	const d = dispatch("a", {
-		env: { repo: "", ref: "main", requires: [], provider: "codex" },
-	});
-	expect(agentFor(d, s)).toBe("provider codex is not offered by this runner");
-	expect(agentFor(d, { ...s, providers: ["claude", "codex"] })).toEqual({
-		provider: "codex",
-		mode: "auto",
-	});
-});
+/** checkDispatch for a dispatch without a bound environment. */
+const checkLegacy = (
+	d: Parameters<typeof checkDispatch>[0],
+	s: RunnerSettings,
+	deps: CheckDeps,
+) => checkDispatch(d, s, {}, deps);
 
 describe("checkDispatch", () => {
 	const env = (over: object) => ({
@@ -99,11 +90,11 @@ describe("checkDispatch", () => {
 		...over,
 	});
 	test("ok: no repo runs in the workdir", async () => {
-		const r = await checkDispatch(dispatch("a"), settings(), deps);
-		expect(r).toEqual({ ok: true, cwd: dir, agent: {} });
+		const r = await checkLegacy(dispatch("a"), settings(), deps);
+		expect(r).toEqual({ ok: true, cwd: dir, env: {} });
 	});
 	test("unmet requirements are all listed", async () => {
-		const r = await checkDispatch(
+		const r = await checkLegacy(
 			dispatch("a", { env: env({ requires: ["rg", "docker"] }) }),
 			settings(),
 			deps,
@@ -115,11 +106,11 @@ describe("checkDispatch", () => {
 	});
 	test("a repo needs a local checkout", async () => {
 		const d = dispatch("a", { env: env({ repo: "https://g/o/r" }) });
-		expect(await checkDispatch(d, settings(), deps)).toEqual({
+		expect(await checkLegacy(d, settings(), deps)).toEqual({
 			ok: false,
 			reason: "no local checkout for https://g/o/r",
 		});
-		const r = await checkDispatch(
+		const r = await checkLegacy(
 			d,
 			settings({ repos: { "https://g/o/r.git": dir } }),
 			deps,
@@ -129,15 +120,15 @@ describe("checkDispatch", () => {
 	test("a missing workdir or no workdir refuses", async () => {
 		const none = settings();
 		delete none.workdir;
-		expect((await checkDispatch(dispatch("a"), none, deps)).ok).toBe(false);
+		expect((await checkLegacy(dispatch("a"), none, deps)).ok).toBe(false);
 		const gone = settings({ workdir: "/nonexistent/mm-runner" });
-		expect(await checkDispatch(dispatch("a"), gone, deps)).toEqual({
+		expect(await checkLegacy(dispatch("a"), gone, deps)).toEqual({
 			ok: false,
 			reason: "the runner's working directory is missing",
 		});
 	});
 	test("secrets must be set (names only)", async () => {
-		const r = await checkDispatch(
+		const r = await checkLegacy(
 			dispatch("a", { env: env({ secrets: ["GH_TOKEN", "NPM_TOKEN"] }) }),
 			settings(),
 			deps,
@@ -146,13 +137,14 @@ describe("checkDispatch", () => {
 	});
 	test("setup is off unless allowed; a failing setup refuses", async () => {
 		const d = dispatch("a", { env: env({ setup: ["bun install"] }) });
-		expect(await checkDispatch(d, settings(), deps)).toEqual({
+		expect(await checkLegacy(d, settings(), deps)).toEqual({
 			ok: false,
 			reason: "setup commands are off on this runner",
 		});
 		const ran: string[] = [];
-		const ok = await checkDispatch(d, settings({ allowSetup: true }), {
+		const ok = await checkLegacy(d, settings({ allowSetup: true }), {
 			...deps,
+			setupMemory: new MemorySetupMemory(),
 			sh: async (cmd) => {
 				ran.push(cmd);
 				return { code: 0, tail: "" };
@@ -160,18 +152,172 @@ describe("checkDispatch", () => {
 		});
 		expect(ok.ok).toBe(true);
 		expect(ran).toEqual(["bun install"]);
-		const bad = await checkDispatch(d, settings({ allowSetup: true }), {
+		const bad = await checkLegacy(d, settings({ allowSetup: true }), {
 			...deps,
+			setupMemory: new MemorySetupMemory(),
 			sh: async () => ({ code: 1, tail: "lockfile" }),
 		});
 		expect(bad.ok === false && bad.reason).toContain("setup failed (exit 1)");
 	});
 	test("setup really runs in the checkout", async () => {
 		const d = dispatch("a", { env: env({ setup: ["test -d ."] }) });
-		const r = await checkDispatch(d, settings({ allowSetup: true }), {
+		const r = await checkLegacy(d, settings({ allowSetup: true }), {
 			...deps,
+			setupMemory: new MemorySetupMemory(),
 			sh: undefined,
 		});
 		expect(r.ok).toBe(true);
 	});
+});
+
+describe("checkDispatch with a bound environment", () => {
+	const named = (over: object = {}) =>
+		dispatch("a", {
+			env: { name: "web", repo: "", ref: "main", requires: [], ...over },
+		});
+	const bound = (over: object = {}) => ({
+		binding: { name: "web", dir, ...over },
+	});
+	const shell = () => {
+		const ran: string[] = [];
+		return {
+			ran,
+			sh: async (cmd: string) => {
+				ran.push(cmd);
+				return cmd.startsWith("false")
+					? { code: 1, tail: "not ready: db down" }
+					: { code: 0, tail: "" };
+			},
+		};
+	};
+
+	test("works in the binding's checkout, not the workdir", async () => {
+		const r = await checkDispatch(
+			named(),
+			settings({ workdir: "/nonexistent" }),
+			bound(),
+			deps,
+		);
+		expect(r).toEqual({ ok: true, cwd: dir, env: {} });
+		const gone = await checkDispatch(
+			named(),
+			settings(),
+			bound({ dir: "/nonexistent/web" }),
+			deps,
+		);
+		expect(gone).toEqual({
+			ok: false,
+			reason: "the checkout of environment web (/nonexistent/web) is missing",
+		});
+	});
+
+	test("setup needs the binding's allowSetup, not the runner flag", async () => {
+		const r = await checkDispatch(
+			named({ setup: ["bun install"] }),
+			settings({ allowSetup: true }),
+			bound(),
+			deps,
+		);
+		expect(r).toEqual({
+			ok: false,
+			reason: "setup commands are off for environment web (allowSetup)",
+		});
+	});
+
+	test("setup runs once per checkout and setup hash; check runs every time", async () => {
+		const { ran, sh } = shell();
+		const d = { ...deps, sh, setupMemory: new MemorySetupMemory() };
+		const env = { setup: ["bun install"], check: ["bun --version"] };
+		for (let i = 0; i < 3; i++) {
+			const r = await checkDispatch(
+				named(env),
+				settings(),
+				bound({ allowSetup: true }),
+				d,
+			);
+			expect(r.ok).toBe(true);
+		}
+		expect(ran).toEqual([
+			"bun install",
+			"bun --version",
+			"bun --version",
+			"bun --version",
+		]);
+		await checkDispatch(
+			named({ ...env, setup: ["bun install", "bun run build"] }),
+			settings(),
+			bound({ allowSetup: true }),
+			d,
+		);
+		expect(ran.slice(4)).toEqual([
+			"bun install",
+			"bun run build",
+			"bun --version",
+		]);
+	});
+
+	test("two dispatches at once run one setup", async () => {
+		let runs = 0;
+		const d = {
+			...deps,
+			setupMemory: new MemorySetupMemory(),
+			sh: async () => {
+				runs++;
+				await Bun.sleep(20);
+				return { code: 0, tail: "" };
+			},
+		};
+		const both = await Promise.all(
+			[1, 2].map(() =>
+				checkDispatch(
+					named({ setup: ["make"] }),
+					settings(),
+					bound({ allowSetup: true }),
+					d,
+				),
+			),
+		);
+		expect(both.every((r) => r.ok)).toBe(true);
+		expect(runs).toBe(1);
+	});
+
+	test("a failed check refuses with the output tail", async () => {
+		const { sh } = shell();
+		const r = await checkDispatch(
+			named({ check: ["false db"] }),
+			settings(),
+			bound(),
+			{ ...deps, sh },
+		);
+		expect(r).toEqual({
+			ok: false,
+			reason: "check failed (exit 1): false db\nnot ready: db down",
+		});
+	});
+
+	test("secrets come from the binding's sources and go to the agent", async () => {
+		const f = join(mkdtempSync(join(tmpdir(), "mm-secret-")), "npm");
+		writeFileSync(f, "npm-value\n");
+		const r = await checkDispatch(
+			named({ secrets: ["GH_TOKEN", "NPM_TOKEN", "API_KEY"] }),
+			settings(),
+			bound({ env: { NPM_TOKEN: `file:${f}`, API_KEY: "env:MY_KEY" } }),
+			{ ...deps, env: { GH_TOKEN: "gh", MY_KEY: "k" } },
+		);
+		expect(r).toEqual({
+			ok: true,
+			cwd: dir,
+			env: { GH_TOKEN: "gh", NPM_TOKEN: "npm-value", API_KEY: "k" },
+		});
+	});
+});
+
+test("FileSetupMemory keeps setup runs across restarts", async () => {
+	const path = join(mkdtempSync(join(tmpdir(), "mm-setup-")), "s.json");
+	const a = new FileSetupMemory(path);
+	expect(await a.has("/w", "h1")).toBe(false);
+	await a.mark("/w", "h1");
+	const b = new FileSetupMemory(path);
+	expect(await b.has("/w", "h1")).toBe(true);
+	expect(await b.has("/w", "h2")).toBe(false);
 });

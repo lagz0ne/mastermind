@@ -14,22 +14,27 @@
  * Every requirement must also be one of the runner's own capabilities.
  */
 import { existsSync, statSync } from "node:fs";
+import { mkdir, rename, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import type { Dispatch } from "@mastermind/core";
-import type { AgentSettings, RunnerSettings } from "./config.ts";
+import type { RunnerSettings } from "./config.ts";
+import type { Decision } from "./routing.ts";
 
 export type CheckResult =
-	| { ok: true; cwd: string; agent: AgentSettings }
+	| { ok: true; cwd: string; env: Record<string, string> }
 	| { ok: false; reason: string };
 
 export type CheckDeps = {
 	which?: (bin: string) => string | null;
 	/** Output of `<tool> --version`, or null when it cannot run. */
 	version?: (bin: string) => Promise<string | null>;
-	/** Run one setup command in `cwd`; returns the exit code and output tail. */
+	/** Run one setup or check command in `cwd`; returns the exit code and output tail. */
 	sh?: (cmd: string, cwd: string) => Promise<{ code: number; tail: string }>;
 	/** Is `dir` inside a git work tree? */
 	isGitDir?: (dir: string) => Promise<boolean>;
 	env?: Record<string, string | undefined>;
+	/** Setup already done; default: in this process only. */
+	setupMemory?: SetupMemory;
 	platform?: string;
 	arch?: string;
 };
@@ -73,7 +78,7 @@ async function toolVersion(bin: string): Promise<string | null> {
 	}
 }
 
-async function runSetup(cmd: string, cwd: string) {
+async function runShell(cmd: string, cwd: string) {
 	const proc = Bun.spawn(["sh", "-c", cmd], {
 		cwd,
 		stdout: "pipe",
@@ -149,35 +154,113 @@ export function repoDir(
 	return undefined;
 }
 
-/** The agent settings for a dispatch stage, or why there are none. */
-export function agentFor(
-	dispatch: Pick<Dispatch, "stage" | "env">,
-	settings: Pick<RunnerSettings, "agent" | "assistant" | "providers">,
-): AgentSettings | string {
-	const base = dispatch.stage === "work" ? settings.agent : settings.assistant;
-	if (!base) return `no assistant agent configured for stage ${dispatch.stage}`;
-	const provider = dispatch.env.provider ?? base.provider;
-	if (dispatch.env.provider) {
-		const name = dispatch.env.provider.split("/")[0] as string;
-		if (!settings.providers.includes(name))
-			return `provider ${name} is not offered by this runner`;
+/**
+ * Remembers which setup ran in which checkout (by hash of the commands), so
+ * setup runs once per checkout and per setup.
+ */
+export interface SetupMemory {
+	has(dir: string, hash: string): Promise<boolean>;
+	mark(dir: string, hash: string): Promise<void>;
+}
+
+export class MemorySetupMemory implements SetupMemory {
+	readonly done = new Map<string, string>();
+	async has(dir: string, hash: string) {
+		return this.done.get(dir) === hash;
 	}
-	return { ...base, ...(provider ? { provider } : {}) };
+	async mark(dir: string, hash: string) {
+		this.done.set(dir, hash);
+	}
+}
+
+/** A JSON file `{ "<dir>": "<hash>" }`, for example `setup-state.json` next to the config. */
+export class FileSetupMemory implements SetupMemory {
+	constructor(readonly path: string) {}
+	async #read(): Promise<Record<string, string>> {
+		try {
+			return JSON.parse(await Bun.file(this.path).text());
+		} catch {
+			return {};
+		}
+	}
+	async has(dir: string, hash: string) {
+		return (await this.#read())[dir] === hash;
+	}
+	async mark(dir: string, hash: string) {
+		const all = { ...(await this.#read()), [dir]: hash };
+		await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
+		const tmp = `${this.path}.tmp-${process.pid}-${Date.now()}`;
+		await writeFile(tmp, `${JSON.stringify(all, null, "\t")}\n`);
+		await rename(tmp, this.path);
+	}
+}
+
+export function setupHash(setup: string[]): string {
+	return new Bun.CryptoHasher("sha256")
+		.update(JSON.stringify(setup))
+		.digest("hex")
+		.slice(0, 16);
+}
+
+/** One setup at a time per checkout, inside this process. */
+const setupLocks = new Map<string, Promise<unknown>>();
+async function locked<T>(dir: string, fn: () => Promise<T>): Promise<T> {
+	const before = setupLocks.get(dir) ?? Promise.resolve();
+	const run = before.then(fn, fn);
+	const tail = run.catch(() => {});
+	setupLocks.set(dir, tail);
+	try {
+		return await run;
+	} finally {
+		if (setupLocks.get(dir) === tail) setupLocks.delete(dir);
+	}
+}
+
+/** The value of one secret, from its binding source; null when unset. */
+export async function secretValue(
+	name: string,
+	source: string | undefined,
+	env: Record<string, string | undefined>,
+): Promise<string | null> {
+	const src = source ?? name;
+	if (src.startsWith("file:")) {
+		const f = Bun.file(src.slice(5));
+		if (!(await f.exists())) return null;
+		return (await f.text()).trim() || null;
+	}
+	return env[src.startsWith("env:") ? src.slice(4) : src] || null;
+}
+
+/** Where the agent works when the dispatch names no bound environment. */
+async function legacyDir(
+	env: Dispatch["env"],
+	settings: RunnerSettings,
+	deps: CheckDeps,
+): Promise<{ cwd: string } | { reason: string }> {
+	if (env.repo) {
+		const cwd = repoDir(settings.repos, env.repo);
+		if (!cwd) return { reason: `no local checkout for ${env.repo}` };
+		if (!(await (deps.isGitDir ?? gitDir)(cwd)))
+			return { reason: `checkout of ${env.repo} is not a git dir` };
+		return { cwd };
+	}
+	if (!settings.workdir) return { reason: "runner has no workdir" };
+	return { cwd: settings.workdir };
 }
 
 /**
- * Check everything a dispatch needs, then run its setup commands. On success
- * the agent may start in `cwd`.
+ * Check the hard requirements of a dispatch on the routed decision, run its
+ * setup (once per checkout and setup hash, when allowed) and its check
+ * commands (every time). On success the agent may start in `cwd` with `env`
+ * (the declared secrets).
  */
 export async function checkDispatch(
 	dispatch: Pick<Dispatch, "stage" | "env">,
 	settings: RunnerSettings,
+	decision: Pick<Extract<Decision, { ok: true }>, "binding">,
 	deps: CheckDeps = {},
 ): Promise<CheckResult> {
 	const env = dispatch.env;
-	const agent = agentFor(dispatch, settings);
-	if (typeof agent === "string") return { ok: false, reason: agent };
-
 	const unmet: string[] = [];
 	for (const req of env.requires ?? []) {
 		const why = await checkRequirement(req, settings, deps);
@@ -185,34 +268,63 @@ export async function checkDispatch(
 	}
 	if (unmet.length) return { ok: false, reason: unmet.join("; ") };
 
-	let cwd: string | undefined;
-	if (env.repo) {
-		cwd = repoDir(settings.repos, env.repo);
-		if (!cwd) return { ok: false, reason: `no local checkout for ${env.repo}` };
-		if (!(await (deps.isGitDir ?? gitDir)(cwd)))
-			return { ok: false, reason: `checkout of ${env.repo} is not a git dir` };
-	} else {
-		cwd = settings.workdir;
-		if (!cwd) return { ok: false, reason: "runner has no workdir" };
-	}
+	const b = decision.binding;
+	const where = b ? { cwd: b.dir } : await legacyDir(env, settings, deps);
+	if ("reason" in where) return { ok: false, reason: where.reason };
+	const { cwd } = where;
 	if (!existsSync(cwd) || !statSync(cwd).isDirectory())
-		return { ok: false, reason: "the runner's working directory is missing" };
+		return {
+			ok: false,
+			reason: b
+				? `the checkout of environment ${b.name} (${cwd}) is missing`
+				: "the runner's working directory is missing",
+		};
 
 	const procEnv = deps.env ?? process.env;
-	const missing = (env.secrets ?? []).filter((name) => !procEnv[name]);
+	const secrets: Record<string, string> = {};
+	const missing: string[] = [];
+	for (const name of env.secrets ?? []) {
+		const v = await secretValue(name, b?.env?.[name], procEnv);
+		if (v === null) missing.push(name);
+		else secrets[name] = v;
+	}
 	if (missing.length)
 		return { ok: false, reason: `secrets not set: ${missing.join(", ")}` };
 
+	const sh = deps.sh ?? runShell;
 	const setup = env.setup ?? [];
-	if (setup.length && !settings.allowSetup)
-		return { ok: false, reason: "setup commands are off on this runner" };
-	for (const cmd of setup) {
-		const res = await (deps.sh ?? runSetup)(cmd, cwd);
+	if (setup.length) {
+		const allowed = b ? b.allowSetup === true : settings.allowSetup;
+		if (!allowed)
+			return {
+				ok: false,
+				reason: b
+					? `setup commands are off for environment ${b.name} (allowSetup)`
+					: "setup commands are off on this runner",
+			};
+		const memory = deps.setupMemory ?? defaultMemory;
+		const hash = setupHash(setup);
+		const failed = await locked(cwd, async () => {
+			if (await memory.has(cwd, hash)) return null;
+			for (const cmd of setup) {
+				const res = await sh(cmd, cwd);
+				if (res.code !== 0)
+					return `setup failed (exit ${res.code}): ${cmd}${res.tail ? `\n${res.tail}` : ""}`;
+			}
+			await memory.mark(cwd, hash);
+			return null;
+		});
+		if (failed) return { ok: false, reason: failed };
+	}
+	for (const cmd of env.check ?? []) {
+		const res = await sh(cmd, cwd);
 		if (res.code !== 0)
 			return {
 				ok: false,
-				reason: `setup failed (exit ${res.code}): ${cmd}\n${res.tail}`,
+				reason: `check failed (exit ${res.code}): ${cmd}${res.tail ? `\n${res.tail}` : ""}`,
 			};
 	}
-	return { ok: true, cwd, agent };
+	return { ok: true, cwd, env: secrets };
 }
+
+const defaultMemory = new MemorySetupMemory();
