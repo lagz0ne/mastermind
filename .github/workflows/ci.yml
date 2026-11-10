@@ -120,18 +120,13 @@ jobs:
       - name: Wait until production serves this commit
         run: |
           # Dokploy runs one deployment at a time for ALL its projects, so ours may queue
-          # behind other builds. Without the API key we cannot see that queue: post the hook
-          # once more after 5 minutes in case Dokploy dropped the first call.
+          # behind other builds. Do not post the hook again: every post adds a job to that queue.
           for i in $(seq 180); do
             health=$(curl -sS --max-time 10 "$PUBLIC_URL/api/health" || true)
             version=$(jq -r '.version // empty' <<<"$health" 2>/dev/null || true)
             if [ "$version" = "$GITHUB_SHA" ] && [ "$(jq -r '.ok' <<<"$health")" = "true" ]; then
               echo "live: $health"
               exit 0
-            fi
-            if [ "$i" = 60 ] && [ -z "$DOKPLOY_API_KEY" ]; then
-              echo "still not live after 5 min: posting the app hook again"
-              curl -fsS --retry 3 -o /dev/null -X POST "$DOKPLOY_DEPLOY_HOOK" || true
             fi
             echo "waiting ($i): ${health:-no answer}"
             sleep 5

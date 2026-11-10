@@ -61,8 +61,8 @@ So the app deploy has two modes:
   `:latest` as soon as Dokploy has started that deployment (so no pin stays behind), prints the Dokploy queue
   while ours waits, fails with the deployment log tail on error, and with the app log when health does
   not reach the commit.
-- **No key** (hooks only): CI posts the app hook (`:latest`), posts it once more after 5 minutes if the
-  commit is not live, and fails after 15 minutes. It cannot see the queue or the log.
+- **No key** (hooks only): CI posts the app hook (`:latest`) once (a second post only adds a job to
+  the shared queue), and fails after 15 minutes. It cannot see the queue or the log.
 
 `GET /api/health` reports `version` (the commit) and one probe per dependency: `db`, `dolt`, `bd`.
 Each is `up`, `down` or `unconfigured`; any `down` makes it a 503.
