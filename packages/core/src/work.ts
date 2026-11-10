@@ -1,10 +1,9 @@
 /**
- * Work items as Mastermind sees them. The source is beads (bd): one bead is one
- * unit of work. These types are the camelCase domain view; `@mastermind/beads`
- * maps the bd wire format to them.
+ * Work items as Mastermind sees them: one bead is one unit of work. The work
+ * store (@mastermind/work, NATS JetStream) keeps them in this shape.
  */
 
-/** Statuses that bd ships with. */
+/** Statuses of a work item. */
 export const BEAD_STATUSES = [
 	"open",
 	"in_progress",

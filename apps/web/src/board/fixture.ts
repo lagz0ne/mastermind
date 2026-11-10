@@ -56,7 +56,7 @@ export function fixtureBeads(now: Date = new Date()): Bead[] {
 		{
 			...base,
 			id: "mm-210.3",
-			title: "packages/beads: typed bd-serve client, Dolt reader, journal tail",
+			title: "packages/work: work store on JetStream, journal tail",
 			status: "in_progress",
 			priority: 1,
 			assignee: "rocky/paseo-1d648e6",
@@ -67,7 +67,7 @@ export function fixtureBeads(now: Date = new Date()): Bead[] {
 		{
 			...base,
 			id: "mm-210.6",
-			title: "deploy: Dolt sql-server + bd serve next to the app",
+			title: "deploy: NATS with JetStream next to the app",
 			status: "hooked",
 			priority: 1,
 			assignee: "rocky/paseo-975f6fc",

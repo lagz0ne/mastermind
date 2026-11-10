@@ -156,7 +156,7 @@ export function foldTimeline(
  * onto `{ ...fold, entries: timeline }`.
  */
 export type BeadDetail = {
-	/** The bead now (bd serve), with its live lease. */
+	/** The bead now, with its live lease. */
 	bead: Bead;
 	timeline: TimelineEntry[];
 	/** Journal seq the timeline is at least as new as. */

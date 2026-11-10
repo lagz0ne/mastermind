@@ -72,13 +72,6 @@
         "@nats-io/nkeys": "^2.0.3",
       },
     },
-    "packages/beads": {
-      "name": "@mastermind/beads",
-      "version": "0.0.0",
-      "dependencies": {
-        "@mastermind/core": "workspace:*",
-      },
-    },
     "packages/bus": {
       "name": "@mastermind/bus",
       "version": "0.0.0",
@@ -146,8 +139,6 @@
     "@floating-ui/utils": ["@floating-ui/utils@0.2.12", "", {}, "sha512-HpCo8tmWzLVad5s2d19EhAz5zqrrQ6s69qd6moPMQvkOuSwDT1YgRfWSVuc4ennqrgv3OHppiOGMQ7oC13yIww=="],
 
     "@mastermind/api": ["@mastermind/api@workspace:apps/api"],
-
-    "@mastermind/beads": ["@mastermind/beads@workspace:packages/beads"],
 
     "@mastermind/bus": ["@mastermind/bus@workspace:packages/bus"],
 

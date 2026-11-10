@@ -1,6 +1,5 @@
 /**
- * The work store on NATS JetStream. It does what beads (bd serve + Dolt) did
- * for Mastermind: items, claims, leases, an ordered journal and timelines.
+ * The work store on NATS JetStream. It holds Mastermind's work: items, claims, leases, an ordered journal and timelines.
  *
  *   stream MM_WORK, subjects mm.work.<id>, file storage
  *     one message = one mutation of one item: {op, at, actor, bead, comment?}
@@ -14,8 +13,7 @@
  *   board: an in-memory projection, loaded last-per-subject and then kept live
  *   by the same ordered consumer (push, no polling).
  *
- * Not here yet: dependencies (`blocked` is always false), bd CLI access, Dolt
- * history. Closed items leave the board (and memory) `doneForMs` after they
+ * Not here yet: dependencies (`blocked` is always false). Closed items leave the board (and memory) `doneForMs` after they
  * close; they stay in the stream, so get, timeline and activity still read them.
  */
 import { Store, type StoreWatch } from "@mastermind/bus";
