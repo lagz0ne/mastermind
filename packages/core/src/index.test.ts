@@ -1,10 +1,8 @@
 import { expect, test } from "bun:test";
-import { greet } from "./index.ts";
+import { isHealthy } from "./index.ts";
 
-test("greet", () => {
-	expect(greet("world")).toBe("Hello, world!");
-});
-
-test("greet handles empty name", () => {
-	expect(greet("")).toBe("Hello, !");
+test("only a down database makes the service unhealthy", () => {
+	expect(isHealthy("up")).toBe(true);
+	expect(isHealthy("unconfigured")).toBe(true);
+	expect(isHealthy("down")).toBe(false);
 });

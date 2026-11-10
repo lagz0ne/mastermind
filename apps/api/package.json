@@ -6,10 +6,12 @@
 	"scripts": {
 		"dev": "bun --watch src/index.ts",
 		"start": "bun src/index.ts",
-		"build": "bun build src/index.ts --target bun --outdir dist",
-		"typecheck": "tsc --noEmit"
+		"build": "bun build src/index.ts --target bun --outdir dist --public-path / --production",
+		"typecheck": "tsc --noEmit",
+		"test": "bun test"
 	},
 	"dependencies": {
-		"@mastermind/core": "workspace:*"
+		"@mastermind/core": "workspace:*",
+		"@mastermind/web": "workspace:*"
 	}
 }

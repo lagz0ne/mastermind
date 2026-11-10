@@ -70,7 +70,7 @@ Bun workspaces + Turborepo + Biome. Bun lives at `~/.bun/bin`.
 ```bash
 bun install             # install
 bun run check           # full gate: biome ci + typecheck + test + build (what CI runs)
-bun run dev             # all dev servers
+bun run dev             # UI + API with hot reload on http://localhost:3000
 bun test                # inside a package
 scripts/status.sh        # who is doing what: claims, merge slot, dirty files, agents, CI
 scripts/spawn.sh <bead>  # put a Paseo agent on a bead (same checkout)
@@ -79,8 +79,9 @@ scripts/ship.sh -m "<msg>" -i <bead> -- <paths>   # the only way to commit/push
 
 ## Architecture Overview
 
-- `apps/*`: deployables. `apps/api` is a Bun.serve HTTP server, shipped as `ghcr.io/lagz0ne/mastermind-api`.
-- `packages/*`: internal libraries named `@mastermind/<name>`, exporting TS source (no build step).
+- `apps/api`: the deployable. A Bun.serve server that serves the UI at `/*` and JSON at `/api/*`, with Postgres via `Bun.sql` (`DATABASE_URL`). Shipped as `ghcr.io/lagz0ne/mastermind`.
+- `apps/web`: the React UI. Not deployed on its own: `apps/api` imports `@mastermind/web/index.html` and Bun bundles it (HMR in dev, hashed assets in the image).
+- `packages/*`: internal libraries named `@mastermind/<name>`, exporting TS source (no build step). `core` holds types shared by api and web.
 - `.github/workflows/ci.yml`: on every push to main: check → publish image → deploy.
 
 ## Conventions & Patterns

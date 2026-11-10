@@ -3,7 +3,7 @@
 		"check": { "command": "bun run check" },
 		"test": { "command": "bun run test" },
 		"status": { "command": "scripts/status.sh" },
-		"api": {
+		"app": {
 			"type": "service",
 			"command": "PORT=$PASEO_PORT bun --watch apps/api/src/index.ts"
 		}

@@ -30,7 +30,7 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run check
 
-  publish-api:
+  publish:
     needs: check
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -49,7 +49,7 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ghcr.io/${{ github.repository }}-api
+          images: ghcr.io/${{ github.repository }}
           tags: |
             type=sha,format=long
             type=raw,value=latest
@@ -58,15 +58,16 @@ jobs:
           context: .
           file: apps/api/Dockerfile
           push: true
+          build-args: GIT_SHA=${{ github.sha }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # Wire a real target here (Fly, Railway, k8s, ...). Runs only on green main.
-  deploy-api:
-    needs: publish-api
+  # Placeholder until the Dokploy hook is wired (bead mm-ub0).
+  deploy:
+    needs: publish
     runs-on: ubuntu-latest
     environment: production
     steps:
-      - run: echo "deploy ghcr.io/${{ github.repository }}-api:sha-${{ github.sha }}"
+      - run: echo "deploy ghcr.io/${{ github.repository }}:sha-${{ github.sha }}"
