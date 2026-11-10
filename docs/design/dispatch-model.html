@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mastermind: dispatch model, review of 2026-11-10</title>
+<style>
+:root {
+	--bg: #ffffff; --fg: #111111; --muted: #6b6b6b; --line: #111111; --soft: #e6e6e6;
+	--panel: #f6f6f6; --accent: #d0021b; --ok: #0a7d33; --code: #f1f1f1;
+}
+@media (prefers-color-scheme: dark) {
+	:root {
+		--bg: #111111; --fg: #f2f2f2; --muted: #9a9a9a; --line: #f2f2f2; --soft: #333333;
+		--panel: #1b1b1b; --accent: #ff5a6a; --ok: #4fd67f; --code: #1e1e1e;
+	}
+}
+* { box-sizing: border-box; }
+html { font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+body { margin: 0; background: var(--bg); color: var(--fg); }
+main { max-width: 1040px; margin: 0 auto; padding: 20px 20px 64px; }
+header { border-bottom: 3px solid var(--line); padding-bottom: 10px; margin-bottom: 8px; }
+h1 { font-size: 22px; line-height: 1.2; margin: 0 0 4px; letter-spacing: -0.01em; }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; margin: 34px 0 10px;
+	padding-top: 8px; border-top: 1px solid var(--line); display: flex; gap: 10px; }
+h2 .n { color: var(--accent); font-variant-numeric: tabular-nums; }
+h3 { font-size: 15px; margin: 18px 0 6px; }
+p { margin: 6px 0; max-width: 72ch; }
+.meta { color: var(--muted); font-size: 13px; }
+ul, ol { margin: 6px 0; padding-left: 20px; max-width: 72ch; }
+li { margin: 3px 0; }
+code, pre { font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+code { background: var(--code); padding: 1px 4px; }
+pre { background: var(--code); padding: 12px 14px; overflow-x: auto; margin: 8px 0; border-left: 3px solid var(--line); }
+pre code { background: none; padding: 0; }
+.c { color: var(--muted); }
+table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 14px; }
+th, td { text-align: left; vertical-align: top; padding: 7px 10px 7px 0; border-bottom: 1px solid var(--soft); }
+th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); border-bottom: 1px solid var(--line); }
+.tag { display: inline-block; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+	padding: 1px 6px; border: 1.5px solid currentColor; white-space: nowrap; }
+.tag.ok { color: var(--ok); }
+.tag.miss { color: var(--accent); }
+.tag.wait { color: var(--muted); }
+
+/* Diagram 1: flow of boxes */
+.flow { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0; margin: 12px 0 4px; }
+.node { border: 1.5px solid var(--line); padding: 10px; position: relative; margin-right: 26px; background: var(--bg); min-height: 148px; }
+.node:last-child { margin-right: 0; }
+.node:not(:last-child)::after { content: "→"; position: absolute; right: -23px; top: 50%; transform: translateY(-50%);
+	font-size: 20px; font-weight: 700; }
+.node .where { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.node .name { font-weight: 700; font-size: 15px; margin: 2px 0 6px; line-height: 1.2; }
+.node ul { padding-left: 15px; margin: 0; font-size: 13px; }
+.node.new { border-color: var(--accent); border-width: 2.5px; }
+.node .tag { margin-top: 6px; }
+.back { border: 1.5px dashed var(--line); padding: 8px 10px; margin: 10px 0; font-size: 13.5px; display: flex; gap: 10px; align-items: baseline; }
+.back b { white-space: nowrap; }
+.stores { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 10px; }
+.store { background: var(--panel); padding: 8px 10px; font-size: 13px; }
+.store b { display: block; font-size: 13.5px; }
+.legend { font-size: 12.5px; color: var(--muted); display: flex; gap: 16px; flex-wrap: wrap; margin-top: 8px; }
+.legend i { display: inline-block; width: 22px; height: 12px; border: 1.5px solid var(--line); vertical-align: -2px; margin-right: 5px; }
+.legend i.new { border: 2.5px solid var(--accent); }
+.legend i.dash { border-style: dashed; }
+
+/* Diagram 2 and 3: sequence */
+.seq { position: relative; margin: 10px 0 6px; border: 1px solid var(--soft); padding: 0 0 10px; }
+.seq .actors, .seq .step { display: grid; grid-template-columns: repeat(10, minmax(0, 1fr)); }
+.seq .actors { position: sticky; top: 0; background: var(--bg); border-bottom: 1.5px solid var(--line); z-index: 2; }
+.seq .actors div { grid-column: span 2; text-align: center; font-weight: 700; font-size: 13px; padding: 8px 2px; line-height: 1.2; }
+.seq .actors small { display: block; font-weight: 400; color: var(--muted); font-size: 11px; }
+.seq .lines { position: absolute; inset: 0; pointer-events: none; z-index: 0; }
+.seq .lines span { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px dashed var(--muted); opacity: 0.6; }
+.seq .step { position: relative; z-index: 1; padding-top: 12px; }
+.seq .msg { border-bottom: 2px solid var(--line); text-align: center; font-size: 12.5px; padding: 0 12px 3px; position: relative; line-height: 1.25; }
+.seq .msg span { background: var(--bg); padding: 0 4px; }
+.seq .msg::after { content: ""; position: absolute; bottom: -6px; border: 5px solid transparent; }
+.seq .msg.r::after { right: -1px; border-left-color: var(--line); border-right-width: 0; }
+.seq .msg.l::after { left: -1px; border-right-color: var(--line); border-left-width: 0; }
+.seq .msg.new { border-bottom-color: var(--accent); color: var(--accent); font-weight: 700; }
+.seq .msg.new.r::after { border-left-color: var(--accent); }
+.seq .msg.new.l::after { border-right-color: var(--accent); }
+.seq .msg.back { border-bottom-style: dashed; }
+.seq .note { grid-column: 1 / -1; text-align: center; font-size: 12px; color: var(--muted); padding-top: 2px; }
+.seq .self { font-size: 12.5px; text-align: center; border: 1.5px solid var(--line); background: var(--bg); padding: 3px 4px; line-height: 1.25; }
+.seq .self.new { border-color: var(--accent); color: var(--accent); font-weight: 700; }
+.cols { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px; }
+.rank { counter-reset: r; list-style: none; padding: 0; }
+.rank li { counter-increment: r; padding: 8px 0 8px 40px; border-bottom: 1px solid var(--soft); position: relative; }
+.rank li::before { content: counter(r); position: absolute; left: 0; top: 4px; font-size: 24px; font-weight: 700; color: var(--accent); }
+.ask { border: 2.5px solid var(--line); padding: 12px 14px; margin: 10px 0; }
+.ask h3 { margin-top: 0; }
+@media (max-width: 760px) {
+	.flow { grid-template-columns: 1fr; }
+	.node { margin: 0 0 26px; min-height: 0; }
+	.node:not(:last-child)::after { content: "↓"; right: 50%; top: auto; bottom: -25px; transform: translateX(50%); }
+	.stores, .cols { grid-template-columns: 1fr; }
+	.seq .actors div { font-size: 11px; }
+	.seq .msg, .seq .self { font-size: 11px; padding-left: 4px; padding-right: 4px; }
+}
+</style>
+</head>
+<body>
+<main>
+
+<header>
+	<h1>Mastermind: dispatch model</h1>
+	<div class="meta">Review document, 2026-11-10. Source: your message about the kanban, the environment definition, NATS delivery and adapter routing. Red marks a part that does not exist yet.</div>
+</header>
+
+<h2><span class="n">1</span> The model in one picture</h2>
+<p>A human steers work on the board. Mastermind decides the target. NATS carries the dispatch. The adapter of each user decides where the work runs on that user's Paseo.</p>
+
+<div class="flow">
+	<div class="node">
+		<div class="where">Browser</div>
+		<div class="name">Human on the kanban</div>
+		<ul><li>create work</li><li>move to a queue</li><li>add a note</li><li>reopen, close</li></ul>
+		<span class="tag ok">exists</span>
+	</div>
+	<div class="node new">
+		<div class="where">Mastermind</div>
+		<div class="name">Bead + environment</div>
+		<ul><li>one bead = one item</li><li>label <code>env:&lt;name&gt;</code></li><li>definition holds repo, requires, setup</li></ul>
+		<span class="tag miss">new: mm-210.30</span>
+	</div>
+	<div class="node new">
+		<div class="where">Mastermind</div>
+		<div class="name">Router + dispatcher</div>
+		<ul><li>rule: bead → queue</li><li>rule: bead → address</li><li>claim in beads, lease</li></ul>
+		<span class="tag ok">queue exists</span> <span class="tag miss">address: mm-210.32</span>
+	</div>
+	<div class="node new">
+		<div class="where">User machine</div>
+		<div class="name">Adapter (runner)</div>
+		<ul><li>takes the dispatch from NATS</li><li>local rules pick a Paseo target</li><li>runs setup, then check</li></ul>
+		<span class="tag ok">adapter exists</span> <span class="tag miss">rules: mm-210.31</span>
+	</div>
+	<div class="node">
+		<div class="where">User machine</div>
+		<div class="name">Paseo</div>
+		<ul><li>host, directory</li><li>provider, mode</li><li>one agent per dispatch</li></ul>
+		<span class="tag ok">exists</span>
+	</div>
+</div>
+<div class="back"><b>← Flow back</b><span>The adapter sends heartbeat, reports and the result on NATS. Mastermind writes them to the bead. The board and the bead timeline show them live.</span><span class="tag ok">exists</span></div>
+<div class="stores">
+	<div class="store"><b>Beads on Dolt</b>Work items, claims, leases, event journal.</div>
+	<div class="store"><b>NATS + JetStream KV</b>Transport. Also accounts, routing, environments.</div>
+	<div class="store"><b>Victoria</b>Logs, traces, metrics of api and web.</div>
+</div>
+<div class="legend"><span><i></i>exists</span><span><i class="new"></i>has a missing part</span><span><i class="dash"></i>return path</span></div>
+
+<h2><span class="n">2</span> Your statements against the code</h2>
+<table>
+	<tr><th>Your statement</th><th>State</th><th>Detail</th></tr>
+	<tr><td>Kanban board; the human steers on it</td><td><span class="tag ok">exists</span></td><td>Board, new work, queue move, notes, reopen, close, live timeline.</td></tr>
+	<tr><td>Each item runs in some Paseo</td><td><span class="tag ok">exists</span></td><td>The runner starts one Paseo agent for each dispatch.</td></tr>
+	<tr><td>The env definition lives somewhere, with setup</td><td><span class="tag miss">missing</span></td><td>Env is read from labels on each bead (<code>repo:</code>, <code>ref:</code>, <code>req:</code>). Setup is never filled.</td></tr>
+	<tr><td>Dispatcher broadcasts on NATS</td><td><span class="tag ok">exists</span></td><td>"Ready" is a broadcast to a queue. Adapters ask for the work by request/reply. The first claim wins.</td></tr>
+	<tr><td>Dispatcher sends request/reply to one address</td><td><span class="tag miss">missing</span></td><td>There is no way to send work to one account or one runner.</td></tr>
+	<tr><td>Adapter routes to Paseo by rules from the instruction and from the user</td><td><span class="tag miss">missing</span></td><td>The runner has one global setting: one provider, one mode, one directory.</td></tr>
+</table>
+
+<h2><span class="n">3</span> Delivery: two modes</h2>
+<div class="cols">
+<div>
+	<h3>A. Broadcast to a queue <span class="tag ok">exists</span></h3>
+	<p>All adapters on the queue hear "ready". Each one asks for work. Mastermind gives the bead to one.</p>
+	<div class="seq">
+		<div class="lines"><span style="left:10%"></span><span style="left:30%"></span><span style="left:50%"></span><span style="left:70%"></span><span style="left:90%"></span></div>
+		<div class="actors"><div>Human</div><div>Mastermind</div><div>NATS</div><div>Adapter<small>each member</small></div><div>Paseo</div></div>
+		<div class="step"><div class="msg r" style="grid-column:2/4"><span>create bead</span></div></div>
+		<div class="step"><div class="self" style="grid-column:3/5">route → queue</div></div>
+		<div class="step"><div class="msg r" style="grid-column:4/8"><span>publish <code>ready</code> (to all)</span></div></div>
+		<div class="step"><div class="msg l" style="grid-column:4/8"><span>request <code>next</code></span></div></div>
+		<div class="step"><div class="self" style="grid-column:3/5">claim, lease 5 min</div></div>
+		<div class="step"><div class="msg r" style="grid-column:4/8"><span>reply: dispatch</span></div></div>
+		<div class="step"><div class="msg r" style="grid-column:8/10"><span>paseo run</span></div></div>
+		<div class="step"><div class="msg l back" style="grid-column:4/8"><span>heartbeat, report, complete</span></div></div>
+		<div class="step"><div class="msg l back" style="grid-column:2/4"><span>live timeline</span></div></div>
+	</div>
+</div>
+<div>
+	<h3>B. Request/reply to one address <span class="tag miss">new: mm-210.32</span></h3>
+	<p>The rule names an address: <code>bob</code> or <code>bob/laptop</code>. Mastermind offers the work to that adapter only.</p>
+	<div class="seq">
+		<div class="lines"><span style="left:10%"></span><span style="left:30%"></span><span style="left:50%"></span><span style="left:70%"></span><span style="left:90%"></span></div>
+		<div class="actors"><div>Human</div><div>Mastermind</div><div>NATS</div><div>Adapter<small>bob/laptop</small></div><div>Paseo</div></div>
+		<div class="step"><div class="msg r" style="grid-column:2/4"><span>create bead</span></div></div>
+		<div class="step"><div class="self new" style="grid-column:3/5">route → address</div></div>
+		<div class="step"><div class="msg r new" style="grid-column:4/8"><span>request <code>offer</code> (to one)</span></div></div>
+		<div class="step"><div class="msg l new" style="grid-column:4/8"><span>reply: accept, or decline + reason</span></div></div>
+		<div class="step"><div class="self" style="grid-column:3/5">on accept: claim, lease</div></div>
+		<div class="step"><div class="msg r" style="grid-column:4/8"><span>dispatch</span></div></div>
+		<div class="step"><div class="msg r" style="grid-column:8/10"><span>paseo run</span></div></div>
+		<div class="step"><div class="msg l back" style="grid-column:4/8"><span>heartbeat, report, complete</span></div></div>
+		<div class="step"><div class="msg l back" style="grid-column:2/4"><span>live timeline</span></div></div>
+	</div>
+</div>
+</div>
+<table>
+	<tr><th></th><th>Broadcast</th><th>Address</th></tr>
+	<tr><td>Rule target</td><td><code>{ queue: "backend" }</code></td><td><code>{ to: "bob" }</code> or <code>{ to: "bob/laptop" }</code></td></tr>
+	<tr><td>Who can take it</td><td>Each member account of the queue</td><td>Only that account, or only that runner</td></tr>
+	<tr><td>If nobody takes it</td><td>The bead waits in Ready</td><td>The bead waits and shows each decline reason. No fall back to broadcast, unless the rule says <code>fallback: &lt;queue&gt;</code>.</td></tr>
+</table>
+
+<h2><span class="n">4</span> Environment: central definition, local binding</h2>
+<div class="cols">
+<div>
+	<h3>In Mastermind <span class="tag miss">new: mm-210.30</span></h3>
+	<p>What the environment is. Edited on a new page, <code>/environments</code>. A bead points to it with one label.</p>
+<pre><code>type Environment = {
+  name: string;       <span class="c">// "mastermind"</span>
+  repo: string;       <span class="c">// git URL</span>
+  ref: string;        <span class="c">// default branch</span>
+  requires: string[]; <span class="c">// ["bun>=1.4", "docker"]</span>
+  setup: string[];    <span class="c">// prepare a checkout</span>
+  check: string[];    <span class="c">// prove readiness</span>
+  secrets: string[];  <span class="c">// names only</span>
+  agent?: { provider?: string; mode?: string };
+  instructions?: string; <span class="c">// added to each prompt</span>
+};</code></pre>
+</div>
+<div>
+	<h3>On the user machine <span class="tag miss">new: mm-210.31</span></h3>
+	<p>Where the environment is on that machine, and what Mastermind can do there. The user owns this file.</p>
+<pre><code>"environments": {
+  "mastermind": {
+    "dir": "~/dev/mastermind",
+    "allowSetup": true
+  }
+}</code></pre>
+	<ul>
+		<li>Setup runs one time for each checkout and each setup version, and only if the binding allows it.</li>
+		<li>Check runs before each start. A failed check gives the bead back, with the output.</li>
+		<li>An environment with no binding is declined with a clear reason.</li>
+	</ul>
+</div>
+</div>
+
+<h2><span class="n">5</span> Adapter routing: the user controls the Paseo</h2>
+<div class="cols">
+<div>
+<pre><code>{
+  "targets": {
+    "laptop":  { "provider": "claude/claude-opus-5-5",
+                 "mode": "bypassPermissions" },
+    "gpu-box": { "paseoHost": "ssh://gpu",
+                 "provider": "codex" }
+  },
+  "rules": [  <span class="c">// first match wins</span>
+    { "match": { "env": "mastermind", "stage": "work" },
+      "target": "laptop" },
+    { "match": { "labels": ["req:gpu"] },
+      "target": "gpu-box" },
+    { "match": {},
+      "decline": "no rule for this work" }
+  ]
+}</code></pre>
+</div>
+<div>
+	<h3>Order of authority</h3>
+	<ol class="rank">
+		<li><b>Hard requirements of the instruction.</b> Tools, environment, secrets. The adapter meets them or declines the work.</li>
+		<li><b>The user's rule.</b> It selects the target: Paseo host, provider, mode.</li>
+		<li><b>Preferences of the instruction.</b> They apply only where the user's rule leaves a field open.</li>
+		<li><b>No rule matches.</b> The adapter declines and gives the reason.</li>
+	</ol>
+	<p>The first report of each dispatch names the target. The bead timeline shows where the work runs.</p>
+</div>
+</div>
+
+<h2><span class="n">6</span> Work in progress</h2>
+<table>
+	<tr><th>Bead</th><th>Work</th><th>State</th></tr>
+	<tr><td><code>mm-210.30</code></td><td>Environments: definition, page, label, dispatcher resolves the name</td><td><span class="tag ok">agent 333abae</span></td></tr>
+	<tr><td><code>mm-210.31</code></td><td>Adapter routing: targets, bindings, rules, dry run</td><td><span class="tag ok">agent 0ad4191</span></td></tr>
+	<tr><td><code>mm-210.32</code></td><td>Delivery to one address by request/reply</td><td><span class="tag wait">waits for .30 and .31</span></td></tr>
+	<tr><td><code>mm-210.28</code></td><td>Login by single-use code</td><td><span class="tag ok">live</span> <span class="tag wait">waits for your code</span></td></tr>
+	<tr><td><code>mm-210.22</code></td><td>Deploy can report success without effect</td><td><span class="tag ok">agent 05ee47c</span></td></tr>
+	<tr><td><code>mm-210.27</code></td><td>Milestone: one real task from a new account to done in production</td><td><span class="tag wait">waits for login</span></td></tr>
+</table>
+
+<h2><span class="n">7</span> Your decisions</h2>
+<div class="ask">
+	<h3>A. Central definition, local binding</h3>
+	<p>Mastermind holds what an environment is. The adapter of each user holds where it is on their machine, and if setup commands can run there. <b>Reply "A ok", or say what must change.</b></p>
+</div>
+<div class="ask">
+	<h3>B. No silent fall back for a direct offer</h3>
+	<p>If the addressed runner declines or is offline, the bead waits and shows the reasons. It goes to a queue only if the rule has <code>fallback</code>. <b>Reply "B ok", or say what must change.</b></p>
+</div>
+<div class="ask">
+	<h3>C. Login</h3>
+	<p>Open <code>/login</code> on the production site. Send the code and the account name you want in the chat.</p>
+</div>
+
+</main>
+</body>
+</html>
