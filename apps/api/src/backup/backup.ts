@@ -28,12 +28,9 @@ export type Manifest = {
 	streams: ManifestStream[];
 };
 
-/** 2026-11-10T12:00:00.123Z → 2026-11-10T12-00-00Z */
+/** 2026-11-10T12:00:00.123Z → 2026-11-10T12-00-00-123Z: sorts by time, no colon, unique per ms */
 export const backupId = (at: Date) =>
-	at
-		.toISOString()
-		.replace(/\.\d+Z$/, "Z")
-		.replaceAll(":", "-");
+	at.toISOString().replaceAll(":", "-").replace(".", "-");
 
 /** Snapshot every stream to `<id>/`, then write the manifest, then prune to `keep` backups. */
 export async function backupAll(

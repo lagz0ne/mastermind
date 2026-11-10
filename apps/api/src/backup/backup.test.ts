@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Store } from "@mastermind/bus";
 import { type NatsConnection, wsconnect } from "@nats-io/nats-core";
+import { health, noDeps } from "../app.ts";
 import { type NatsServer, startNats } from "../dispatch/nats-server.ts";
 import {
 	backupAll,
@@ -17,7 +18,7 @@ import {
 	restoreBackup,
 } from "./backup.ts";
 import { accountUsage, streamInfo } from "./jetstream.ts";
-import { startBackups, toStorageStatus } from "./start.ts";
+import { jetstreamHealth, startBackups, toStorageStatus } from "./start.ts";
 import { openTarget, type Target } from "./target.ts";
 
 const bin = process.env.NATS_SERVER ?? Bun.which("nats-server");
@@ -56,7 +57,7 @@ describe("file target and prune", () => {
 
 	test("backup ids sort by time and have no colon", () => {
 		expect(backupId(new Date("2026-11-10T09:05:07.123Z"))).toBe(
-			"2026-11-10T09-05-07Z",
+			"2026-11-10T09-05-07-123Z",
 		);
 	});
 
@@ -273,5 +274,28 @@ describe.skipIf(!bin)("timer and CLI", () => {
 		expect(check.out).toContain("stream 1 messages");
 		expect((await run(empty.url, "marker", "remove")).code).toBe(0);
 		expect((await run(empty.url, "marker", "check")).code).toBe(1);
+	});
+});
+
+describe("health", () => {
+	test("jetstream is a warning: storage down and backup unconfigured keep health 200", async () => {
+		const never = new Promise<NatsConnection>(() => {});
+		const js = await jetstreamHealth(never, null, 10);
+		expect(js).toEqual({ storage: "down", backup: "unconfigured" });
+		const res = await health(
+			{
+				...noDeps,
+				jetstream: async () => ({
+					storage: { used: 9, limit: 10, percent: 90, warn: true },
+					backup: { last: null, error: "disk full" },
+				}),
+			},
+			"abc",
+		);
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as {
+			jetstream?: { storage: { warn: boolean } };
+		};
+		expect(body.jetstream?.storage.warn).toBe(true);
 	});
 });

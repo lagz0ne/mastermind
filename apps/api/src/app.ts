@@ -1,5 +1,6 @@
 import { type Health, isHealthy, type Probe } from "@mastermind/core";
 import type { SQL } from "bun";
+import type { JetStreamHealth } from "./backup/start.ts";
 import { checkBd } from "./bd-serve.ts";
 import { checkSql } from "./dolt.ts";
 
@@ -14,6 +15,8 @@ export type Deps = {
 	nats: (() => Promise<Probe>) | null;
 	/** Probe of the NATS work store (WORK_STORE=nats); absent with beads. */
 	work?: (() => Promise<Probe>) | null;
+	/** JetStream storage use (warn above 80%) and the last backup; absent without auth's NATS. */
+	jetstream?: (() => Promise<JetStreamHealth>) | null;
 };
 
 export const noDeps: Deps = { db: null, dolt: null, bdUrl: null, nats: null };
@@ -24,15 +27,17 @@ async function probeNats(probe: Deps["nats"]): Promise<Probe> {
 }
 
 export async function health(deps: Deps, version: string): Promise<Response> {
-	const [db, dolt, bd, nats, work] = await Promise.all([
+	const [db, dolt, bd, nats, work, jetstream] = await Promise.all([
 		checkSql(deps.db),
 		checkSql(deps.dolt),
 		checkBd(deps.bdUrl),
 		probeNats(deps.nats),
 		deps.work ? probeNats(deps.work) : undefined,
+		deps.jetstream?.().catch(() => undefined),
 	]);
 	// `work` (the NATS work store) shows only when WORK_STORE=nats.
-	const body: Health & { work?: Probe } = {
+	// `jetstream` is a warning: it never makes health a 503.
+	const body: Health & { work?: Probe; jetstream?: JetStreamHealth } = {
 		ok: isHealthy(db, dolt, bd, nats, ...(work ? [work] : [])),
 		version,
 		db,
@@ -40,6 +45,7 @@ export async function health(deps: Deps, version: string): Promise<Response> {
 		bd,
 		nats,
 		...(work ? { work } : {}),
+		...(jetstream ? { jetstream } : {}),
 	};
 	return Response.json(body, { status: body.ok ? 200 : 503 });
 }

@@ -8,6 +8,7 @@ import { type Deps, health } from "./app.ts";
 import type { Auth } from "./auth/service.ts";
 import { requireAccountFromEnv } from "./auth/session.ts";
 import { startAuthInBackground } from "./auth/start.ts";
+import { backupsFromEnv, jetstreamHealth } from "./backup/start.ts";
 import {
 	bdEnv,
 	bootstrap,
@@ -242,6 +243,11 @@ const environmentsApi = environmentRoutes({
 	onError: (error) => console.error(`environments: ${error}`),
 });
 
+// JetStream backups (BACKUP_URL) and storage use in health, on auth's APP connection.
+const appNats = auth ? auth.ready.then((service) => service.app) : null;
+const backups = appNats ? backupsFromEnv(env, appNats) : null;
+deps.jetstream = appNats ? () => jetstreamHealth(appNats, backups) : null;
+
 // Work from the UI: /api/beads (create, detail with timeline, notes, reopen, close) and /api/activity.
 const beads = beadsRoutes(
 	natsWork
@@ -287,6 +293,7 @@ const server = Bun.serve({
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
 	process.on(signal, async () => {
 		if (backupTimer) clearInterval(backupTimer);
+		backups?.stop();
 		await dispatch?.stop();
 		await natsWork?.stop();
 		await routing?.stop();

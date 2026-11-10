@@ -86,4 +86,18 @@ describe.skipIf(!bin)("nats.conf", () => {
 		const jsz = (await r.json()) as { config?: { store_dir?: string } };
 		expect(jsz.config?.store_dir).toStartWith(join(dir, "js"));
 	});
+
+	test("JetStream: fsync on every write; limits server 20G, account APP 10G (health warns at 80%)", async () => {
+		const r = await fetch(
+			`http://127.0.0.1:${base + 1}/jsz?accounts=true&config=true`,
+		);
+		const jsz = (await r.json()) as {
+			config?: { max_storage?: number; sync_always?: boolean };
+			account_details?: { name: string; reserved_storage: number }[];
+		};
+		expect(jsz.config?.max_storage).toBe(20e9);
+		expect(jsz.config?.sync_always).toBe(true);
+		const app = jsz.account_details?.find((a) => a.name === "APP");
+		expect(app?.reserved_storage).toBe(10e9);
+	});
 });

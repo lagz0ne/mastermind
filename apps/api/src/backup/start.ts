@@ -126,3 +126,32 @@ export function backupsFromEnv(
 		firstDelayMs: num(env.BACKUP_FIRST_DELAY_MS),
 	});
 }
+
+/** What /api/health shows about JetStream. Warnings only: they never turn health into a 503. */
+export type JetStreamHealth = {
+	/** Storage use of the account; "down" when it cannot be read in time. */
+	storage: StorageStatus | "down";
+	/** The last backup; "unconfigured" without BACKUP_URL. */
+	backup: { last: string | null; error: string | null } | "unconfigured";
+};
+
+export async function jetstreamHealth(
+	connection: Promise<NatsConnection>,
+	backups: Backups | null,
+	timeoutMs = 2_000,
+): Promise<JetStreamHealth> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const storage = await Promise.race([
+		connection.then(storageStatus),
+		new Promise<never>((_, reject) => {
+			timer = setTimeout(() => reject(new Error("timeout")), timeoutMs);
+		}),
+	])
+		.catch(() => "down" as const)
+		.finally(() => clearTimeout(timer));
+	const s = backups?.status();
+	return {
+		storage,
+		backup: s ? { last: s.last?.id ?? null, error: s.error } : "unconfigured",
+	};
+}
