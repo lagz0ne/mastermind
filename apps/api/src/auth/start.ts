@@ -1,6 +1,8 @@
 import { connect, Store } from "@mastermind/bus";
 import type { NatsConnection } from "@nats-io/nats-core";
 import { fromSeed } from "@nats-io/nkeys";
+import { CONFIG_BUCKET, queuesOf } from "../routing/model.ts";
+import { RoutingStore } from "../routing/store.ts";
 import {
 	internalGrant,
 	internalTokens,
@@ -50,6 +52,7 @@ export async function startAuth(cfg: AuthConfig): Promise<AuthService> {
 	const issuer = fromSeed(new TextEncoder().encode(seed));
 	const internal = internalTokens(seed);
 	let auth: Auth | null = null;
+	let routing: RoutingStore | null = null;
 	const conns: NatsConnection[] = [];
 	const close = () => Promise.allSettled(conns.map((nc) => nc.drain()));
 
@@ -68,7 +71,14 @@ export async function startAuth(cfg: AuthConfig): Promise<AuthService> {
 				const own = internalGrant(internal, token);
 				if (own) return own;
 				const sa = auth ? await auth.authorize(token) : null;
-				return sa ? serviceAccountGrant(sa) : null;
+				if (!sa) return null;
+				// Ready signals only of the queues the account is a member of;
+				// all of them while nobody has saved routing yet.
+				const r = await routing?.read();
+				return serviceAccountGrant(
+					sa,
+					r && r.revision > 0 ? queuesOf(r.doc, sa.account) : undefined,
+				);
 			},
 			onError: (error) => log(`auth: callout error: ${error}`),
 		});
@@ -87,6 +97,7 @@ export async function startAuth(cfg: AuthConfig): Promise<AuthService> {
 		});
 		conns.push(sys);
 
+		routing = new RoutingStore(await Store.open(app, CONFIG_BUCKET));
 		const stores: AuthStores = {
 			accounts: await Store.open(app, BUCKETS.accounts.name),
 			serviceAccounts: await Store.open(app, BUCKETS.serviceAccounts.name),

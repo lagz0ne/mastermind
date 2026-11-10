@@ -27,6 +27,8 @@ import {
 import { RunnerRegistry } from "./people/registry.ts";
 import { peopleRoutes } from "./people/routes.ts";
 import { runnerScript } from "./people/runner-script.ts";
+import { routingRoutes } from "./routing/routes.ts";
+import { bdRoutingBeads, startRoutingInBackground } from "./routing/start.ts";
 
 const env = process.env;
 const version = env.GIT_SHA ?? "dev";
@@ -177,6 +179,15 @@ const dispatch =
 		: null;
 deps.nats = dispatch ? () => dispatch.probe() : null;
 
+// Routing (queues, members, ordered rules) in NATS KV, on the dispatcher's NATS.
+const routing = dispatchNats ? startRoutingInBackground(dispatchNats) : null;
+const routingApi = routingRoutes({
+	store: () => routing?.store() ?? null,
+	beads: deps.bdUrl ? bdRoutingBeads(deps.bdUrl) : null,
+	requireAccount,
+	onError: (error) => console.error(`routing: ${error}`),
+});
+
 const server = Bun.serve({
 	port,
 	development: env.NODE_ENV !== "production",
@@ -186,6 +197,7 @@ const server = Bun.serve({
 			"/api/health": () => health(deps, version),
 			...board.routes,
 			...people,
+			...routingApi,
 			// Empty when auth is off; the cast only keeps the route keys typed.
 			...(auth?.routes ?? ({} as NonNullable<typeof auth>["routes"])),
 			// Browser vitals, errors and route timings, forwarded as mastermind-web.
@@ -201,6 +213,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 	process.on(signal, async () => {
 		if (backupTimer) clearInterval(backupTimer);
 		await dispatch?.stop();
+		await routing?.stop();
 		await auth?.stop();
 		board.stop();
 		await server.stop();
