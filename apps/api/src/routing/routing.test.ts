@@ -275,6 +275,15 @@ describe("routing routes", () => {
 			send("POST", { bead: { type: "bug", priority: 0, labels: [] } }),
 		);
 		expect(await bySketch.json()).toMatchObject({ queue: "web", ruleIndex: 1 });
+		// A draft (unsaved) document decides when it is sent.
+		const draft = await routes["/api/routing/test"].POST(
+			send("POST", {
+				beadId: "mm-7",
+				queues: [{ name: "other", members: [] }],
+				rules: [{ match: {}, queue: "other" }],
+			}),
+		);
+		expect(await draft.json()).toMatchObject({ queue: "other", ruleIndex: 0 });
 		const missing = await routes["/api/routing/test"].POST(
 			send("POST", { beadId: "mm-404" }),
 		);

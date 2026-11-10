@@ -4,7 +4,8 @@
  *   GET  /api/routing            -> {queues, rules, revision}
  *   PUT  /api/routing            {queues, rules, revision} -> {queues, rules, revision}
  *                                409 {error, current} when revision is stale
- *   POST /api/routing/test       {beadId} | {bead: {id?, type?, priority?, labels?}}
+ *   POST /api/routing/test       {beadId} | {bead: {id?, type?, priority?, labels?}},
+ *                                optional draft {queues, rules} (default: saved)
  *                                -> {queue, ruleIndex, why}
  *   POST /api/beads/:id/queue    {queue: string | null} -> {bead}
  *                                manual override: sets the label queue:<name>
@@ -143,6 +144,13 @@ export function routingRoutes(opts: RoutingRoutesOptions) {
 				}
 				if (!bead)
 					return fail(400, "beadId or bead {type, priority, labels} required");
+				// A draft from the editor (unsaved), else the saved document.
+				if (b && Array.isArray(b.rules)) {
+					const draft = validate(b);
+					if (!draft.ok)
+						return fail(400, draft.errors.join("; "), { errors: draft.errors });
+					return json(explain(bead, draft.doc));
+				}
 				const { doc } = await store.read();
 				return json(explain(bead, doc));
 			}),
