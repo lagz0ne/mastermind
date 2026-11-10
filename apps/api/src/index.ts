@@ -49,9 +49,10 @@ const webTelemetry = telemetryFromEnv(env, {
 	serviceVersion: version,
 });
 
-// Where work lives: beads (bd serve + Dolt, the default) or nats (JetStream,
-// @mastermind/work: no bd serve child, no Dolt connection). See docs/deploy.md.
-const workStore = env.WORK_STORE === "nats" ? "nats" : "beads";
+// Where work lives: nats (JetStream, @mastermind/work: no bd serve child, no
+// Dolt connection; the default) or beads (bd serve + Dolt, until it is
+// removed). See docs/deploy.md.
+const workStore = env.WORK_STORE === "beads" ? "beads" : "nats";
 const doltUrl = workStore === "beads" ? env.DOLT_URL : undefined;
 
 const deps: Deps = {
@@ -185,7 +186,9 @@ const natsWork =
 			})
 		: null;
 if (workStore === "nats" && !natsWork)
-	console.error("work: WORK_STORE=nats needs NATS (auth or DISPATCH_NATS_URL)");
+	console.error(
+		"work: the nats work store needs NATS (auth or DISPATCH_NATS_URL); work is off",
+	);
 deps.work = natsWork ? natsWork.probe : null;
 const board = boardRoutes(
 	natsWork ? natsWork.board : deps.dolt ? doltBoardSource(deps.dolt) : null,
