@@ -26,6 +26,7 @@ import {
 	serverUrl,
 	syncBackup,
 } from "./dolt.ts";
+import { downloadRoutes } from "./download/routes.ts";
 import { RunnerRegistry } from "./people/registry.ts";
 import { peopleRoutes } from "./people/routes.ts";
 import { runnerScript } from "./people/runner-script.ts";
@@ -151,6 +152,7 @@ const people = peopleRoutes({
 	mode: auth ? "on" : env.AUTH_DISABLED === "1" ? "off" : "unconfigured",
 	registry: runners,
 	runnerScript: runnerScript(),
+	version,
 	onError: (error) => console.error(`people: ${error}`),
 });
 
@@ -213,6 +215,11 @@ const server = Bun.serve({
 			...people,
 			...routingApi,
 			...beads,
+			// Public: /install.sh and the runner binaries of this commit.
+			...downloadRoutes({
+				version,
+				onError: (error) => console.error(`download: ${error}`),
+			}),
 			// Empty when auth is off; the cast only keeps the route keys typed.
 			...(auth?.routes ?? ({} as NonNullable<typeof auth>["routes"])),
 			// Browser vitals, errors and route timings, forwarded as mastermind-web.
