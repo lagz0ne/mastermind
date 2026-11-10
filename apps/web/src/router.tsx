@@ -13,6 +13,7 @@ import { TooltipProvider } from "./components/ui/tooltip.tsx";
 import { HealthFooter } from "./health-footer.tsx";
 import { LoginPage } from "./login/login-page.tsx";
 import { PeoplePage } from "./people/people-page.tsx";
+import { RoutingPage } from "./routing/routing-page.tsx";
 import { AccountMenu } from "./session/account-menu.tsx";
 import { ensureSession } from "./session/session.ts";
 import { NewWorkButton } from "./work/new-work-dialog.tsx";
@@ -43,6 +44,12 @@ function Layout() {
 							className="ml-3 text-muted-foreground [&.active]:font-semibold [&.active]:text-foreground"
 						>
 							Activity
+						</Link>
+						<Link
+							to="/routing"
+							className="ml-3 text-muted-foreground [&.active]:font-semibold [&.active]:text-foreground"
+						>
+							Routing
 						</Link>
 					</nav>
 					<NewWorkButton />
@@ -113,6 +120,12 @@ const activityRoute = createRoute({
 	component: ActivityPage,
 });
 
+const routingRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/routing",
+	component: RoutingPage,
+});
+
 const loginRoute = createRoute({
 	getParentRoute: () => rootRoute,
 	path: "/login",
@@ -124,6 +137,7 @@ export const routeTree = rootRoute.addChildren([
 	loginRoute,
 	peopleRoute,
 	activityRoute,
+	routingRoute,
 	boardRoute.addChildren([beadRoute]),
 ]);
 
