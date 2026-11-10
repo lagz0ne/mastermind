@@ -1,7 +1,7 @@
 // Smoke check for the public NATS WebSocket (bead mm-210.15). No dependencies:
 // it speaks the raw NATS protocol over Bun's WebSocket.
 //
-//   bun deploy/nats/smoke.ts wss://mastermind.vibea.dev/nats
+//   bun deploy/nats/smoke.ts wss://<public host>/nats   (the app gets this URL as NATS_PUBLIC_WS_URL)
 //
 // Pass: the server sends INFO, and a CONNECT without valid auth is refused.
 
