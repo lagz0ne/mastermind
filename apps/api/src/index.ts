@@ -12,6 +12,7 @@ import {
 	writeWorkspace,
 } from "./bd-serve.ts";
 import { boardRoutes, doltBoardSource } from "./board/routes.ts";
+import { runDispatch } from "./dispatch/start.ts";
 import {
 	ensureBackup,
 	hasBeadsSchema,
@@ -29,6 +30,7 @@ const deps: Deps = {
 	// Configured means probed: until bd serve is up, health reports it down.
 	dolt: env.DOLT_URL ? new SQL(env.DOLT_URL) : null,
 	bdUrl: env.DOLT_URL ? `http://127.0.0.1:${bdPort}` : null,
+	nats: null,
 };
 
 let bd: Supervisor | null = null;
@@ -96,6 +98,24 @@ const board = boardRoutes(deps.dolt ? doltBoardSource(deps.dolt) : null, {
 	onError: (error) => console.error(`board: ${error}`),
 });
 
+// Dispatcher on NATS: off unless DISPATCH_NATS_URL (ws/wss) is set; needs Dolt and bd serve.
+const hub = board.hub;
+const dispatch =
+	env.DISPATCH_NATS_URL && deps.dolt && deps.bdUrl
+		? runDispatch({
+				natsUrl: env.DISPATCH_NATS_URL,
+				user: env.DISPATCH_NATS_USER,
+				pass: env.DISPATCH_NATS_PASSWORD,
+				bdUrl: deps.bdUrl,
+				dolt: deps.dolt,
+				events: hub
+					? (listener) => hub.subscribe(listener).unsubscribe
+					: undefined,
+				onError: (error) => console.error(`dispatch: ${error}`),
+			})
+		: null;
+deps.nats = dispatch ? () => dispatch.probe() : null;
+
 const server = Bun.serve({
 	port: Number(env.PORT ?? 3000),
 	development: env.NODE_ENV !== "production",
@@ -110,6 +130,7 @@ const server = Bun.serve({
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
 	process.on(signal, async () => {
 		if (backupTimer) clearInterval(backupTimer);
+		await dispatch?.stop();
 		board.stop();
 		await server.stop();
 		await bd?.stop();

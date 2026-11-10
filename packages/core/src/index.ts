@@ -11,6 +11,8 @@ export type Health = {
 	dolt: Probe;
 	/** `bd serve` on loopback: the write path for beads. */
 	bd: Probe;
+	/** NATS for the dispatcher; unconfigured while the dispatcher is off. */
+	nats: Probe;
 };
 
 /** Healthy unless something configured is down; unconfigured is fine. */

@@ -24,12 +24,18 @@ test("health without dependencies is ok and reports the version", async () => {
 		db: "unconfigured",
 		dolt: "unconfigured",
 		bd: "unconfigured",
+		nats: "unconfigured",
 	});
 });
 
 test("health with reachable dependencies reports them up", async () => {
 	const res = await health(
-		{ db: working, dolt: working, bdUrl: bdReady.url.origin },
+		{
+			db: working,
+			dolt: working,
+			bdUrl: bdReady.url.origin,
+			nats: async () => "up",
+		},
 		"abc123",
 	);
 	expect(res.status).toBe(200);
@@ -38,6 +44,7 @@ test("health with reachable dependencies reports them up", async () => {
 		db: "up",
 		dolt: "up",
 		bd: "up",
+		nats: "up",
 	});
 });
 
@@ -60,4 +67,13 @@ test("health with bd serve not listening is 503", async () => {
 	);
 	expect(res.status).toBe(503);
 	expect(await res.json()).toMatchObject({ ok: false, bd: "down" });
+});
+
+test("health with the dispatcher's NATS down is 503", async () => {
+	const res = await health(
+		{ ...noDeps, nats: () => Promise.reject(new Error("closed")) },
+		"abc123",
+	);
+	expect(res.status).toBe(503);
+	expect(await res.json()).toMatchObject({ ok: false, nats: "down" });
 });
