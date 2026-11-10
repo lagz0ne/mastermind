@@ -388,7 +388,7 @@ export function EnvironmentsPage() {
 					<div className="flex items-center gap-2 border-foreground border-t-2 border-b py-1.5 text-xs">
 						<span className="font-semibold">Environments</span>
 						<span className="text-muted-foreground">
-							a bead names one with the label env:&lt;name&gt;
+							beads use the label env:&lt;name&gt;
 						</span>
 						<span className="flex-1" />
 						<Button

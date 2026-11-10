@@ -10,6 +10,7 @@ import { ActivityPage } from "./activity/activity-page.tsx";
 import { BeadSheet } from "./board/bead-sheet.tsx";
 import { BoardPage } from "./board/board-page.tsx";
 import { TooltipProvider } from "./components/ui/tooltip.tsx";
+import { EnvironmentsPage } from "./environments/environments-page.tsx";
 import { HealthFooter } from "./health-footer.tsx";
 import { LoginPage } from "./login/login-page.tsx";
 import { PeoplePage } from "./people/people-page.tsx";
@@ -50,6 +51,12 @@ function Layout() {
 							className="ml-3 text-muted-foreground [&.active]:font-semibold [&.active]:text-foreground"
 						>
 							Routing
+						</Link>
+						<Link
+							to="/environments"
+							className="ml-3 text-muted-foreground [&.active]:font-semibold [&.active]:text-foreground"
+						>
+							Environments
 						</Link>
 					</nav>
 					<NewWorkButton />
@@ -126,6 +133,12 @@ const routingRoute = createRoute({
 	component: RoutingPage,
 });
 
+const environmentsRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/environments",
+	component: EnvironmentsPage,
+});
+
 const loginRoute = createRoute({
 	getParentRoute: () => rootRoute,
 	path: "/login",
@@ -138,6 +151,7 @@ export const routeTree = rootRoute.addChildren([
 	peopleRoute,
 	activityRoute,
 	routingRoute,
+	environmentsRoute,
 	boardRoute.addChildren([beadRoute]),
 ]);
 
