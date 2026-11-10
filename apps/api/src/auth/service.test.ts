@@ -215,3 +215,23 @@ describe("service accounts", () => {
 		]);
 	});
 });
+
+describe("listing", () => {
+	test("every service account, and every account with its inviter, oldest first", async () => {
+		let t = 0;
+		const s = setup();
+		const auth = new Auth(s.stores, {
+			now: () => new Date(Date.UTC(2026, 10, 10, 8, 0, t++)),
+		});
+		await auth.login((await auth.bootstrap()) as string);
+		await auth.login(await auth.invite("admin", "bob"));
+		await auth.enrol(await auth.enrolToken("admin", "a1"));
+		await auth.enrol(await auth.enrolToken("bob", "b1"));
+		const names = (await auth.serviceAccounts()).map((x) => x.name).sort();
+		expect(names).toEqual(["a1", "b1"]);
+		expect((await auth.accounts()).map((a) => [a.id, a.invitedBy])).toEqual([
+			["admin", null],
+			["bob", "admin"],
+		]);
+	});
+});

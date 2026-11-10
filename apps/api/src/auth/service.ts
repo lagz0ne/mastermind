@@ -251,12 +251,26 @@ export class Auth {
 		return view(e.value);
 	}
 
-	async serviceAccounts(account: string): Promise<ServiceAccountView[]> {
-		const keys = await this.stores.serviceAccounts.list(`${account}.*`);
+	/** Service accounts of `account`; of every account when omitted. */
+	async serviceAccounts(account?: string): Promise<ServiceAccountView[]> {
+		const keys = await this.stores.serviceAccounts.list(
+			account === undefined ? undefined : `${account}.*`,
+		);
 		const entries = await Promise.all(
 			keys.map((k) => this.stores.serviceAccounts.get(k)),
 		);
 		return entries.flatMap((e) => (e ? [view(e.value)] : []));
+	}
+
+	/** Every account, oldest first. */
+	async accounts(): Promise<Account[]> {
+		const keys = await this.stores.accounts.list();
+		const entries = await Promise.all(
+			keys.map((k) => this.stores.accounts.get(k)),
+		);
+		return entries
+			.flatMap((e) => (e ? [e.value] : []))
+			.sort((x, y) => x.createdAt.localeCompare(y.createdAt));
 	}
 
 	/** Delete a service account of `account` and disconnect its clients. */
