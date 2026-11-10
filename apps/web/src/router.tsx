@@ -10,6 +10,7 @@ import { BeadSheet } from "./board/bead-sheet.tsx";
 import { BoardPage } from "./board/board-page.tsx";
 import { TooltipProvider } from "./components/ui/tooltip.tsx";
 import { HealthFooter } from "./health-footer.tsx";
+import { LoginPage } from "./login/login-page.tsx";
 
 function Layout() {
 	return (
@@ -76,8 +77,15 @@ const beadRoute = createRoute({
 	component: BeadSheet,
 });
 
+const loginRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/login",
+	component: LoginPage,
+});
+
 export const routeTree = rootRoute.addChildren([
 	indexRoute,
+	loginRoute,
 	boardRoute.addChildren([beadRoute]),
 ]);
 

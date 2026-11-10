@@ -12,8 +12,13 @@
 	},
 	"dependencies": {
 		"@mastermind/beads": "workspace:*",
+		"@mastermind/bus": "workspace:*",
 		"@mastermind/core": "workspace:*",
-		"@mastermind/web": "workspace:*"
+		"@mastermind/router": "workspace:*",
+		"@mastermind/web": "workspace:*",
+		"@nats-io/jwt": "0.0.10-5",
+		"@nats-io/nats-core": "^3.4.0",
+		"@nats-io/nkeys": "^2.0.3"
 	},
 	"devDependencies": {
 		"bun-plugin-tailwind": "^0.1.2"
