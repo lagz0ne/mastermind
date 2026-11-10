@@ -136,6 +136,7 @@ const auth =
 					"",
 				),
 				publicNatsUrl: env.NATS_PUBLIC_WS_URL,
+				operatorKey: env.MASTERMIND_OPERATOR_KEY,
 			})
 		: null;
 
