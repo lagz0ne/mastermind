@@ -65,6 +65,10 @@ export type RunnerInfo = {
 	providers: string[];
 	/** Capabilities it offers; matched against `DispatchEnv.requires`. */
 	capabilities: string[];
+	/** How many agents it runs at once (shown on /people). */
+	capacity?: number;
+	/** Every queue it takes work from (shown on /people). */
+	queues?: string[];
 	/** Runner software version. */
 	version?: string;
 };
