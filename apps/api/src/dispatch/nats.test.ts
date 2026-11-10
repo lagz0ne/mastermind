@@ -14,7 +14,7 @@ import { fakeWork, LEASE_MS } from "./fake-work.ts";
 import {
 	CONFIG_BUCKET,
 	type DispatchService,
-	RULES_KEY,
+	ROUTING_KEY,
 	startDispatch,
 } from "./nats.ts";
 import { type NatsServer, startNats } from "./nats-server.ts";
@@ -46,6 +46,23 @@ describe.skipIf(!bin)("dispatcher over NATS", () => {
 	const work = fakeWork(now);
 	const services: DispatchService[] = [];
 	const errors: unknown[] = [];
+	let config: Store<unknown>;
+	const q = (name: string, members: string[], maxPerAccount?: number) => ({
+		name,
+		description: "",
+		members,
+		...(maxPerAccount ? { maxPerAccount } : {}),
+	});
+	const ROUTING = {
+		queues: [
+			q("build", ["alice"]),
+			q("race", ["alice"]),
+			q("fix", ["bob"]),
+			q("lease", ["alice", "bob"]),
+			q("one", ["alice"], 1),
+		],
+		rules: [{ match: { type: "bug" }, queue: "fix" }],
+	};
 
 	beforeAll(async () => {
 		server = await startNats(bin as string);
@@ -55,9 +72,9 @@ describe.skipIf(!bin)("dispatcher over NATS", () => {
 			open("mm-2"),
 			open("runner"),
 		]);
-		// Rules first, so the service starts with them.
-		const config = await Store.open(mm, CONFIG_BUCKET);
-		await config.put(RULES_KEY, [{ match: { type: "bug" }, queue: "fix" }]);
+		// Routing first, so the service starts with it.
+		config = await Store.open(mm, CONFIG_BUCKET);
+		await config.put(ROUTING_KEY, ROUTING);
 		// Two replicas in one queue group, sharing the same work store.
 		for (const nc of [mm, mm2]) {
 			services.push(
@@ -207,6 +224,72 @@ describe.skipIf(!bin)("dispatcher over NATS", () => {
 			{ actor: "alice/gone" },
 		).then(failed, (e: BusError) => e);
 		expect(stale.code).toBe("conflict");
+	});
+
+	test("an account that is not a member gets not_a_member", async () => {
+		work.add({ id: "mm-50" }, "build");
+		const refused = await request(
+			runner,
+			subjects.next("carol", "build"),
+			next("carol", "x"),
+		).then(failed, (e: BusError) => e);
+		expect(refused.code).toBe("not_a_member");
+		const ghost = await request(
+			runner,
+			subjects.next("alice", "ghost"),
+			next("alice", "x"),
+		).then(failed, (e: BusError) => e);
+		expect(ghost.code).toBe("not_a_member");
+	});
+
+	test("maxPerAccount: a second bead of the queue is refused while one is held", async () => {
+		work.add({ id: "mm-60.1" }, "one");
+		work.add({ id: "mm-60.2" }, "one");
+		const first = await request<NextRequest, NextReply>(
+			runner,
+			subjects.next("alice", "one"),
+			next("alice", "a1"),
+		);
+		expect(first.dispatch?.bead.id).toBe("mm-60.1");
+		const second = await request(
+			runner,
+			subjects.next("alice", "one"),
+			next("alice", "a2"),
+		).then(failed, (e: BusError) => e);
+		expect(second.code).toBe("conflict");
+	});
+
+	test("a routing change reroutes open beads that have no queue", async () => {
+		work.add({ id: "mm-70", labels: ["area:api"] });
+		work.add({ id: "mm-71", labels: ["area:api", "queue:build"] });
+		await config.put(ROUTING_KEY, {
+			...ROUTING,
+			queues: [...ROUTING.queues, q("backend", ["alice"])],
+			rules: [
+				{ match: { labels: ["area:api"] }, queue: "backend" },
+				...ROUTING.rules,
+			],
+		});
+		for (let i = 0; i < 50; i++) {
+			if (work.beads.get("mm-70")?.labels.includes("queue:backend")) break;
+			await Bun.sleep(20);
+		}
+		expect(work.beads.get("mm-70")?.labels).toEqual([
+			"area:api",
+			"queue:backend",
+		]);
+		// A bead that has a queue keeps it.
+		expect(work.beads.get("mm-71")?.labels).toEqual([
+			"area:api",
+			"queue:build",
+		]);
+		// And the new member list holds at once.
+		const ok = await request<NextRequest, NextReply>(
+			runner,
+			subjects.next("alice", "backend"),
+			next("alice", "b1"),
+		);
+		expect(ok.dispatch?.bead.id).toBe("mm-70");
 	});
 
 	test("probe is up while connected", async () => {

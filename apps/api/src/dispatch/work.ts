@@ -1,7 +1,7 @@
 // The work store as the dispatcher sees it: writes through bd serve, the
 // list of claimed beads from Dolt. A fake implements it in tests.
 import type { BdClient, ClaimResult, DoltReader } from "@mastermind/beads";
-import { type Bead, queueLabel } from "@mastermind/core";
+import { type Bead, queueLabel, queueOf } from "@mastermind/core";
 
 export type Work = {
 	/** Ready beads on one queue. */
@@ -16,6 +16,8 @@ export type Work = {
 	setLabels(id: string, actor: string, labels: string[]): Promise<Bead>;
 	/** Beads that hold a claim, with their lease. */
 	claimed(): Promise<Bead[]>;
+	/** Open beads with no queue label (for rerouting after a routing change). */
+	unrouted(): Promise<Bead[]>;
 };
 
 export function beadsWork(bd: BdClient, reader: DoltReader): Work {
@@ -29,5 +31,9 @@ export function beadsWork(bd: BdClient, reader: DoltReader): Work {
 		setLabels: (id, actor, labels) => bd.update(id, actor, { labels }),
 		claimed: async () =>
 			(await reader.board()).filter((b) => b.status === "in_progress"),
+		unrouted: async () =>
+			(await reader.board()).filter(
+				(b) => b.status === "open" && queueOf(b) === null,
+			),
 	};
 }

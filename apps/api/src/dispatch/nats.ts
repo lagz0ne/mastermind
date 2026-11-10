@@ -14,13 +14,18 @@ import {
 	subscribe,
 } from "@mastermind/bus";
 import type { BeadEvent, NextReply, NextRequest } from "@mastermind/core";
-import type { RoutingRule } from "@mastermind/router";
 import type { Msg, NatsConnection, Subscription } from "@nats-io/nats-core";
+import { admit, reroute } from "../routing/enforce.ts";
+import {
+	CONFIG_BUCKET,
+	EMPTY_ROUTING,
+	parseStored,
+	ROUTING_KEY,
+	type RoutingState,
+} from "../routing/model.ts";
 import { Dispatcher, type DispatcherOptions } from "./dispatcher.ts";
 
-/** KV bucket and key of the routing rules (a RoutingRule[]). */
-export const CONFIG_BUCKET = "mm-config";
-export const RULES_KEY = "routing.rules";
+export { CONFIG_BUCKET, ROUTING_KEY };
 
 export type DispatchServiceOptions = Omit<
 	DispatcherOptions,
@@ -30,7 +35,11 @@ export type DispatchServiceOptions = Omit<
 	sweepMs?: number;
 	/** Journal events (the board's JournalHub). Returns an unsubscribe. */
 	events?: (listener: (event: BeadEvent) => void) => () => void;
-	/** Load routing rules from JetStream KV and follow changes. Default true. */
+	/**
+	 * Load the routing document (queues, members, rules) from JetStream KV and
+	 * follow changes: members are enforced on `next`, and each change reroutes
+	 * open beads that have no queue. Default true.
+	 */
 	kvRules?: boolean;
 };
 
@@ -41,17 +50,31 @@ export type DispatchService = {
 	stop(): Promise<void>;
 };
 
-/** Watch the routing rules in KV; the getter is always the latest value. */
-async function watchRules(nc: NatsConnection) {
-	let rules: RoutingRule[] = [];
-	const store = await Store.open<RoutingRule[]>(nc, CONFIG_BUCKET);
-	const watch = await store.watch(RULES_KEY);
+/**
+ * Watch the routing document in KV; `get` is always the latest value (null
+ * until the first read). `onChange` runs after each value, the first included.
+ */
+async function watchRouting(
+	nc: NatsConnection,
+	onChange: (state: RoutingState) => void,
+) {
+	let state: RoutingState | null = null;
+	const store = await Store.open<unknown>(nc, CONFIG_BUCKET);
+	const first = await store.get(ROUTING_KEY);
+	state = first
+		? { doc: parseStored(first.value), revision: first.revision }
+		: { doc: EMPTY_ROUTING, revision: 0 };
+	const watch = await store.watch(ROUTING_KEY);
 	void (async () => {
 		for await (const e of watch) {
-			rules = e.op === "put" && Array.isArray(e.value) ? e.value : [];
+			state =
+				e.op === "put"
+					? { doc: parseStored(e.value), revision: e.revision }
+					: { doc: EMPTY_ROUTING, revision: 0 };
+			onChange(state);
 		}
 	})().catch(() => {});
-	return { get: () => rules, stop: () => watch.stop() };
+	return { get: () => state, stop: () => watch.stop() };
 }
 
 export async function startDispatch(
@@ -60,10 +83,20 @@ export async function startDispatch(
 ): Promise<DispatchService> {
 	const { sweepMs = 30_000, events, kvRules = true, ...rest } = options;
 	const onError = rest.onError;
-	const rules = kvRules ? await watchRules(nc) : null;
+	const { work } = rest;
+	const actor = rest.actor ?? "mastermind";
+	// Reroutes run one at a time; a change during a run triggers one more.
+	let rerouting: Promise<unknown> = Promise.resolve();
+	const routing = kvRules
+		? await watchRouting(nc, (state) => {
+				rerouting = rerouting.then(() =>
+					reroute(work, state, actor, onError).catch((e) => onError?.(e)),
+				);
+			})
+		: null;
 	const dispatcher = new Dispatcher({
 		...rest,
-		rules: rules?.get,
+		...(routing ? { rules: () => routing.get()?.doc.rules ?? [] } : {}),
 		notify: (notice) => publish(nc, subjects.ready(notice.queue), notice),
 	});
 
@@ -80,10 +113,13 @@ export async function startDispatch(
 			nc,
 			patterns.next,
 			SERVICE_QUEUE,
-			(req, msg) => {
+			async (req, msg) => {
 				const s = parseSubject(msg.subject);
 				if (s?.kind !== "next")
 					throw new BusError("bad_request", "not a next subject");
+				await admit(routing?.get() ?? null, s.account, s.queue, () =>
+					work.claimed(),
+				);
 				return dispatcher.next(s.account, s.queue, req);
 			},
 			{ onError: (e) => onError?.(e) },
@@ -132,7 +168,7 @@ export async function startDispatch(
 		async stop() {
 			if (sweeper) clearInterval(sweeper);
 			unsubscribe?.();
-			rules?.stop();
+			routing?.stop();
 			dispatcher.stop();
 			for (const sub of subs) sub.unsubscribe();
 		},

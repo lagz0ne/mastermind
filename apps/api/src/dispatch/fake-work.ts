@@ -1,6 +1,6 @@
 // In-memory Work with bd's claim semantics, for tests.
 import { AlreadyClaimed, BdError, NotFound } from "@mastermind/beads";
-import { type Bead, queueLabel } from "@mastermind/core";
+import { type Bead, queueLabel, queueOf } from "@mastermind/core";
 import type { Work } from "./work.ts";
 
 export const LEASE_MS = 5 * 60_000;
@@ -110,6 +110,11 @@ export function fakeWork(now: () => Date = () => new Date()): FakeWork {
 		async claimed() {
 			return [...beads.values()]
 				.filter((b) => b.status === "in_progress")
+				.map(copy);
+		},
+		async unrouted() {
+			return [...beads.values()]
+				.filter((b) => b.status === "open" && queueOf(b) === null)
 				.map(copy);
 		},
 	};

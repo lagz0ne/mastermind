@@ -13,6 +13,8 @@ export const ERROR_CODES = [
 	"bad_request",
 	/** The caller may not do this. */
 	"forbidden",
+	/** The account is not a member of the queue it asked for work on. */
+	"not_a_member",
 	"not_found",
 	/** Lost a race: stale revision, already claimed, already exists. */
 	"conflict",
