@@ -1,0 +1,43 @@
+# The Mastermind infra stack. Dokploy runs this file from git (compose service
+# `mastermind-infra`, project `mastermind`); `bun deploy/dokploy.ts apply` creates it.
+#
+# Secrets come from the compose environment in Dokploy. They are never in this repo.
+# Nothing publishes a host port: the app reaches these services over `dokploy-network`
+# by alias, and the only public route is wss://mastermind.vibea.dev/nats (Traefik).
+services:
+  # The work queue: beads in Dolt. The app reads it with Bun.SQL and writes through bd serve.
+  dolt:
+    image: docker.io/dolthub/dolt-sql-server:2.7.2
+    restart: unless-stopped
+    environment:
+      DOLT_ROOT_PASSWORD: ${DOLT_ROOT_PASSWORD:?set by deploy/dokploy.ts}
+      DOLT_ROOT_HOST: "%"
+    volumes:
+      - dolt-data:/var/lib/dolt
+      - dolt-backups:/backups
+    networks:
+      dokploy-network:
+        aliases: [mastermind-dolt]
+
+  # The bus between Mastermind and runner adapters. The config is baked into the
+  # image so that a change to nats.conf redeploys the server.
+  nats:
+    build: ./nats
+    restart: unless-stopped
+    environment:
+      NATS_AUTH_PASSWORD: ${NATS_AUTH_PASSWORD:?set by deploy/dokploy.ts}
+      NATS_ISSUER_PUBLIC: ${NATS_ISSUER_PUBLIC:?set by deploy/dokploy.ts}
+    volumes:
+      - nats-data:/data/jetstream
+    networks:
+      dokploy-network:
+        aliases: [mastermind-nats]
+
+networks:
+  dokploy-network:
+    external: true
+
+volumes:
+  dolt-data:
+  dolt-backups:
+  nats-data:

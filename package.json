@@ -4,7 +4,8 @@
 	"type": "module",
 	"workspaces": [
 		"apps/*",
-		"packages/*"
+		"packages/*",
+		"deploy"
 	],
 	"scripts": {
 		"check": "biome ci . && turbo run typecheck test build",

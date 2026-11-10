@@ -46,6 +46,13 @@
         "@types/react-dom": "^19.3.0",
       },
     },
+    "deploy": {
+      "name": "@mastermind/deploy",
+      "version": "0.0.0",
+      "dependencies": {
+        "@nats-io/nkeys": "^2.0.3",
+      },
+    },
     "packages/beads": {
       "name": "@mastermind/beads",
       "version": "0.0.0",
@@ -112,6 +119,8 @@
     "@mastermind/bus": ["@mastermind/bus@workspace:packages/bus"],
 
     "@mastermind/core": ["@mastermind/core@workspace:packages/core"],
+
+    "@mastermind/deploy": ["@mastermind/deploy@workspace:deploy"],
 
     "@mastermind/router": ["@mastermind/router@workspace:packages/router"],
 

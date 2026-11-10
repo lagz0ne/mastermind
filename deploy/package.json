@@ -1,0 +1,13 @@
+{
+	"name": "@mastermind/deploy",
+	"version": "0.0.0",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"test": "bun test src",
+		"typecheck": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@nats-io/nkeys": "^2.0.3"
+	}
+}
