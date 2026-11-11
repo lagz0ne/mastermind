@@ -3,6 +3,7 @@ import {
 	columnOf,
 	ENV_TRIAGE_LABEL,
 	envNameOf,
+	FAILED_START_LABEL,
 	queueOf,
 } from "@mastermind/core";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
@@ -87,7 +88,16 @@ function StateLine({ bead }: { bead: Bead }) {
 						: `■ ${lease.left} left · beat ${lease.beatAgoS} s ago`}
 			</dd>
 			<dt className="text-muted-foreground">Stage</dt>
-			<dd>{stage}</dd>
+			<dd>
+				{bead.status !== "closed" &&
+				bead.labels.includes(FAILED_START_LABEL) ? (
+					<span data-failed-start className="text-signal">
+						failed to start · see the notes
+					</span>
+				) : (
+					stage
+				)}
+			</dd>
 			<dt className="text-muted-foreground">Environment</dt>
 			<dd className="truncate">
 				{bead.labels.includes(ENV_TRIAGE_LABEL) ? (
@@ -277,7 +287,8 @@ export function BeadSheet() {
 				</div>
 				{bead && (
 					<footer className="sticky bottom-0 flex items-center gap-2 border-t bg-background px-5 py-3">
-						{bead.status === "closed" ? (
+						{bead.status === "closed" ||
+						bead.labels.includes(FAILED_START_LABEL) ? (
 							<Button
 								variant="outline"
 								disabled={acting}

@@ -5,7 +5,8 @@
 //   POST /api/beads                 NewWork            -> 201 Bead
 //   GET  /api/beads/:id                                -> BeadDetail
 //   POST /api/beads/:id/comments    {text}             -> 201 BeadComment
-//   POST /api/beads/:id/reopen      {reason?}          -> Bead
+//   POST /api/beads/:id/reopen      {reason?}          -> Bead (an open bead
+//                                   held back with failed:start: removes the label)
 //   POST /api/beads/:id/close       {reason?}          -> Bead
 //   GET  /api/activity?before=&limit=                  -> ActivityPage
 import {
@@ -14,6 +15,7 @@ import {
 	type BeadComment,
 	type BeadDetail,
 	type BeadEvent,
+	FAILED_START_LABEL,
 	foldTimeline,
 	isAgentActor,
 	type NewWork,
@@ -31,6 +33,7 @@ export type BeadsStore = {
 	comment(id: string, actor: string, text: string): Promise<BeadComment>;
 	close(id: string, actor: string, reason?: string): Promise<Bead>;
 	reopen(id: string, actor: string, reason?: string): Promise<Bead>;
+	setLabels(id: string, actor: string, labels: string[]): Promise<Bead>;
 	/** Highest journal seq, 0 when empty. */
 	head(): Promise<number>;
 	journalOf(id: string): Promise<BeadEvent[]>;
@@ -237,7 +240,23 @@ export function beadsRoutes(
 		"/api/beads/:id/reopen": {
 			POST: guarded(async (req, account, s) => {
 				const reason = str((await body(req)).reason, "reason", MAX_TEXT);
-				return json(await s.reopen(idOf(req), account, reason));
+				const id = idOf(req);
+				const bead = await s.get(id);
+				if (
+					bead.status !== "closed" &&
+					bead.labels.includes(FAILED_START_LABEL)
+				) {
+					// The dispatcher offers it again once the label is gone.
+					await s.comment(id, account, `reopened: ${reason ?? "try again"}`);
+					return json(
+						await s.setLabels(
+							id,
+							account,
+							bead.labels.filter((l) => l !== FAILED_START_LABEL),
+						),
+					);
+				}
+				return json(await s.reopen(id, account, reason));
 			}),
 		},
 		"/api/beads/:id/close": {

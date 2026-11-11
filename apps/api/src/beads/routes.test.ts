@@ -82,6 +82,12 @@ class FakeStore implements BeadsStore {
 		this.#append("update", actor, b);
 		return b;
 	}
+	async setLabels(id: string, actor: string, labels: string[]) {
+		this.writes.push({ op: "labels", actor, arg: labels.join(",") });
+		const b: Bead = { ...this.#must(id), labels };
+		this.#append("update", actor, b);
+		return b;
+	}
 	/** A runner's claim, as the dispatcher writes it. */
 	claim(id: string, actor: string) {
 		this.#append("update", actor, {
@@ -282,6 +288,23 @@ describe("notes, reopen, close, activity", () => {
 			{ op: "close", actor: "ann", arg: "closed by ann" },
 			{ op: "reopen", actor: "ann", arg: "again" },
 		]);
+	});
+
+	test("reopen of an open bead held back with failed:start removes the label", async () => {
+		const { store, routes } = setup("ann");
+		const { id } = await store.create("ann", {
+			title: "t",
+			labels: ["queue:build"],
+		});
+		await store.setLabels(id, "mastermind", ["queue:build", "failed:start"]);
+		const res = await routes["/api/beads/:id/reopen"].POST(
+			req("POST", "", {}, id),
+		);
+		expect(((await res.json()) as Bead).labels).toEqual(["queue:build"]);
+		expect(store.writes.slice(-1)).toEqual([
+			{ op: "labels", actor: "ann", arg: "queue:build" },
+		]);
+		expect((await store.comments(id)).at(-1)?.text).toBe("reopened: try again");
 	});
 
 	test("activity is newest first, pages with before, caps limit", async () => {

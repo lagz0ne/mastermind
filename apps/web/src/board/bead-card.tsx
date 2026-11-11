@@ -2,6 +2,7 @@ import {
 	type Bead,
 	ENV_TRIAGE_LABEL,
 	envNameOf,
+	FAILED_START_LABEL,
 	queueOf,
 } from "@mastermind/core";
 import { Link } from "@tanstack/react-router";
@@ -78,9 +79,24 @@ export function EnvMark({ bead }: { bead: Pick<Bead, "labels"> }) {
 	);
 }
 
+/** The dispatcher holds the bead back: its agent failed to start 3 times. */
+export function FailedStartMark({ bead }: { bead: Pick<Bead, "labels"> }) {
+	if (!bead.labels.includes(FAILED_START_LABEL)) return null;
+	return (
+		<span
+			data-failed-start
+			title="Not dispatched: the agent failed to start 3 times (the reason is in the notes). Reopen to try again."
+			className="text-signal"
+		>
+			failed to start
+		</span>
+	);
+}
+
 export function BeadCard({ bead }: { bead: Bead }) {
 	const queue = queueOf(bead);
 	const env = envNameOf(bead) || bead.labels.includes(ENV_TRIAGE_LABEL);
+	const failed = bead.labels.includes(FAILED_START_LABEL);
 	return (
 		<Link
 			to="/board/$beadId"
@@ -109,9 +125,10 @@ export function BeadCard({ bead }: { bead: Bead }) {
 						{UNROUTED_REASON}
 					</p>
 				)}
-				{(bead.assignee || bead.lease || env) && (
+				{(bead.assignee || bead.lease || env || failed) && (
 					<CardFooter className="text-[11px] text-muted-foreground">
 						<EnvMark bead={bead} />
+						<FailedStartMark bead={bead} />
 						{bead.assignee && <span className="truncate">{bead.assignee}</span>}
 						<span className="ml-auto">
 							<LeaseMark lease={bead.lease} />
