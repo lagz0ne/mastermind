@@ -11,6 +11,7 @@ import type { DispatchNats } from "./dispatch/start.ts";
 import { downloadRoutes } from "./download/routes.ts";
 import { environmentRoutes } from "./environments/routes.ts";
 import { startEnvironmentsInBackground } from "./environments/start.ts";
+import { exitOnNatsClosed } from "./nats-exit.ts";
 import { RunnerRegistry } from "./people/registry.ts";
 import { peopleRoutes } from "./people/routes.ts";
 import { runnerScript } from "./people/runner-script.ts";
@@ -47,6 +48,9 @@ const auth =
 				),
 				publicNatsUrl: env.NATS_PUBLIC_WS_URL,
 				operatorKey: env.MASTERMIND_OPERATOR_KEY,
+				// The connections reconnect forever; one that still closes is dead,
+				// so exit and let the orchestrator start a new process (mm-210.38).
+				onClosed: exitOnNatsClosed(),
 			})
 		: null;
 

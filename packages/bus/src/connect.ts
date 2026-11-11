@@ -23,7 +23,20 @@ export type ConnectOptions = {
 	onStatus?: (status: Status) => void;
 	/** How long the first connect may take, ms. */
 	timeout?: number;
+	/**
+	 * Keep reconnecting after authorization errors. nats.js closes a connection
+	 * for good after two auth errors (they need not be in a row: it never forgets
+	 * the last one). Mastermind's own connections log in through Mastermind's auth
+	 * callout, which is briefly not serving after every NATS restart, so for them
+	 * an auth error is temporary: set this. A runner keeps the default, because
+	 * there an auth error means a revoked credential.
+	 */
+	retryAuthErrors?: boolean;
 };
+
+/** Wait between reconnect attempts: 2 s plus up to 1 s of jitter, forever. */
+export const RECONNECT_WAIT_MS = 2_000;
+export const RECONNECT_JITTER_MS = 1_000;
 
 /**
  * Connect over WebSocket. The first connect fails fast (the caller decides to
@@ -40,6 +53,9 @@ export async function connect(opts: ConnectOptions): Promise<NatsConnection> {
 		inboxPrefix: opts.inboxPrefix,
 		timeout: opts.timeout,
 		maxReconnectAttempts: -1,
+		reconnectTimeWait: RECONNECT_WAIT_MS,
+		reconnectJitter: RECONNECT_JITTER_MS,
+		ignoreAuthErrorAbort: opts.retryAuthErrors ?? false,
 	});
 	const onStatus = opts.onStatus;
 	if (onStatus) {

@@ -16,6 +16,9 @@ import { hmac } from "./secrets.ts";
 import { Auth, type AuthStores, BUCKETS } from "./service.ts";
 import { accountGuard, type RequireAccount } from "./session.ts";
 
+/** How long one dial to NATS (first connect or reconnect) may take. */
+const DIAL_TIMEOUT_MS = 5_000;
+
 export type AuthConfig = {
 	/** NATS URL(s) for Mastermind (internal network), ws:// or wss://. */
 	natsUrl: string;
@@ -34,6 +37,12 @@ export type AuthConfig = {
 	 */
 	operatorKey?: string;
 	log?: (line: string) => void;
+	/**
+	 * A connection closed that stop() did not close. The connections retry
+	 * forever (also after auth errors), so this should not happen; when it does,
+	 * the connection is dead for good (the server sees `name`).
+	 */
+	onClosed?: (name: string, error?: Error) => void;
 };
 
 export type AuthService = {
@@ -57,12 +66,33 @@ export async function startAuth(cfg: AuthConfig): Promise<AuthService> {
 	let auth: Auth | null = null;
 	let routing: RoutingStore | null = null;
 	const conns: NatsConnection[] = [];
-	const close = () => Promise.allSettled(conns.map((nc) => nc.drain()));
+	let stopping = false;
+	const close = () => {
+		stopping = true;
+		return Promise.allSettled(conns.map((nc) => nc.drain()));
+	};
+	// Every connection logs in again after a NATS restart; the APP and SYS
+	// ones go through the callout, which needs a moment to come back.
+	const names = new Map<NatsConnection, string>();
+	const open = async (
+		name: string,
+		login: { user?: string; pass?: string; token?: string },
+	) => {
+		const nc = await connect({
+			servers: cfg.natsUrl,
+			name,
+			retryAuthErrors: true,
+			// Bounds each dial, also every reconnect. The default (20 s) let one
+			// dial that hung while NATS restarted delay recovery by 20 s.
+			timeout: DIAL_TIMEOUT_MS,
+			...login,
+		});
+		names.set(nc, name);
+		return nc;
+	};
 
 	try {
-		const callout = await connect({
-			servers: cfg.natsUrl,
-			name: "mastermind-auth",
+		const callout = await open("mastermind-auth", {
 			user: cfg.authUser,
 			pass: cfg.authPassword,
 		});
@@ -87,17 +117,9 @@ export async function startAuth(cfg: AuthConfig): Promise<AuthService> {
 		});
 		await callout.flush();
 
-		const app = await connect({
-			servers: cfg.natsUrl,
-			name: "mastermind",
-			token: internal.app,
-		});
+		const app = await open("mastermind", { token: internal.app });
 		conns.push(app);
-		const sys = await connect({
-			servers: cfg.natsUrl,
-			name: "mastermind-sys",
-			token: internal.sys,
-		});
+		const sys = await open("mastermind-sys", { token: internal.sys });
 		conns.push(sys);
 
 		routing = new RoutingStore(await Store.open(app, CONFIG_BUCKET));
@@ -122,6 +144,12 @@ export async function startAuth(cfg: AuthConfig): Promise<AuthService> {
 			},
 		});
 		auth = ready;
+
+		for (const nc of conns)
+			void nc.closed().then((error) => {
+				if (!stopping)
+					cfg.onClosed?.(names.get(nc) ?? "nats", error || undefined);
+			});
 
 		return {
 			app,
