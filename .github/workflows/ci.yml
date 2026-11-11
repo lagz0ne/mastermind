@@ -77,6 +77,9 @@ jobs:
     needs: publish
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read # deploy/src/nats-base.ts reads earlier runs
     environment:
       name: production
       url: ${{ vars.PUBLIC_URL }}
@@ -92,23 +95,30 @@ jobs:
         with:
           bun-version-file: package.json
       - run: bun install --frozen-lockfile
-      - name: Redeploy what changed since the live commit
+      # deploy/src/nats-base.ts matches this step by the start of its name.
+      - name: Redeploy what changed since the last deploy run
         env:
           DOKPLOY_NATS_HOOK: ${{ secrets.DOKPLOY_NATS_HOOK }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           live=$(curl -fsS --max-time 10 "$PUBLIC_URL/api/health" | jq -r '.version' || true)
-          echo "live: ${live:-unknown}"
-          # True when the paths differ from the live commit, or when that commit is unknown.
+          echo "live app: ${live:-unknown}"
+          # NATS: compare with the head of the newest earlier run whose step here succeeded
+          # (it already posted every NATS change up to its commit), NOT with the live app:
+          # a lagging app made one old change count on every run (mm-210.38).
+          # No base found = no NATS redeploy; redeploy mastermind-nats in Dokploy by hand.
+          base=$(bun deploy/src/nats-base.ts || true)
+          echo "nats base: ${base:-none}"
           changed() {
-            git cat-file -e "$live^{commit}" 2>/dev/null || return 0
-            ! git diff --quiet "$live" "$GITHUB_SHA" -- "$@"
+            [ -n "$base" ] && git cat-file -e "$base^{commit}" 2>/dev/null || return 1
+            ! git diff --quiet "$base" "$GITHUB_SHA" -- "$@"
           }
           # Dokploy checks the branch of a git source, so send it like a push event.
           git_hook() {
             curl -fsS --retry 3 -o /dev/null -X POST -H 'content-type: application/json' \
               -H 'x-github-event: push' -d "{\"ref\":\"$GITHUB_REF\"}" "$1"
           }
-          if changed deploy/nats; then echo "nats changed"; git_hook "$DOKPLOY_NATS_HOOK"; fi
+          if changed deploy/nats; then echo "nats changed since $base"; git_hook "$DOKPLOY_NATS_HOOK"; else echo "nats unchanged: no NATS redeploy"; fi
           if [ -n "$DOKPLOY_API_KEY" ]; then
             bun deploy/dokploy.ts release "$GITHUB_SHA"
           else

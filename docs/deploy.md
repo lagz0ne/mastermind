@@ -56,9 +56,16 @@ delete its key in Dokploy and run `apply`.
 
 ## CD
 
-Every push to `main`: check → publish the image → deploy. The deploy job asks production which commit
-is live, calls the Dokploy hook of NATS only when `deploy/nats` changed since that commit, calls the app hook, then waits until `/api/health` reports
-this commit with `ok: true`, and checks the public NATS WebSocket.
+Every push to `main`: check → publish the image → deploy. The deploy job calls the Dokploy hook of
+NATS only when `deploy/nats` changed since the head commit of the newest earlier CI run whose
+redeploy step succeeded (`deploy/src/nats-base.ts`; that run already asked for every NATS change up
+to its commit), calls the app hook, then waits until `/api/health` reports this commit with
+`ok: true`, and checks the public NATS WebSocket.
+
+The NATS base is NOT the commit the app serves. Until mm-210.38 it was: while the app lagged behind
+(pinned image, jammed Dokploy queue), one old `deploy/nats` change counted as new on every run, each
+run queued another NATS deployment, and they restarted NATS hours later. When no earlier run is found,
+CI leaves NATS alone; redeploy `mastermind-nats` in Dokploy by hand if `deploy/nats` changed.
 
 Dokploy runs one deployment at a time for **all** its projects. An accepted hook can wait minutes
 behind other projects' builds, and a `:latest` deployment record does not say which commit it ran.
@@ -75,6 +82,57 @@ So the app deploy has two modes:
 `GET /api/health` reports `version` (the commit) and one probe per dependency: `nats` (the
 dispatcher) and `work` (the work store). Each is `up`, `down` or `unconfigured`; any `down` makes it a
 503. `jetstream` (storage use and the last backup) is a warning only.
+
+## When NATS restarts
+
+NATS restarts on every `mastermind-nats` deployment. The api must not need a hand after that
+(incident mm-210.38: 11.5 h down, because the api's connections closed for good and the process lived on).
+
+- **Reconnect forever.** The api has three NATS connections, all opened by `startAuth`
+  (`apps/api/src/auth/start.ts`): `mastermind-auth` (the auth callout), `mastermind` (APP: the work
+  store, dispatcher, KV, backups) and `mastermind-sys`. Each reconnects without limit, every 2 s plus
+  up to 1 s of jitter, with a 5 s limit per dial. Subscriptions, consumers and KV watches come back
+  with the connection.
+- **Auth errors are retried.** `mastermind` and `mastermind-sys` log in through the api's own auth
+  callout, which needs a moment after a NATS restart. The server answers `Authorization Violation`
+  meanwhile, and nats.js closes a connection after two of them unless told otherwise
+  (`retryAuthErrors` in `@mastermind/bus` connect). That was the cause of mm-210.38.
+- **A closed connection exits the process.** If a connection still closes (not by shutdown), the api
+  logs one line `nats: connection <name> closed (...); exiting with 1 ...` and exits 1. The
+  orchestrator starts a new one.
+- **Container healthcheck.** The image checks `/api/health` every 15 s. Four failures in a row (about
+  60 s of `ok: false`, that is `nats` or `work` down) make the container unhealthy, and swarm replaces
+  it. The first 90 s after a start do not count.
+- The app log shows `nats: <connection> disconnect` and `nats: <connection> reconnect`.
+
+Test: `NATS_SERVER=<nats-server binary> bun test src/nats-restart` in `apps/api` runs the real api
+against a real `nats-server` with `deploy/nats/nats.conf`, stops NATS for 60 s, and also brings it
+back while the callout cannot serve. Health, login start, the board and the dispatcher must be back
+within 15 s.
+
+### Alert: health not ok for 2 minutes
+
+Every `/api/health` answer (the container healthcheck asks every 15 s) adds 1 to the counter
+`mastermind.health.checks` with the attribute `ok` (`true` or `false`), exported as OTLP (service
+`mastermind`). In the Victoria stack, metric names stay dotted. Alert (vmalert / MetricsQL) when, for
+2 minutes, there were `ok=false` answers and no `ok=true` answer, or when the api sends nothing:
+
+```yaml
+- alert: MastermindHealthNotOk
+  expr: |
+    sum(increase({__name__="mastermind.health.checks", service.name="mastermind", ok="false"}[2m])) > 0
+    unless
+    sum(increase({__name__="mastermind.health.checks", service.name="mastermind", ok="true"}[2m])) > 0
+  annotations:
+    summary: "Mastermind /api/health ok=false for 2 minutes (nats or work down)"
+- alert: MastermindHealthSilent
+  expr: absent_over_time({__name__="mastermind.health.checks", service.name="mastermind"}[5m])
+  annotations:
+    summary: "Mastermind sends no health metric for 5 minutes (api down or telemetry off)"
+```
+
+The alert rules live with the Victoria stack, not in this repo. An outside probe of
+`<public URL>/api/health` (status 503 = not ok) is a good second signal.
 
 ## Work store
 
