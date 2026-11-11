@@ -19,6 +19,12 @@ import { dirname } from "node:path";
 import type { Dispatch } from "@mastermind/core";
 import type { RunnerSettings } from "./config.ts";
 import type { Decision } from "./routing.ts";
+import { missingReason, resolveSecrets } from "./secrets/needs.ts";
+import {
+	type SecretSource,
+	SecretStore,
+	secretsPath,
+} from "./secrets/store.ts";
 
 export type CheckResult =
 	| { ok: true; cwd: string; env: Record<string, string> }
@@ -35,6 +41,8 @@ export type CheckDeps = {
 	env?: Record<string, string | undefined>;
 	/** Setup already done; default: in this process only. */
 	setupMemory?: SetupMemory;
+	/** Stored secret values; default: the local secrets file (secrets/store.ts). */
+	secrets?: SecretSource;
 	platform?: string;
 	arch?: string;
 };
@@ -216,21 +224,6 @@ async function locked<T>(dir: string, fn: () => Promise<T>): Promise<T> {
 	}
 }
 
-/** The value of one secret, from its binding source; null when unset. */
-export async function secretValue(
-	name: string,
-	source: string | undefined,
-	env: Record<string, string | undefined>,
-): Promise<string | null> {
-	const src = source ?? name;
-	if (src.startsWith("file:")) {
-		const f = Bun.file(src.slice(5));
-		if (!(await f.exists())) return null;
-		return (await f.text()).trim() || null;
-	}
-	return env[src.startsWith("env:") ? src.slice(4) : src] || null;
-}
-
 /** Where the agent works when the dispatch names no bound environment. */
 async function legacyDir(
 	env: Dispatch["env"],
@@ -281,15 +274,21 @@ export async function checkDispatch(
 		};
 
 	const procEnv = deps.env ?? process.env;
-	const secrets: Record<string, string> = {};
-	const missing: string[] = [];
-	for (const name of env.secrets ?? []) {
-		const v = await secretValue(name, b?.env?.[name], procEnv);
-		if (v === null) missing.push(name);
-		else secrets[name] = v;
+	let store: Record<string, string>;
+	try {
+		store = await (deps.secrets ?? new SecretStore(secretsPath())).load();
+	} catch (error) {
+		return {
+			ok: false,
+			reason: error instanceof Error ? error.message : String(error),
+		};
 	}
-	if (missing.length)
-		return { ok: false, reason: `secrets not set: ${missing.join(", ")}` };
+	const { values: secrets, missing } = await resolveSecrets(env.secrets ?? [], {
+		store,
+		env: procEnv,
+		binding: b?.env,
+	});
+	if (missing.length) return { ok: false, reason: missingReason(missing) };
 
 	const sh = deps.sh ?? runShell;
 	const setup = env.setup ?? [];

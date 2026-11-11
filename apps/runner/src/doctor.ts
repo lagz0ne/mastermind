@@ -11,6 +11,8 @@
  *                 does not ask for permission, checkouts are git dirs
  *   e. agent      --deep only: a REAL `paseo run` with the arguments a dispatch
  *                 uses ("Reply with the single word OK"), then archive it
+ *   f. secrets    every secret the environments need is present locally
+ *                 (names only; FAIL with 'mastermind-runner secrets set <NAME>')
  *
  * No secret is printed: the command line leaves out --env values.
  */
@@ -30,10 +32,11 @@ import {
 	RESULT_SCHEMA,
 } from "./launcher.ts";
 import { type Decision, type Routing, route } from "./routing.ts";
+import type { SecretsState } from "./secrets/state.ts";
 
 export type StepStatus = "pass" | "warn" | "fail" | "skip";
 export type DoctorStep = {
-	id: "a" | "b" | "c" | "d" | "e";
+	id: "a" | "b" | "c" | "d" | "e" | "f";
 	name: string;
 	status: StepStatus;
 	ms: number;
@@ -91,6 +94,8 @@ export type DoctorInput = {
 	deep: boolean;
 	/** Problems the cli found in status.json (the running runner): WARN in step a. */
 	runnerProblems?: { problem: string; fix: string }[];
+	/** Step f: the secrets state (secrets/state.ts); absent: no step f. */
+	secrets?: () => Promise<SecretsState>;
 	/** Step e timeout, ms. */
 	agentTimeoutMs?: number;
 };
@@ -646,6 +651,32 @@ export async function runDoctor(
 						);
 				}
 			}
+		});
+
+	// f. secrets: names only
+	const secrets = input.secrets;
+	if (secrets)
+		await timed("f", "secrets", async (st) => {
+			const x = await secrets();
+			if (!x.needs)
+				st.fail(
+					x.problem ?? "the needed secrets are unknown",
+					"check the network and MASTERMIND_URL, then: mastermind-runner secrets check",
+				);
+			else if (x.problem) st.warn(x.problem, "mastermind-runner secrets check");
+			for (const r of x.rows.filter((r) => r.neededBy.length)) {
+				if (r.present)
+					st.ok(
+						`${r.name}: present (${r.from}), needed by ${r.neededBy.join(",")}`,
+					);
+				else
+					st.fail(
+						`${r.name}: MISSING, needed by ${r.neededBy.join(",")}; fix: mastermind-runner secrets set ${r.name}`,
+						`mastermind-runner secrets set ${r.name}`,
+					);
+			}
+			if (x.needs && !x.diagnostics.needed.length)
+				st.ok("no environment this runner can get needs a secret");
 		});
 
 	return {

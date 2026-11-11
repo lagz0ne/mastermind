@@ -10,6 +10,7 @@
  *   mastermind-runner route [dispatch.json] [--env e --queue q --stage s --type t --label l --priority n]
  *   mastermind-runner status [--json]
  *   mastermind-runner doctor [--deep] [--json] [settings]
+ *   mastermind-runner secrets [list|set NAME|unset NAME|check] [--json]
  *   mastermind-runner --version
  *
  * Settings: --queue <q> (repeat), --capacity <n|unlimited>, --capability <c> (repeat),
@@ -18,7 +19,7 @@
  * --allow-setup, --paseo-host <host>, --routing <file>.
  *
  * Environment: MASTERMIND_URL, MASTERMIND_NATS_URL, MASTERMIND_RUNNER_CONFIG,
- * MASTERMIND_RUNNER_ROUTING.
+ * MASTERMIND_RUNNER_ROUTING, MASTERMIND_RUNNER_SECRETS.
  */
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
@@ -65,6 +66,9 @@ import {
 	routingPath,
 } from "./routing.ts";
 import { Runner } from "./runner.ts";
+import { secretsCommand } from "./secrets/command.ts";
+import { type SecretsState, secretsState } from "./secrets/state.ts";
+import { secretsPath } from "./secrets/store.ts";
 
 /**
  * The Mastermind commit this runner was built from. The api build (apps/api/build.ts)
@@ -121,7 +125,11 @@ const USAGE = `usage:
       [--stage work] [--type <t>] [--label <l>]... [--priority <n>]
   mastermind-runner status [--json]
   mastermind-runner doctor [--deep] [--json] [settings]
-      steps a-d: config, NATS, routing, Paseo; --deep: e. a real agent
+      steps a-d: config, NATS, routing, Paseo; --deep: e. a real agent; f. secrets
+  mastermind-runner secrets [list] [--json]   needed, present, missing (names only)
+  mastermind-runner secrets set <NAME>        value from stdin or a hidden prompt
+  mastermind-runner secrets unset <NAME>
+  mastermind-runner secrets check             exit 1 when a needed one is missing
   mastermind-runner --version
 
 settings: --queue <q>... --capacity <n|unlimited> --capability <c>... --providers a,b
@@ -129,7 +137,7 @@ settings: --queue <q>... --capacity <n|unlimited> --capability <c>... --provider
   --mode <m> --assistant-provider <p> --allow-setup --paseo-host <host>
   --routing <file> (default: routing.json next to the config)
 env: MASTERMIND_URL, MASTERMIND_NATS_URL, MASTERMIND_RUNNER_CONFIG,
-  MASTERMIND_RUNNER_ROUTING`;
+  MASTERMIND_RUNNER_ROUTING, MASTERMIND_RUNNER_SECRETS`;
 
 /** Settings with the command-line flags applied. */
 export function applyFlags(
@@ -275,7 +283,31 @@ type Io = {
 	out: (line: string) => void;
 	err: (line: string) => void;
 	cwd: string;
+	/** `secrets set`: read the value (default: stdin, or a hidden prompt). */
+	readSecret?: (prompt: string) => Promise<string>;
+	/** For the Mastermind HTTP calls (tests). */
+	fetch?: typeof fetch;
 };
+
+/** The secrets state of this runner: needed names from Mastermind, values looked up locally. */
+async function secretsFor(
+	cfg: RunnerConfig | null,
+	routing: Routing,
+	io: Io,
+): Promise<SecretsState> {
+	return secretsState({
+		file: secretsPath(io.env),
+		...(cfg && cfg.state === "active"
+			? {
+					mastermindUrl: io.env.MASTERMIND_URL ?? cfg.mastermindUrl,
+					credential: cfg.credential,
+				}
+			: {}),
+		routing,
+		env: io.env,
+		fetch: io.fetch,
+	});
+}
 
 const stamp = () => new Date().toISOString();
 
@@ -327,6 +359,9 @@ export async function main(argv: string[], io: Io): Promise<number> {
 				return await cmdStatus(path, f, io);
 			case "doctor":
 				return await cmdDoctor(path, f, io);
+			case "secrets":
+			case "secret":
+				return await cmdSecrets(path, rest, f, io);
 			default:
 				throw new UsageError(`unknown command ${cmd}`);
 		}
@@ -346,6 +381,9 @@ export async function main(argv: string[], io: Io): Promise<number> {
 		throw error;
 	}
 }
+
+/** How often the running runner refreshes the needed secret names. */
+const SECRETS_EVERY_MS = 5 * 60_000;
 
 /** A status.json older than this: the runner is probably not running. */
 const STALE_MS = 60_000;
@@ -411,6 +449,11 @@ async function cmdStatus(path: string, f: Flags, io: Io): Promise<number> {
 				.join(", ") || "-"
 		}`,
 	);
+	const sec = (d as { secrets?: SecretsState["diagnostics"] }).secrets;
+	if (sec)
+		io.out(
+			`secrets: ${sec.needed.length} needed, ${sec.missing.length ? `MISSING ${sec.missing.join(", ")} (fix: mastermind-runner secrets set <NAME>)` : "none missing"}${sec.problem ? ` (${sec.problem})` : ""}`,
+		);
 	if (d.lastErrors.length) {
 		io.out("last errors:");
 		for (const l of d.lastErrors) io.out(`  ${l}`);
@@ -461,10 +504,33 @@ async function cmdDoctor(path: string, f: Flags, io: Io): Promise<number> {
 		version: VERSION,
 		deep: f.deep === true,
 		runnerProblems,
+		secrets: () => secretsFor(cfg, routing, io),
 	});
 	if (f.json) io.out(JSON.stringify(report, null, 2));
 	else for (const l of formatReport(report)) io.out(l);
 	return report.ok ? EXIT.ok : EXIT.error;
+}
+
+/** `secrets [list|set|unset|check]`: names and presence only, never a value. */
+async function cmdSecrets(
+	path: string,
+	args: string[],
+	f: Flags,
+	io: Io,
+): Promise<number> {
+	const cfg = await loadConfig(path);
+	const s = applyFlags(
+		cfg?.runner ?? defaultSettings("not-enrolled"),
+		f,
+		io.cwd,
+	);
+	return secretsCommand(args, {
+		file: secretsPath(io.env),
+		json: f.json === true,
+		state: async () =>
+			secretsFor(cfg, (await routingFor(path, s, f, io)).routing, io),
+		io,
+	});
 }
 
 async function cmdEnroll(
@@ -627,6 +693,34 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 		});
 		diag.loop = runner;
 		runner.start();
+		// Needed secret names: at start and every few minutes (names only).
+		let lastMissing = "";
+		const learnSecrets = async () => {
+			try {
+				const x = await secretsFor(cfg, routing, io);
+				diag.secrets = x.diagnostics;
+				const missing = x.diagnostics.missing.join(", ");
+				if (missing && missing !== lastMissing)
+					log(
+						`error: missing secrets: ${missing}; fix: ${x.diagnostics.missing.map((m) => `mastermind-runner secrets set ${m}`).join("; ")}`,
+					);
+				lastMissing = missing;
+				diag.changed();
+			} catch (error) {
+				log(
+					`error: secrets: ${error instanceof Error ? error.message : error}`,
+				);
+			}
+		};
+		void learnSecrets();
+		const secretsTimer = setInterval(
+			() => void learnSecrets(),
+			SECRETS_EVERY_MS,
+		);
+		stopping.signal.addEventListener("abort", () =>
+			clearInterval(secretsTimer),
+		);
+		void nc.closed().then(() => clearInterval(secretsTimer));
 		log(
 			`runner ${cfg.account}/${settings.id} up: queues ${settings.queues.join(",")}, capacity ${capacityText(settings.capacity)}, routing ${source}`,
 		);

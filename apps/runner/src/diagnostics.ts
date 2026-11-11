@@ -16,6 +16,7 @@ import type {
 	RunnerState,
 } from "@mastermind/core";
 import type { RunnerSettings } from "./config.ts";
+import type { SecretsDiagnostics } from "./secrets/needs.ts";
 
 export const STATUS_EVERY_MS = 15_000;
 export const KEEP_ERRORS = 20;
@@ -167,6 +168,8 @@ export class Diagnostics {
 		checkedAt: null,
 	};
 	loop: LoopView | null = null;
+	/** Needed and missing secret NAMES (never values); null until learned. */
+	secrets: SecretsDiagnostics | null = null;
 	readonly #errors: string[] = [];
 	readonly #listeners = new Set<() => void>();
 
@@ -203,7 +206,7 @@ export class Diagnostics {
 		}
 	}
 
-	snapshot(): RunnerDiagnostics {
+	snapshot(): RunnerDiagnostics & { secrets?: SecretsDiagnostics } {
 		const s = this.settings;
 		const inFlight = this.loop?.inFlight() ?? [];
 		return {
@@ -222,6 +225,7 @@ export class Diagnostics {
 			lastDecision: this.loop?.lastDecision ?? null,
 			checks: this.checks,
 			lastErrors: [...this.#errors],
+			...(this.secrets ? { secrets: this.secrets } : {}),
 		};
 	}
 }

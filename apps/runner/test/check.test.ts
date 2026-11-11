@@ -13,6 +13,7 @@ import {
 	versionIn,
 } from "../src/check.ts";
 import { defaultSettings, type RunnerSettings } from "../src/config.ts";
+import { memorySecrets } from "../src/secrets/store.ts";
 import { dispatch } from "./fakes.ts";
 
 const tools: Record<string, string> = { git: "2.43.0", bun: "1.4.4" };
@@ -21,6 +22,7 @@ const deps: CheckDeps = {
 	version: async (b) => `${b} version ${tools[b]} (linux)`,
 	isGitDir: async () => true,
 	env: { GH_TOKEN: "x" },
+	secrets: memorySecrets(),
 	platform: "linux",
 	arch: "x64",
 };
@@ -133,7 +135,20 @@ describe("checkDispatch", () => {
 			settings(),
 			deps,
 		);
-		expect(r).toEqual({ ok: false, reason: "secrets not set: NPM_TOKEN" });
+		expect(r).toEqual({
+			ok: false,
+			reason:
+				"missing secrets: NPM_TOKEN (on the runner: mastermind-runner secrets set NPM_TOKEN)",
+		});
+		const stored = await checkLegacy(
+			dispatch("a", { env: env({ secrets: ["GH_TOKEN", "NPM_TOKEN"] }) }),
+			settings(),
+			{ ...deps, secrets: memorySecrets({ NPM_TOKEN: "from-store" }) },
+		);
+		expect(stored.ok && stored.env).toEqual({
+			GH_TOKEN: "x",
+			NPM_TOKEN: "from-store",
+		});
 	});
 	test("setup is off unless allowed; a failing setup refuses", async () => {
 		const d = dispatch("a", { env: env({ setup: ["bun install"] }) });

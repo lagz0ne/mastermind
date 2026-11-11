@@ -21,6 +21,7 @@ import { peopleRoutes } from "./people/routes.ts";
 import { runnerScript } from "./people/runner-script.ts";
 import { routingRoutes } from "./routing/routes.ts";
 import { startRoutingInBackground } from "./routing/start.ts";
+import { runnerApiRoutes } from "./runner-api/routes.ts";
 import { startNatsWork } from "./store/nats-work.ts";
 
 const env = process.env;
@@ -194,6 +195,12 @@ const server = Bun.serve({
 			...people,
 			...routingApi,
 			...environmentsApi,
+			// Runner adapters (service account credential): secret names of the environments.
+			...runnerApiRoutes({
+				auth: () => authNow,
+				environments: () => environments?.store() ?? null,
+				onError: (error) => console.error(`runner-api: ${error}`),
+			}),
 			...beads,
 			...debug,
 			// Public: /install.sh and the runner binaries of this commit.
