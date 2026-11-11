@@ -9,6 +9,19 @@
 	--radius-sm: var(--radius);
 	--radius-md: var(--radius);
 	--radius-lg: var(--radius);
+	--radius-xl: var(--radius);
+	--text-xs: var(--type-xs);
+	--text-xs--line-height: var(--type-xs-leading);
+	--text-sm: var(--type-sm);
+	--text-sm--line-height: var(--type-sm-leading);
+	--text-base: var(--type-base);
+	--text-base--line-height: var(--type-base-leading);
+	--text-lg: var(--type-lg);
+	--text-lg--line-height: var(--type-lg-leading);
+	--text-xl: var(--type-xl);
+	--text-xl--line-height: var(--type-xl-leading);
+	/* Dialogs only: one very light shadow. */
+	--shadow-lg: 0 4px 16px rgb(0 0 0 / 0.08);
 	--color-background: var(--background);
 	--color-foreground: var(--foreground);
 	--color-card: var(--card);
@@ -37,6 +50,11 @@
 	}
 	html,
 	body {
-		@apply bg-background text-foreground font-sans antialiased;
+		@apply bg-background text-foreground font-sans text-sm antialiased;
+	}
+	/* Counts, times and ids line up in columns. */
+	time,
+	[data-numeric] {
+		font-variant-numeric: tabular-nums;
 	}
 }

@@ -7,7 +7,7 @@ export function AccountMenu() {
 	const navigate = useNavigate();
 	if (!me) return null;
 	return (
-		<div className="ml-auto flex items-baseline gap-3 text-sm">
+		<div className="flex items-center gap-3 text-xs">
 			<span className="font-medium" title="Logged in as">
 				{me.account}
 			</span>

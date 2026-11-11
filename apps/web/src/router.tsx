@@ -19,48 +19,39 @@ import { AccountMenu } from "./session/account-menu.tsx";
 import { ensureSession } from "./session/session.ts";
 import { NewWorkButton } from "./work/new-work-dialog.tsx";
 
+/** Header nav link: full header height (a usable touch target), bold when active. */
+const navLink =
+	"flex items-center text-muted-foreground hover:text-foreground [&.active]:font-semibold [&.active]:text-foreground";
+
 function Layout() {
 	return (
 		<TooltipProvider>
 			<div className="flex h-dvh flex-col">
-				<header className="flex items-baseline gap-4 border-b px-4 py-2">
-					<Link to="/board" className="font-bold text-base tracking-tight">
+				<header className="sticky top-0 z-10 flex h-(--header-height) shrink-0 items-center gap-4 border-b bg-background px-3">
+					<Link to="/board" className="font-bold text-[13px] tracking-tight">
 						mastermind
 					</Link>
-					<nav className="text-sm">
-						<Link
-							to="/board"
-							className="text-muted-foreground [&.active]:font-semibold [&.active]:text-foreground"
-						>
+					<nav className="flex h-full min-w-0 items-stretch gap-3 overflow-x-auto whitespace-nowrap text-xs [scrollbar-width:none]">
+						<Link to="/board" className={navLink}>
 							Board
 						</Link>
-						<Link
-							to="/people"
-							className="ml-3 text-muted-foreground [&.active]:font-semibold [&.active]:text-foreground"
-						>
+						<Link to="/people" className={navLink}>
 							People
 						</Link>
-						<Link
-							to="/activity"
-							className="ml-3 text-muted-foreground [&.active]:font-semibold [&.active]:text-foreground"
-						>
+						<Link to="/activity" className={navLink}>
 							Activity
 						</Link>
-						<Link
-							to="/routing"
-							className="ml-3 text-muted-foreground [&.active]:font-semibold [&.active]:text-foreground"
-						>
+						<Link to="/routing" className={navLink}>
 							Routing
 						</Link>
-						<Link
-							to="/environments"
-							className="ml-3 text-muted-foreground [&.active]:font-semibold [&.active]:text-foreground"
-						>
+						<Link to="/environments" className={navLink}>
 							Environments
 						</Link>
 					</nav>
-					<NewWorkButton />
-					<AccountMenu />
+					<div className="ml-auto flex shrink-0 items-center gap-3">
+						<NewWorkButton />
+						<AccountMenu />
+					</div>
 				</header>
 				<main className="min-h-0 flex-1">
 					<Outlet />
