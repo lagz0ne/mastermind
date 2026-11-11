@@ -102,6 +102,21 @@ describe("auth routes", () => {
 		expect(serviceAccounts.map((s) => s.id)).toEqual([body.serviceAccount.id]);
 		expect(serviceAccounts[0]?.secretHash).toBeUndefined();
 
+		const check = (authorization?: string) =>
+			routes["/api/auth/credential"].GET(
+				new Request(`${URL_BASE}/x`, {
+					headers: authorization ? { authorization } : {},
+				}),
+			);
+		const valid = await check(`Bearer ${body.credential}`);
+		expect(valid.status).toBe(200);
+		expect(await valid.json()).toEqual({
+			account: "admin",
+			serviceAccount: { id: body.serviceAccount.id, name: "laptop" },
+		});
+		expect((await check()).status).toBe(401);
+		expect((await check(`Bearer ${body.credential}x`)).status).toBe(401);
+
 		const del = routes["/api/auth/service-accounts/:id"].DELETE;
 		const req = (id: string, headers: Record<string, string>) =>
 			Object.assign(
@@ -115,6 +130,7 @@ describe("auth routes", () => {
 		);
 		expect((await del(req(body.serviceAccount.id, h))).status).toBe(200);
 		expect((await del(req(body.serviceAccount.id, h))).status).toBe(404);
+		expect((await check(`Bearer ${body.credential}`)).status).toBe(401);
 	});
 
 	test("logout clears the cookie and the session", async () => {

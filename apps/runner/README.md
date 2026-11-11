@@ -133,7 +133,13 @@ and the agent's own answer decides: `done` completes the bead with its summary, 
 releases it with the reason. A lost lease stops the agent. Stop (Ctrl-C) stops agents
 and releases their beads.
 
-Exit codes: 0 stopped, 1 error, 2 usage, 3 revoked (the credential was refused;
-the config is marked `revoked`, enroll again).
+Exit codes: 0 stopped, 1 error, 2 usage, 3 revoked (Mastermind says the credential is
+revoked; the config is marked `revoked`, enroll again).
 
-Tests: `bun test`. The NATS test needs `NATS_SERVER=/path/to/nats-server`.
+NATS refuses the credential both after a revoke and for a moment after every NATS restart
+(Mastermind's auth callout is not serving yet). So the runner keeps reconnecting through
+auth errors and asks Mastermind `GET /api/auth/credential` (at most every 30 s). Only a
+401 there means revoked; no answer, 5xx or 429 means "retry".
+
+Tests: `bun test`. The NATS tests need `NATS_SERVER=/path/to/nats-server`
+(`test/revoke.integration.test.ts`: NATS restart with the callout down 10 s, then a real revoke).

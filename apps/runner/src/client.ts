@@ -97,7 +97,7 @@ export function natsClient(
 	};
 }
 
-/** Mastermind refused the credential: revoked or never valid. Do not retry. */
+/** Mastermind says the credential is revoked or was never valid. Do not retry. */
 export class RevokedError extends Error {
 	override name = "RevokedError";
 }
@@ -107,6 +107,39 @@ export function isAuthFailure(error: unknown): boolean {
 	return (
 		error instanceof Error && /authorization violation/i.test(error.message)
 	);
+}
+
+/**
+ * What Mastermind says about the credential. NATS answers "Authorization
+ * Violation" both for a revoked credential and while Mastermind's auth callout
+ * is not serving (every NATS restart), so only this HTTP answer decides.
+ */
+export type CredentialState = "valid" | "revoked" | "unknown";
+
+/**
+ * GET <mastermind>/api/auth/credential with the credential. 401 is `revoked`;
+ * 200 is `valid`; anything else (no network, 5xx, 429, an older Mastermind
+ * without the route) is `unknown`, and the runner keeps retrying.
+ */
+export async function checkCredential(
+	mastermindUrl: string,
+	credential: string,
+	opts: { fetch?: typeof fetch; timeoutMs?: number } = {},
+): Promise<CredentialState> {
+	try {
+		const res = await (opts.fetch ?? fetch)(
+			`${mastermindUrl.replace(/\/+$/, "")}/api/auth/credential`,
+			{
+				headers: { authorization: `Bearer ${credential}` },
+				signal: AbortSignal.timeout(opts.timeoutMs ?? 10_000),
+			},
+		);
+		await res.body?.cancel().catch(() => {});
+		if (res.status === 401) return "revoked";
+		return res.ok ? "valid" : "unknown";
+	} catch {
+		return "unknown";
+	}
 }
 
 /** A bus error that means the claim is gone: stop working on the bead. */
@@ -138,17 +171,52 @@ export type ConnectRunnerOptions = {
 	log?: (line: string) => void;
 	signal?: AbortSignal;
 	backoff?: Backoff;
+	/**
+	 * Asked after NATS refused the credential. Only `revoked` ends the runner;
+	 * without it every auth error counts as temporary.
+	 */
+	verify?: () => Promise<CredentialState>;
+	/** Called once when `verify` says `revoked` after the first connect. */
+	onRevoked?: () => void;
+	/** Ask `verify` at most this often while auth errors go on (ms). */
+	verifyEveryMs?: number;
 };
+
+/** While NATS refuses the credential, ask Mastermind at most every 30 s. */
+export const VERIFY_EVERY_MS = 30_000;
 
 /**
  * Dial out to NATS with the service account credential. The first connect
- * retries with backoff and jitter; after that the client reconnects by itself.
- * An authorization failure is terminal: it throws RevokedError.
+ * retries with backoff and jitter; after that the client reconnects by itself,
+ * through auth errors too (a NATS restart: the auth callout is not serving for
+ * a moment). An auth error only means "revoked" when `verify` says so: then the
+ * first connect throws RevokedError, and a live connection calls `onRevoked`.
  */
 export async function connectRunner(
 	opts: ConnectRunnerOptions,
 ): Promise<NatsConnection> {
 	const log = opts.log ?? (() => {});
+	const verify = opts.verify ?? (async () => "unknown" as const);
+	let revoked = false;
+	let checking = false;
+	let lastCheck = Number.NEGATIVE_INFINITY;
+	const onAuthError = async () => {
+		const now = performance.now();
+		if (revoked || checking) return;
+		if (now - lastCheck < (opts.verifyEveryMs ?? VERIFY_EVERY_MS)) return;
+		checking = true;
+		lastCheck = now;
+		try {
+			const state = await verify();
+			log(`nats: credential refused; Mastermind says ${state}`);
+			if (state === "revoked" && !revoked) {
+				revoked = true;
+				opts.onRevoked?.();
+			}
+		} finally {
+			checking = false;
+		}
+	};
 	for (let attempt = 1; ; attempt++) {
 		if (opts.signal?.aborted) throw new Error("stopped");
 		try {
@@ -158,14 +226,26 @@ export async function connectRunner(
 				token: opts.credential,
 				inboxPrefix: opts.inboxPrefix,
 				timeout: 10_000,
+				retryAuthErrors: true,
 				onStatus: (s) => {
 					if (s.type === "disconnect" || s.type === "reconnect")
 						log(`nats: ${s.type}`);
+					if (s.type === "error" && isAuthFailure(s.error))
+						onAuthError().catch(() => {});
 				},
 			});
 		} catch (error) {
-			if (isAuthFailure(error))
-				throw new RevokedError("Mastermind refused this runner's credential");
+			if (isAuthFailure(error)) {
+				const state = await verify();
+				if (state === "revoked")
+					throw new RevokedError("Mastermind refused this runner's credential");
+				const wait = backoffMs(attempt, opts.backoff);
+				log(
+					`nats: credential refused, Mastermind says ${state}; retrying in ${wait}ms`,
+				);
+				await Bun.sleep(wait);
+				continue;
+			}
 			const wait = backoffMs(attempt, opts.backoff);
 			log(`nats: connect failed (${error}); retrying in ${wait}ms`);
 			await Bun.sleep(wait);

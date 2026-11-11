@@ -19,6 +19,8 @@ import {
  *   GET    /api/auth/me                    -> {account, csrf}
  *   POST   /api/auth/tokens                {kind: "enrol", name} -> single-use enrol token
  *   POST   /api/auth/enrol                 {token} -> service account credential (runner adapters)
+ *   GET    /api/auth/credential            Bearer <credential> -> 200 {account, serviceAccount} or 401
+ *                                          (a runner tells a revocation from a NATS restart)
  *   GET    /api/auth/service-accounts
  *   DELETE /api/auth/service-accounts/:id  revoke
  *
@@ -99,6 +101,7 @@ export function authRoutes(
 	// Per replica. Start: per address. Approve: per address and per approver.
 	const startLimit = new RateLimit(20, 60_000);
 	const approveLimit = new RateLimit(20, 60_000);
+	const credentialLimit = new RateLimit(60, 60_000);
 	const limited = () => fail(429, "too many requests; wait a minute");
 
 	/** Wrap a handler: map AuthError to a status, hide other errors. */
@@ -261,6 +264,26 @@ export function authRoutes(
 						inboxPrefix: `_INBOX.${res.serviceAccount.account}`,
 					},
 					201,
+				);
+			}),
+		},
+		// A runner whose NATS login is refused asks here whether its credential
+		// is still valid. Only 401 means revoked; the runner retries on anything else.
+		"/api/auth/credential": {
+			GET: handle(async (req, auth) => {
+				if (!credentialLimit.take(clientIp(req))) return limited();
+				const credential = /^Bearer\s+(\S+)$/i.exec(
+					req.headers.get("authorization") ?? "",
+				)?.[1];
+				const sa = credential ? await auth.authorize(credential) : null;
+				if (!sa) return fail(401, "credential is invalid or revoked");
+				return json(
+					{
+						account: sa.account,
+						serviceAccount: { id: sa.id, name: sa.name },
+					},
+					200,
+					{ "cache-control": "no-store" },
 				);
 			}),
 		},

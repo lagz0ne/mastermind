@@ -29,6 +29,7 @@ import {
 } from "@mastermind/core";
 import { checkRequirement, FileSetupMemory } from "./check.ts";
 import {
+	checkCredential,
 	connectRunner,
 	isAuthFailure,
 	natsClient,
@@ -420,6 +421,12 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 	const log = (line: string) => io.err(`${stamp()} ${line}`);
 	const stopping = new AbortController();
 	const onSignal = () => stopping.abort();
+	const mastermindUrl = io.env.MASTERMIND_URL ?? cfg.mastermindUrl;
+	const verify = () => checkCredential(mastermindUrl, cfg.credential);
+	let onRevoked = () => {};
+	const revoked = new Promise<"revoked">((r) => {
+		onRevoked = () => r("revoked");
+	});
 	process.once("SIGINT", onSignal);
 	process.once("SIGTERM", onSignal);
 	try {
@@ -432,6 +439,8 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 				name: `mastermind-runner ${cfg.account}/${settings.id}`,
 				log,
 				signal: stopping.signal,
+				verify,
+				onRevoked: () => onRevoked(),
 			});
 		} catch (error) {
 			if (error instanceof RevokedError)
@@ -456,14 +465,22 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 				once: true,
 			}),
 		);
-		const why = await Promise.race([closed, stopped]);
+		const why = await Promise.race([closed, stopped, revoked]);
 		log("runner stopping");
+		// Revoked: no request can succeed, so fail the in-flight ones now.
+		if (why === "revoked") await nc.close().catch(() => {});
 		await runner.stop();
 		if (why === "stop") {
 			await nc.drain().catch(() => {});
 			return EXIT.ok;
 		}
-		if (why && isAuthFailure(why)) {
+		// NATS refuses the credential also while the auth callout is down (a
+		// NATS restart): only Mastermind's own answer marks the runner revoked.
+		if (
+			why === "revoked" ||
+			(why && isAuthFailure(why) && (await verify()) === "revoked")
+		) {
+			await nc.close().catch(() => {});
 			await saveConfig(path, { ...cfg, state: "revoked" });
 			throw new RevokedError("Mastermind revoked this runner");
 		}

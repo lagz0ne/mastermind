@@ -40,6 +40,9 @@
         "@mastermind/core": "workspace:*",
         "@nats-io/nats-core": "^3.4.0",
       },
+      "devDependencies": {
+        "@nats-io/nkeys": "^2.0.3",
+      },
     },
     "apps/web": {
       "name": "@mastermind/web",
