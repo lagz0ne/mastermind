@@ -17,6 +17,9 @@
  * --providers a,b, --workdir <dir>, --repo <url>=<dir> (repeat), --id <id>,
  * --provider <p>, --model <m>, --mode <m>, --assistant-provider <p>,
  * --allow-setup, --allow-remote-probe (the operator may run doctor --deep remotely), --paseo-host <host>, --routing <file>.
+ * start: every task runs in a throwaway box (Docker API: DOCKER_HOST or the default socket;
+ * --box-image <ref> or MASTERMIND_BOX_IMAGE for environments without an image);
+ * --no-box runs agents on this machine instead, at the owner's risk.
  *
  * Environment: MASTERMIND_URL, MASTERMIND_NATS_URL, MASTERMIND_RUNNER_CONFIG,
  * MASTERMIND_RUNNER_ROUTING, MASTERMIND_RUNNER_SECRETS.
@@ -31,6 +34,7 @@ import {
 	type RunnerDiagnostics,
 	type RunnerInfo,
 } from "@mastermind/core";
+import { startBoxMode } from "./box/launcher.ts";
 import { checkRequirement, FileSetupMemory } from "./check.ts";
 import {
 	checkCredential,
@@ -99,6 +103,8 @@ const OPTIONS = {
 	"allow-setup": { type: "boolean" },
 	"allow-remote-probe": { type: "boolean" },
 	"paseo-host": { type: "string" },
+	"no-box": { type: "boolean" },
+	"box-image": { type: "string" },
 	routing: { type: "string" },
 	env: { type: "string" },
 	stage: { type: "string" },
@@ -123,7 +129,9 @@ export class UsageError extends Error {
 
 const USAGE = `usage:
   mastermind-runner enroll <token> --url <mastermind url> [settings]
-  mastermind-runner start [settings] [--save]
+  mastermind-runner start [settings] [--save] [--box-image <ref>] [--no-box]
+      every task runs in a throwaway box (Docker or Podman API: DOCKER_HOST);
+      --no-box: agents run on this machine, at your own risk (the ticket says so)
   mastermind-runner check [settings]
   mastermind-runner route [dispatch.json] [--env <name>] [--queue <q>]
       [--stage work] [--type <t>] [--label <l>]... [--priority <n>]
@@ -649,6 +657,20 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 		io.err(`${stamp()} ${line}`);
 		diag.log(line);
 	};
+	// Box mode (default): the engine must answer before any work is taken.
+	const box = f["no-box"]
+		? null
+		: await startBoxMode({
+				runnerId: settings.id,
+				env: io.env,
+				image: f["box-image"],
+				outDir: join(dirname(path), "results"),
+				log,
+			});
+	if (!box)
+		log(
+			"WARNING: --no-box: agents run on this machine without a box (owner's risk); every task reports it",
+		);
 	let conn: Awaited<ReturnType<typeof connectRunner>> | null = null;
 	const statusSubject = subjects.runnerStatus(cfg.account, settings.id);
 	const reporter = startReporter({
@@ -708,7 +730,8 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 		diag.set("connected");
 		const runner = new Runner({
 			client: natsClient(nc, runnerInfo(cfg, settings, routing)),
-			launcher: new PaseoLauncher({ host: f["paseo-host"] }),
+			launcher: box?.launcher ?? new PaseoLauncher({ host: f["paseo-host"] }),
+			...(box ? { check: box.check } : { noBox: true }),
 			settings,
 			routing,
 			setupMemory: new FileSetupMemory(join(dirname(path), "setup-state.json")),

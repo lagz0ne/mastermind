@@ -136,7 +136,7 @@ describe.skipIf(!bin)("runner: NATS restart vs revoke", () => {
 		expect(code0, out.join("\n")).toBe(EXIT.ok);
 
 		runner = Bun.spawn(
-			["bun", CLI, "start", "--queue", "backend", "--workdir", dir],
+			["bun", CLI, "start", "--no-box", "--queue", "backend", "--workdir", dir],
 			{
 				env: { ...process.env, ...env, MASTERMIND_URL: api },
 				stdout: "ignore",

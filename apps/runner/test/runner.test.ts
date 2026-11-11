@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { rmSync } from "node:fs";
+import { NO_BOX_REPORT } from "../src/box/run.ts";
 import type { CheckResult } from "../src/check.ts";
 import { defaultSettings, type RunnerSettings } from "../src/config.ts";
 import { PaseoLauncher } from "../src/launcher.ts";
@@ -110,6 +111,35 @@ describe("Runner", () => {
 		expect(spec?.prompt).toContain("do mm-1");
 		expect(spec?.prompt).toContain('status "done"');
 		expect(spec?.executionId).toStartWith("mm-1-");
+	});
+
+	test("the launcher gets the dispatch's environment as the box recipe", async () => {
+		const mm = new FakeMastermind();
+		const agents = new FakeLauncher({ status: "done", summary: "ok" });
+		const d = dispatch("mm-1");
+		mm.push(d);
+		make(mm, agents);
+		await until(() => mm.verbs("complete").length === 1);
+		expect(agents.specs[0]?.recipe).toEqual(d.env);
+		expect(mm.verbs("report").map((c) => c.text)).not.toContain(NO_BOX_REPORT);
+	});
+
+	test("--no-box: every task first reports that it ran without a box", async () => {
+		const mm = new FakeMastermind();
+		mm.push(dispatch("mm-1"));
+		runner = new Runner({
+			client: mm,
+			launcher: new FakeLauncher({ status: "done", summary: "ok" }),
+			settings: settings(),
+			check: pass,
+			noBox: true,
+			idleMs: 10,
+			heartbeatMs: 20,
+		});
+		runner.start();
+		await until(() => mm.verbs("complete").length === 1);
+		expect(mm.verbs("report")[0]?.text).toBe(NO_BOX_REPORT);
+		expect(NO_BOX_REPORT).toBe("ran WITHOUT a box (owner's risk)");
 	});
 
 	test("failed: releases the bead with the agent's reason", async () => {

@@ -12,6 +12,7 @@
  * Agents never talk to Mastermind; the runner reports for them.
  */
 import type { Dispatch, RunnerInFlight } from "@mastermind/core";
+import { NO_BOX_REPORT } from "./box/run.ts";
 import { type CheckResult, checkDispatch, type SetupMemory } from "./check.ts";
 import {
 	BACKOFF,
@@ -55,6 +56,8 @@ export type RunnerOptions = {
 	providerStatus?: () => Record<string, boolean>;
 	/** Called when in-flight work, the last `next` or the last decision changes. */
 	onChange?: () => void;
+	/** Agents run on this machine, not in a box (--no-box): say so on every task. */
+	noBox?: boolean;
 };
 
 /** A FIFO counting semaphore. */
@@ -335,6 +338,7 @@ export class Runner {
 				if (!lost(exec)) await this.#safe(d, "release", "runner stopped");
 				return;
 			}
+			if (this.#o.noBox) await this.#safe(d, "report", NO_BOX_REPORT);
 			await this.#safe(d, "report", decisionLine(decision, settings.id));
 			let result: { status: "done" | "failed"; summary: string };
 			let startFailed = false;
@@ -350,6 +354,7 @@ export class Runner {
 						labels: decision.labels,
 						...(decision.host ? { host: decision.host } : {}),
 						...(Object.keys(check.env).length ? { env: check.env } : {}),
+						recipe: d.env,
 					},
 					exec.abort.signal,
 				);

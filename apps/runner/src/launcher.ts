@@ -2,6 +2,7 @@
  * How the runner starts an agent and gets its result. The default is Paseo
  * (`paseo run`); tests and other agent hosts plug in their own launcher.
  */
+import type { DispatchEnv } from "@mastermind/core";
 import type { AgentSettings } from "./config.ts";
 
 export type AgentSpec = {
@@ -22,6 +23,8 @@ export type AgentSpec = {
 	host?: string;
 	/** Environment for the agent process (the declared secrets). */
 	env?: Record<string, string>;
+	/** The dispatch's environment (the box recipe), for launchers that make a box. */
+	recipe?: DispatchEnv;
 };
 
 /** What the agent says it did. Completion comes from the agent, not from idle. */
