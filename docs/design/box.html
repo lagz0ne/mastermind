@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mastermind: the box, review of 2026-11-11</title>
+<style>
+:root { --bg:#fff; --fg:#111; --muted:#6b6b6b; --line:#111; --soft:#e6e6e6; --panel:#f6f6f6; --accent:#d0021b; --ok:#0a7d33; --code:#f1f1f1; }
+* { box-sizing: border-box; }
+html { font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+body { margin: 0; background: var(--bg); color: var(--fg); }
+main { max-width: 1040px; margin: 0 auto; padding: 18px 18px 60px; }
+header { border-bottom: 3px solid var(--line); padding-bottom: 8px; }
+h1 { font-size: 21px; margin: 0 0 4px; letter-spacing: -0.01em; }
+h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; margin: 30px 0 10px; padding-top: 8px; border-top: 1px solid var(--line); display: flex; gap: 10px; }
+h2 .n { color: var(--accent); }
+h3 { font-size: 14px; margin: 14px 0 6px; }
+p, ul, ol { max-width: 74ch; margin: 6px 0; }
+ul, ol { padding-left: 20px; } li { margin: 3px 0; }
+.meta { color: var(--muted); font-size: 12.5px; }
+code, pre { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+code { background: var(--code); padding: 1px 4px; border-radius: 3px; }
+pre { background: var(--code); padding: 10px 12px; overflow-x: auto; border-left: 3px solid var(--line); border-radius: 0 4px 4px 0; margin: 8px 0; }
+pre code { background: none; padding: 0; }
+.c { color: var(--muted); }
+table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 13px; }
+th, td { text-align: left; vertical-align: top; padding: 6px 10px 6px 0; border-bottom: 1px solid var(--soft); }
+th { font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); border-bottom: 1px solid var(--line); }
+.tag { display: inline-block; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; padding: 1px 6px; border: 1.5px solid currentColor; border-radius: 4px; white-space: nowrap; }
+.tag.ok { color: var(--ok); } .tag.miss { color: var(--accent); } .tag.wait { color: var(--muted); }
+.rec { color: var(--accent); font-weight: 700; }
+
+/* lifecycle strip */
+.life { display: grid; grid-template-columns: repeat(6, minmax(0,1fr)); gap: 0; margin: 12px 0 4px; counter-reset: s; }
+.st { border: 1.5px solid var(--line); border-radius: 4px; padding: 8px; margin-right: 22px; position: relative; min-height: 132px; background: var(--bg); }
+.st:last-child { margin-right: 0; }
+.st:not(:last-child)::after { content: "→"; position: absolute; right: -19px; top: 50%; transform: translateY(-50%); font-weight: 700; font-size: 17px; }
+.st::before { counter-increment: s; content: counter(s); font-weight: 700; color: var(--accent); font-size: 18px; line-height: 1; }
+.st b { display: block; font-size: 13.5px; margin: 3px 0 4px; }
+.st span { font-size: 12px; color: var(--muted); display: block; }
+.st.box { border-color: var(--accent); border-width: 2.5px; }
+
+/* the box picture */
+.pic { display: grid; grid-template-columns: 1fr 1.7fr 1fr; gap: 14px; align-items: stretch; margin: 12px 0; }
+.side { border: 1.5px solid var(--line); border-radius: 4px; padding: 10px; }
+.side .where, .boxw .where { font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+.side b, .boxw b { display: block; font-size: 14px; margin: 2px 0 6px; }
+.side ul, .boxw ul { padding-left: 16px; font-size: 12.5px; margin: 0; }
+.boxw { border: 2.5px dashed var(--accent); border-radius: 6px; padding: 10px; position: relative; }
+.boxw .inner { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 6px; }
+.boxw .cell { background: var(--panel); border-radius: 4px; padding: 7px 8px; font-size: 12.5px; }
+.boxw .cell b { font-size: 12.5px; margin: 0 0 2px; }
+.boxw .bin { position: absolute; right: 8px; top: 8px; font-size: 11px; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: .06em; }
+.arrows { display: grid; grid-template-columns: 1fr 1.7fr 1fr; gap: 14px; font-size: 12px; color: var(--muted); }
+.arrows div { text-align: center; }
+
+.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+.ask { border: 2.5px solid var(--line); border-radius: 6px; padding: 10px 12px; margin: 10px 0; }
+.ask h3 { margin-top: 0; }
+.opt { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 10px; margin: 6px 0; }
+.opt div { border: 1.5px solid var(--soft); border-radius: 4px; padding: 8px; font-size: 12.5px; }
+.opt div.r { border-color: var(--accent); border-width: 2px; }
+.opt b { display: block; margin-bottom: 3px; }
+@media (max-width: 760px) {
+	.life, .pic, .arrows, .cols, .opt { grid-template-columns: 1fr; }
+	.st { margin: 0 0 22px; min-height: 0; }
+	.st:not(:last-child)::after { content: "↓"; right: 50%; top: auto; bottom: -21px; transform: translateX(50%); }
+	.arrows { display: none; }
+	.boxw .inner { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+<main>
+
+<header>
+	<h1>Mastermind: the box</h1>
+	<div class="meta">Review document, 2026-11-11. Source: your message "the dispatcher will need to run the box and then run the task inside, not the other way around". Red marks the box and the decisions.</div>
+</header>
+
+<h2><span class="n">1</span> The change</h2>
+<p><b>Today</b> the runner starts a Paseo agent directly on the user's machine, in a work directory. The agent sees the whole machine. Tools, permissions and secrets are whatever that machine has.</p>
+<p><b>New</b>: for each task, a fresh <b>box</b> is made from the task's environment. The agent runs inside the box. Only the result leaves the box. Then the box is thrown away.</p>
+
+<div class="life">
+	<div class="st"><b>Dispatch</b><span>Mastermind gives the task and its environment to a runner.</span></div>
+	<div class="st box"><b>Make the box</b><span>From the environment image: tools already in it. Limits on CPU, memory, time, network.</span></div>
+	<div class="st box"><b>Fill the box</b><span>Check out the repo at the ref. Put in the secrets and the provider login. Run setup and check.</span></div>
+	<div class="st box"><b>Run the task</b><span>Paseo daemon in the box starts the agent. No permission prompts: the box is the limit.</span></div>
+	<div class="st"><b>Take the result out</b><span>Reports and the answer go to Mastermind. Code goes out as a pushed branch or a patch.</span></div>
+	<div class="st box"><b>Throw it away</b><span>The box and all in it are deleted. Also on failure or timeout.</span></div>
+</div>
+
+<h2><span class="n">2</span> What is inside, what crosses the wall</h2>
+<div class="pic">
+	<div class="side">
+		<div class="where">Mastermind</div>
+		<b>Dispatcher</b>
+		<ul><li>task + environment name</li><li>secret <i>names</i></li><li>gets reports, result</li></ul>
+	</div>
+	<div class="boxw">
+		<span class="bin">thrown away after</span>
+		<div class="where">Runner machine (or a box host)</div>
+		<b>Box for one task</b>
+		<div class="inner">
+			<div class="cell"><b>Image</b>OS, language runtimes, CLIs: from the environment</div>
+			<div class="cell"><b>Checkout</b>repo at ref, in <code>/workspace</code></div>
+			<div class="cell"><b>Secrets</b>only the names the environment lists, as env vars or files</div>
+			<div class="cell"><b>Agent</b>Paseo daemon + Claude Code (or another provider), mode bypass</div>
+		</div>
+	</div>
+	<div class="side">
+		<div class="where">Out of the box</div>
+		<b>Result</b>
+		<ul><li>reports, final answer</li><li>branch <code>mm/&lt;item&gt;</code> pushed (or a patch)</li><li>optional files (artifacts)</li></ul>
+	</div>
+</div>
+<div class="arrows"><div>task in →</div><div>nothing else enters; network as the environment allows</div><div>→ result out</div></div>
+
+<h2><span class="n">3</span> The environment becomes a box recipe</h2>
+<div class="cols">
+<div>
+<pre><code>type Environment = {
+  name: string;
+  <span class="c">// the box</span>
+  image: string;        <span class="c">// base, e.g. ghcr.io/getpaseo/paseo</span>
+  tools: string[];      <span class="c">// baked into a cached image</span>
+  setup: string[];      <span class="c">// per box, after checkout</span>
+  check: string[];      <span class="c">// must pass before the agent starts</span>
+  limits: { cpu: number; memoryMb: number;
+            timeoutMin: number };
+  network: "open" | { allow: string[] };
+  <span class="c">// what goes in</span>
+  repo: string; ref: string;
+  secrets: string[];    <span class="c">// names only</span>
+  provider: { name: "claude"; auth: string }; <span class="c">// a secret name</span>
+  <span class="c">// what comes out</span>
+  output: "branch" | "patch" | "none";
+  instructions?: string;
+};</code></pre>
+</div>
+<div>
+	<ul>
+		<li><b>Tools</b> are built into an image one time and kept by the hash of the recipe. A box starts from that image in seconds.</li>
+		<li><b>Setup</b> runs in each new box: install the repo's dependencies, seed data.</li>
+		<li><b>Check</b> proves the box is ready. A failed check ends the task with the reason; no agent starts.</li>
+		<li><b>Permissions</b> are the box limits. Inside, the agent runs with no prompts, so the start failure from today cannot happen.</li>
+		<li><b>Network</b>: open, or a list of allowed hosts.</li>
+		<li><b>Provider login</b> is one more secret, for example a Claude token, so the box needs no login by hand.</li>
+	</ul>
+</div>
+</div>
+
+<h2><span class="n">4</span> Your decisions</h2>
+
+<div class="ask">
+	<h3>A. Where do boxes run?</h3>
+	<div class="opt">
+		<div class="r"><b>1. On the runner machine <span class="rec">(recommended first)</span></b>Podman or Docker on the user's machine. The user brings the compute, as now. No new cost for Mastermind.</div>
+		<div><b>2. On box hosts that Mastermind runs</b>A pool of machines (for example Dokploy or a VM service). A user needs no machine. Mastermind pays the compute.</div>
+		<div><b>3. Both, behind one interface</b>A "box driver": local first, hosted later. Same environment recipe for both.</div>
+	</div>
+	<p>My recommendation: build the driver interface now (3), with the local driver (1) first.</p>
+</div>
+
+<div class="ask">
+	<h3>B. Where do secret values live?</h3>
+	<div class="opt">
+		<div class="r"><b>1. On the runner machine <span class="rec">(recommended first)</span></b>The user's runner keeps the values. They never reach Mastermind. Each user sets their own.</div>
+		<div><b>2. In Mastermind</b>Encrypted store per account. Set one time, used by all runners and hosted boxes. Mastermind holds the key.</div>
+		<div><b>3. Both</b>Mastermind for shared, team secrets; runner for personal ones (like the provider login).</div>
+	</div>
+	<p>My recommendation: 1 now. 2 is needed for hosted boxes (A2), so it comes with them.</p>
+</div>
+
+<div class="ask">
+	<h3>C. How does code leave the box?</h3>
+	<div class="opt">
+		<div class="r"><b>1. Push a branch <span class="rec">(recommended)</span></b><code>mm/&lt;item-id&gt;</code> to the repo, with a deploy key secret. The ticket links to it. A pull request is optional.</div>
+		<div><b>2. A patch</b>The diff goes to Mastermind and shows on the ticket. A human applies it.</div>
+		<div><b>3. Nothing</b>Only the answer text. For tasks that are questions, like your first ticket.</div>
+	</div>
+	<p>The environment chooses with <code>output</code>. A task can always also have the answer text.</p>
+</div>
+
+<div class="ask">
+	<h3>D. Is direct run (no box) still allowed?</h3>
+	<p>Today's mode, agent on the machine, is useful for a trusted machine and for tests. Recommendation: keep it as a runner setting that is <b>off</b> by default (<code>--no-box</code>), and show on the ticket when a task ran without a box.</p>
+</div>
+
+<h2><span class="n">5</span> Plan after your answers</h2>
+<table>
+	<tr><th>Step</th><th>Work</th><th>State</th></tr>
+	<tr><td>Spike</td><td>Prove one box on this machine with Podman: image from <code>ghcr.io/getpaseo/paseo</code> + Claude Code, checkout, secrets, agent run, branch out, box deleted. Measure the cold and warm start time.</td><td><span class="tag ok">started now</span></td></tr>
+	<tr><td>1</td><td>Environment becomes the box recipe (section 3); the editor on <code>/environments</code></td><td><span class="tag wait">after decisions</span></td></tr>
+	<tr><td>2</td><td>Runner: box driver interface + local Podman/Docker driver, image cache by recipe hash, limits, cleanup on every exit path</td><td><span class="tag wait">after decisions</span></td></tr>
+	<tr><td>3</td><td>Secrets on the runner (B1), provider login as a secret</td><td><span class="tag wait">after decisions</span></td></tr>
+	<tr><td>4</td><td>Output: branch push and link on the ticket (C1), patch, answer</td><td><span class="tag wait">after decisions</span></td></tr>
+	<tr><td>5</td><td>Doctor: a box test (make, check, delete) in <code>doctor --deep</code></td><td><span class="tag wait">after step 2</span></td></tr>
+</table>
+
+</main>
+</body>
+</html>
