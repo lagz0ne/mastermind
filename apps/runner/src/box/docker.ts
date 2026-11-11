@@ -140,12 +140,18 @@ export type DockerDriverOptions = {
 	/** Repository of built box images. Default `mastermind-box`. */
 	repository?: string;
 	log?: (line: string) => void;
+	/** Longest wait for one engine call. Default 60 s. */
+	callTimeoutMs?: number;
+	/** Longest pull or build. Default 30 min. */
+	imageTimeoutMs?: number;
 };
 
 export class DockerDriver implements BoxDriver {
 	readonly #ep: DockerEndpoint;
 	readonly #repo: string;
 	readonly #log: (line: string) => void;
+	readonly #callMs: number;
+	readonly #imageMs: number;
 	/** One build per image at a time. */
 	readonly #building = new Map<string, Promise<string>>();
 
@@ -153,6 +159,8 @@ export class DockerDriver implements BoxDriver {
 		this.#ep = opts.endpoint ?? dockerEndpoint(opts.env);
 		this.#repo = opts.repository ?? "mastermind-box";
 		this.#log = opts.log ?? (() => {});
+		this.#callMs = opts.callTimeoutMs ?? 60_000;
+		this.#imageMs = opts.imageTimeoutMs ?? 30 * 60_000;
 	}
 
 	get name(): string {
@@ -167,8 +175,17 @@ export class DockerDriver implements BoxDriver {
 			raw?: Uint8Array;
 			signal?: AbortSignal;
 			ok404?: boolean;
+			/** Default: the call timeout. null: none (exec output, bounded by the box). */
+			timeoutMs?: number | null;
 		} = {},
 	): Promise<Response> {
+		// The rootless Podman lock is shared: never wait for the engine forever.
+		const ms = init.timeoutMs === undefined ? this.#callMs : init.timeoutMs;
+		const timer = ms === null ? undefined : AbortSignal.timeout(ms);
+		const signals = [init.signal, timer].filter(
+			(x): x is AbortSignal => x !== undefined,
+		);
+		const signal = signals.length ? AbortSignal.any(signals) : undefined;
 		const headers: Record<string, string> = {};
 		let body: Uint8Array | string | undefined;
 		if (init.raw) {
@@ -184,11 +201,15 @@ export class DockerDriver implements BoxDriver {
 				method,
 				headers,
 				body,
-				signal: init.signal,
+				signal,
 				...(this.#ep.unix ? { unix: this.#ep.unix } : {}),
 			} as RequestInit);
 		} catch (error) {
 			if (init.signal?.aborted) throw new BoxError("stopped");
+			if (timer?.aborted)
+				throw new BoxError(
+					`${method} ${path.split("?")[0]}: the box engine did not answer in ${(ms ?? 0) / 1000} s`,
+				);
 			throw new BoxError(
 				`cannot reach the box engine at ${this.#ep.label}: ${error instanceof Error ? error.message : error}`,
 			);
@@ -252,7 +273,9 @@ export class DockerDriver implements BoxDriver {
 		const { repo, tag } = splitRef(ref);
 		this.#log(`box: pulling ${ref}`);
 		const q = new URLSearchParams({ fromImage: repo, ...(tag ? { tag } : {}) });
-		const res = await this.#fetch("POST", `/images/create?${q}`);
+		const res = await this.#fetch("POST", `/images/create?${q}`, {
+			timeoutMs: this.#imageMs,
+		});
 		await this.#progress(res, `pull ${ref}`);
 		if ((await this.#imageUser(ref)) === null)
 			throw new BoxError(`pull ${ref}: image is still missing`);
@@ -285,7 +308,10 @@ export class DockerDriver implements BoxDriver {
 			{ name: "Dockerfile", data: dockerfile(recipe, user, hash) },
 		]);
 		const q = new URLSearchParams({ t: tagged, rm: "1", forcerm: "1" });
-		const res = await this.#fetch("POST", `/build?${q}`, { raw: context });
+		const res = await this.#fetch("POST", `/build?${q}`, {
+			raw: context,
+			timeoutMs: this.#imageMs,
+		});
 		await this.#progress(res, `build ${tagged}`);
 		if ((await this.#imageUser(tagged)) === null)
 			throw new BoxError(`build ${tagged}: image is missing after the build`);
@@ -358,7 +384,12 @@ export class DockerDriver implements BoxDriver {
 	request(
 		method: string,
 		path: string,
-		init?: { body?: unknown; raw?: Uint8Array; signal?: AbortSignal },
+		init?: {
+			body?: unknown;
+			raw?: Uint8Array;
+			signal?: AbortSignal;
+			timeoutMs?: number | null;
+		},
 	): Promise<Response> {
 		return this.#fetch(method, path, init);
 	}
@@ -397,6 +428,7 @@ class DockerBox implements Box {
 		let out: Demux;
 		try {
 			const res = await d.request("POST", `/exec/${Id}/start`, {
+				timeoutMs: null,
 				body: { Detach: false, Tty: false },
 				signal: opts.signal,
 			});

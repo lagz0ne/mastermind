@@ -133,7 +133,8 @@ const server = Bun.serve({
 			...(isTar ? { raw } : {}),
 		});
 		const json = (v: unknown, status = 200) => Response.json(v, { status });
-		if (path === "/version")
+		if (path === "/slow/v1.41/version") await Bun.sleep(500);
+		if (path === "/version" || path === "/slow/v1.41/version")
 			return json({ Components: [{ Name: "Fake Engine", Version: "9.9" }] });
 		const img = path.match(/^\/images\/(.+)\/json$/);
 		if (img) {
@@ -204,6 +205,16 @@ describe("DockerDriver (fake engine)", () => {
 		const err = await off.ping().catch((e) => e);
 		expect(err).toBeInstanceOf(BoxError);
 		expect(err.message).toContain("--no-box");
+	});
+
+	test("an engine that does not answer in time is a BoxError, not a hang", async () => {
+		const slow = new DockerDriver({
+			endpoint: { base: "http://docker/slow", unix: sock, label: "slow" },
+			callTimeoutMs: 50,
+		});
+		const err = await slow.ping().catch((e) => e);
+		expect(err).toBeInstanceOf(BoxError);
+		expect(err.message).toContain("did not answer in 0.05 s");
 	});
 
 	test("ensureImage pulls the base, builds once, then uses the cache", async () => {
