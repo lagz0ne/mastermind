@@ -114,5 +114,8 @@ describe("subjects", () => {
 			"mm.u.alice.r.laptop_local.doctor",
 		);
 		expect(subjects.runnerDoctorScope("alice")).toBe("mm.u.alice.r.*.doctor");
+		expect(subjects.runnerDoctorReply("alice", "laptop", "n1")).toBe(
+			"mm.u.alice.r.laptop.doctor.reply.n1",
+		);
 	});
 });

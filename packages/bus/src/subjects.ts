@@ -4,7 +4,9 @@
  *   mm.u.<account>.q.<queue>.next    request: next dispatch for a runner
  *   mm.u.<account>.d.<bead>.<verb>    request: heartbeat | report | complete | release
  *   mm.u.<account>.r.<runner>.status publish: a runner's diagnostics (runnerToken)
- *   mm.u.<account>.r.<runner>.doctor request: run the runner's doctor (operator)
+ *   mm.u.<account>.r.<runner>.doctor request: run the runner's doctor (operator);
+ *                                    the reply goes to ...doctor.reply.<nonce>, a
+ *                                    subject the runner may publish to
  *   mm.q.<queue>.ready               publish: a queue has work
  *   mm.events.bead.<bead>            publish: one bead changed (beads journal)
  *
@@ -82,6 +84,9 @@ export const subjects = {
 	/** Request to a runner: run its doctor, reply with the report (mm-210.47). */
 	runnerDoctor: (account: string, runner: string) =>
 		`mm.u.${token("account", account)}.r.${runnerToken(runner)}.doctor`,
+	/** Where a runner answers one doctor request (inside its publish scope). */
+	runnerDoctorReply: (account: string, runner: string, nonce: string) =>
+		`mm.u.${token("account", account)}.r.${runnerToken(runner)}.doctor.reply.${token("nonce", nonce)}`,
 	/** The doctor requests of every runner of an account (the runner's subscribe permission). */
 	runnerDoctorScope: (account: string) =>
 		`mm.u.${token("account", account)}.r.*.doctor`,
