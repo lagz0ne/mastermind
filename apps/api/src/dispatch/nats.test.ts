@@ -292,6 +292,28 @@ describe.skipIf(!bin)("dispatcher over NATS", () => {
 		expect(ok.dispatch?.bead.id).toBe("mm-70");
 	});
 
+	test("a default queue takes unrouted beads; a runner gets one within 2 s", async () => {
+		work.add({ id: "mm-75", priority: 0, labels: ["area:none"] });
+		await Bun.sleep(100);
+		expect(work.beads.get("mm-75")?.labels).toEqual(["area:none"]);
+		const before = (await config.get(ROUTING_KEY))?.value as typeof ROUTING;
+		const t0 = Date.now();
+		await config.put(ROUTING_KEY, { ...before, defaultQueue: "build" });
+		for (let i = 0; i < 100; i++) {
+			if (work.beads.get("mm-75")?.labels.includes("queue:build")) break;
+			await Bun.sleep(20);
+		}
+		const got = await request<NextRequest, NextReply>(
+			runner,
+			subjects.next("alice", "build"),
+			next("alice", "d1"),
+			{ timeout: 5_000 },
+		);
+		expect(got.dispatch?.bead.id).toBe("mm-75");
+		expect(Date.now() - t0).toBeLessThan(2_000);
+		await config.put(ROUTING_KEY, before);
+	});
+
 	test("named environments: env:<name> dispatches the definition; an unknown one stays with a reason", async () => {
 		await config.put("environments", {
 			environments: [

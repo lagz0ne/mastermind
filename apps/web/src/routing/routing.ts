@@ -16,7 +16,12 @@ export type Queue = {
 	members: string[];
 	maxPerAccount?: number;
 };
-export type RoutingDoc = { queues: Queue[]; rules: Rule[] };
+export type RoutingDoc = {
+	queues: Queue[];
+	rules: Rule[];
+	/** The queue of a bead that no rule matches. None: it stays unrouted. */
+	defaultQueue?: string;
+};
 export type Routing = RoutingDoc & { revision: number };
 export type Explanation = {
 	queue: string | null;
@@ -27,7 +32,41 @@ export type Explanation = {
 export const QUEUE_NAME = /^[A-Za-z0-9_-]{1,64}$/;
 export const ACCOUNT_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
+/** Why a bead without a queue is not offered to anybody, in words. */
+export const UNROUTED_REASON =
+	"no rule matches; add a rule or move it to a queue";
+
 // --- pure edits -----------------------------------------------------------
+
+/** The document part of what the api returns (no revision). */
+export function docOf(r: RoutingDoc): RoutingDoc {
+	return {
+		queues: r.queues,
+		rules: r.rules,
+		...(r.defaultQueue ? { defaultQueue: r.defaultQueue } : {}),
+	};
+}
+
+/** Set the default queue; null (or an unknown name) removes it. */
+export function setDefaultQueue(
+	doc: RoutingDoc,
+	name: string | null,
+): RoutingDoc {
+	const { defaultQueue: _, ...rest } = doc;
+	return name && doc.queues.some((q) => q.name === name)
+		? { ...rest, defaultQueue: name }
+		: rest;
+}
+
+/**
+ * The queue to suggest as default ("send all work to <queue>?"): when exactly
+ * one queue exists, there are no rules and no default queue. Else null.
+ */
+export function suggestDefault(doc: RoutingDoc): string | null {
+	if (doc.defaultQueue || doc.rules.length > 0 || doc.queues.length !== 1)
+		return null;
+	return doc.queues[0]?.name ?? null;
+}
 
 /** Move rule `i` by `delta` (-1 up, +1 down). Out of range: unchanged. */
 export function moveRule(
@@ -75,11 +114,14 @@ export function addQueue(doc: RoutingDoc, name: string): RoutingDoc {
 	};
 }
 
-/** Remove a queue and the rules that send work to it. */
+/** Remove a queue, the rules that send work to it, and it as the default. */
 export function removeQueue(doc: RoutingDoc, name: string): RoutingDoc {
 	return {
 		queues: doc.queues.filter((q) => q.name !== name),
 		rules: doc.rules.filter((r) => r.queue !== name),
+		...(doc.defaultQueue && doc.defaultQueue !== name
+			? { defaultQueue: doc.defaultQueue }
+			: {}),
 	};
 }
 
@@ -131,6 +173,7 @@ export function changes(a: RoutingDoc, b: RoutingDoc): number {
 	const len = Math.max(a.rules.length, b.rules.length);
 	for (let i = 0; i < len; i++)
 		if (JSON.stringify(a.rules[i]) !== JSON.stringify(b.rules[i])) n++;
+	if ((a.defaultQueue ?? "") !== (b.defaultQueue ?? "")) n++;
 	return n;
 }
 

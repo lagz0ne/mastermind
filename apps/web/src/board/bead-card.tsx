@@ -13,6 +13,7 @@ import {
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { UNROUTED_REASON } from "../routing/routing.ts";
 import { type LeaseLook, leaseView, useNow } from "../work/lease.ts";
 
 export function PriorityBadge({ priority }: Pick<Bead, "priority">) {
@@ -95,7 +96,7 @@ export function BeadCard({ bead }: { bead: Bead }) {
 					) : (
 						<span
 							data-unrouted
-							title="No rule matched: nobody takes this bead until it gets a queue"
+							title={`Unrouted: ${UNROUTED_REASON}. Nobody takes this bead until it has a queue.`}
 							className="ml-auto rounded-[var(--radius)] border border-dashed px-1"
 						>
 							unrouted
@@ -103,6 +104,11 @@ export function BeadCard({ bead }: { bead: Bead }) {
 					)}
 				</CardHeader>
 				<CardTitle>{bead.title}</CardTitle>
+				{!queue && (
+					<p data-unrouted-reason className="text-[11px] text-muted-foreground">
+						{UNROUTED_REASON}
+					</p>
+				)}
 				{(bead.assignee || bead.lease || env) && (
 					<CardFooter className="text-[11px] text-muted-foreground">
 						<EnvMark bead={bead} />

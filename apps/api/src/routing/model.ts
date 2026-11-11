@@ -25,7 +25,12 @@ export type Queue = {
 	environment?: string;
 };
 
-export type RoutingDoc = { queues: Queue[]; rules: RoutingRule[] };
+export type RoutingDoc = {
+	queues: Queue[];
+	rules: RoutingRule[];
+	/** The queue of a bead that no rule matches. None: such a bead stays unrouted. */
+	defaultQueue?: string;
+};
 
 export const EMPTY_ROUTING: RoutingDoc = { queues: [], rules: [] };
 
@@ -156,9 +161,20 @@ export function validate(
 		});
 	}
 
+	const dq = input.defaultQueue;
+	let defaultQueue: string | undefined;
+	if (dq !== undefined && dq !== null && dq !== "") {
+		if (typeof dq !== "string" || !names.has(dq))
+			errors.push(`defaultQueue: queue ${JSON.stringify(dq)} does not exist`);
+		else defaultQueue = dq;
+	}
+
 	return errors.length
 		? { ok: false, errors }
-		: { ok: true, doc: { queues, rules } };
+		: {
+				ok: true,
+				doc: { queues, rules, ...(defaultQueue ? { defaultQueue } : {}) },
+			};
 }
 
 /** Read a stored value leniently: a broken document routes nothing. */
@@ -187,7 +203,20 @@ function describe(match: RuleMatch): string {
 	return parts.length ? parts.join(" and ") : "every bead";
 }
 
-/** Which queue a bead goes to, and why. Same decision as `route()` of the router. */
+/**
+ * The rules as the router applies them: the document's rules, then a rule that
+ * matches every bead and sends it to the default queue (when one is set).
+ */
+export function effectiveRules(doc: RoutingDoc): RoutingRule[] {
+	return doc.defaultQueue
+		? [...doc.rules, { match: {}, queue: doc.defaultQueue }]
+		: doc.rules;
+}
+
+/**
+ * Which queue a bead goes to, and why. Same decision as `route()` of the
+ * router with {@link effectiveRules}.
+ */
 export function explain(bead: RoutableBead, doc: RoutingDoc): RouteExplanation {
 	const current = queueOf(bead);
 	if (current)
@@ -198,11 +227,17 @@ export function explain(bead: RoutableBead, doc: RoutingDoc): RouteExplanation {
 		};
 	const i = doc.rules.findIndex((r) => matches(bead, r.match));
 	if (i < 0)
-		return {
-			queue: null,
-			ruleIndex: null,
-			why: "no rule matches: the bead stays unrouted",
-		};
+		return doc.defaultQueue
+			? {
+					queue: doc.defaultQueue,
+					ruleIndex: null,
+					why: `no rule matches: the default queue ${doc.defaultQueue} takes it`,
+				}
+			: {
+					queue: null,
+					ruleIndex: null,
+					why: "no rule matches: the bead stays unrouted",
+				};
 	const rule = doc.rules[i] as RoutingRule;
 	return {
 		queue: rule.queue,

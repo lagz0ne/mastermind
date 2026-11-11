@@ -14,6 +14,7 @@ import {
 	addQueue,
 	addRule,
 	changes,
+	docOf,
 	type Explanation,
 	getRouting,
 	moveRule,
@@ -27,8 +28,10 @@ import {
 	removeQueue,
 	removeRule,
 	saveRouting,
+	setDefaultQueue,
 	setQueue,
 	setRule,
+	suggestDefault,
 	tryRouting,
 } from "./routing.ts";
 
@@ -464,7 +467,7 @@ export function RoutingPage() {
 		getRouting()
 			.then((r) => {
 				setSaved(r);
-				setDraft({ queues: r.queues, rules: r.rules });
+				setDraft(docOf(r));
 				setConflict(null);
 			})
 			.catch((e) => setError(errorText(e)));
@@ -483,13 +486,15 @@ export function RoutingPage() {
 		setWinner(null);
 	};
 	const dirty = changes(saved, draft);
-	const save = () => {
+	// Only offered on the saved state, so "Yes" saves nothing else by surprise.
+	const suggested = dirty === 0 ? suggestDefault(draft) : null;
+	const save = (doc: RoutingDoc = draft) => {
 		setSaving(true);
 		setError(null);
-		saveRouting(draft, saved.revision)
+		saveRouting(doc, saved.revision)
 			.then((r) => {
 				setSaved(r);
-				setDraft({ queues: r.queues, rules: r.rules });
+				setDraft(docOf(r));
 				setConflict(null);
 			})
 			.catch((e) => {
@@ -502,7 +507,7 @@ export function RoutingPage() {
 	const reload = () => {
 		if (!conflict) return load();
 		setSaved(conflict);
-		setDraft({ queues: conflict.queues, rules: conflict.rules });
+		setDraft(docOf(conflict));
 		setConflict(null);
 	};
 
@@ -528,7 +533,7 @@ export function RoutingPage() {
 					variant="outline"
 					className="h-6 px-2 text-xs"
 					disabled={dirty === 0 || saving}
-					onClick={() => edit({ queues: saved.queues, rules: saved.rules })}
+					onClick={() => edit(docOf(saved))}
 				>
 					Discard
 				</Button>
@@ -536,7 +541,7 @@ export function RoutingPage() {
 					size="sm"
 					className="h-6 px-2 text-xs"
 					disabled={dirty === 0 || saving}
-					onClick={save}
+					onClick={() => save()}
 				>
 					{saving ? "Saving…" : "Save"}
 				</Button>
@@ -561,6 +566,26 @@ export function RoutingPage() {
 						onClick={reload}
 					>
 						Reload
+					</Button>
+				</div>
+			)}
+			{suggested && (
+				<div
+					data-doop-id="routing-suggest-default"
+					className="mx-4 mb-3 flex items-center gap-3 border border-l-[3px] px-2.5 py-1.5 text-xs"
+				>
+					<span>
+						No rules: new work stays unrouted and no runner gets it.{" "}
+						<b className="font-semibold">Send all work to {suggested}?</b>
+					</span>
+					<span className="flex-1" />
+					<Button
+						size="sm"
+						className="h-5 px-1.5 text-[11px]"
+						disabled={saving}
+						onClick={() => save(setDefaultQueue(draft, suggested))}
+					>
+						Yes, send all to {suggested}
 					</Button>
 				</div>
 			)}
@@ -622,7 +647,9 @@ export function RoutingPage() {
 					>
 						{draft.rules.length === 0 && (
 							<p className="py-2 text-muted-foreground text-xs">
-								No rules: new beads stay unrouted.
+								{draft.defaultQueue
+									? `No rules: new beads go to the default queue ${draft.defaultQueue}.`
+									: "No rules: new beads stay unrouted."}
 							</p>
 						)}
 						{draft.rules.map((r, i) => (
@@ -639,6 +666,30 @@ export function RoutingPage() {
 								onRemove={() => edit(removeRule(draft, i))}
 							/>
 						))}
+						<label
+							data-doop-id="routing-default-queue"
+							className="flex items-center gap-2 py-1.5 text-xs"
+						>
+							<span className="text-muted-foreground">
+								When no rule matches
+							</span>
+							<select
+								aria-label="Default queue"
+								value={draft.defaultQueue ?? ""}
+								disabled={draft.queues.length === 0}
+								onChange={(e) =>
+									edit(setDefaultQueue(draft, e.target.value || null))
+								}
+								className={cn(input, "h-5 px-0.5 font-medium text-[11px]")}
+							>
+								<option value="">the bead stays unrouted</option>
+								{draft.queues.map((q) => (
+									<option key={q.name} value={q.name}>
+										send it to {q.name}
+									</option>
+								))}
+							</select>
+						</label>
 					</Section>
 					<TryBead
 						draft={draft}

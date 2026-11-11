@@ -27,6 +27,7 @@ import {
 	CONFIG_BUCKET,
 	defaultEnvironment,
 	EMPTY_ROUTING,
+	effectiveRules,
 	parseStored,
 	ROUTING_KEY,
 	type RoutingState,
@@ -136,7 +137,14 @@ export async function startDispatch(
 	const environments = kvEnvironments ? await watchEnvironments(nc) : null;
 	const dispatcher = new Dispatcher({
 		...rest,
-		...(routing ? { rules: () => routing.get()?.doc.rules ?? [] } : {}),
+		...(routing
+			? {
+					rules: () => {
+						const doc = routing.get()?.doc;
+						return doc ? effectiveRules(doc) : [];
+					},
+				}
+			: {}),
 		...(environments
 			? {
 					resolveEnv: (bead, queue) => {

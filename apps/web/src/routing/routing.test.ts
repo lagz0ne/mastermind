@@ -6,6 +6,7 @@ import {
 	addRule,
 	changes,
 	describeMatch,
+	docOf,
 	moveRule,
 	parseLabels,
 	parseTry,
@@ -13,6 +14,8 @@ import {
 	removeMember,
 	removeQueue,
 	saveRouting,
+	setDefaultQueue,
+	suggestDefault,
 } from "./routing.ts";
 
 const DOC: RoutingDoc = {
@@ -104,5 +107,32 @@ describe("api", () => {
 		const headers = (put?.init?.headers ?? {}) as Record<string, string>;
 		expect(headers["x-csrf-token"]).toBe("tok");
 		expect(JSON.parse(String(put?.init?.body)).revision).toBe(3);
+	});
+});
+
+describe("default queue", () => {
+	const one: RoutingDoc = {
+		queues: [{ name: "build", description: "", members: ["lagz0ne"] }],
+		rules: [],
+	};
+	test("one queue and no rules: suggest it; not once a default or a rule exists", () => {
+		expect(suggestDefault(one)).toBe("build");
+		expect(suggestDefault(setDefaultQueue(one, "build"))).toBeNull();
+		expect(suggestDefault(addRule(one))).toBeNull();
+		expect(suggestDefault(DOC)).toBeNull();
+		expect(suggestDefault({ queues: [], rules: [] })).toBeNull();
+	});
+	test("set, clear, count as a change, and keep through docOf", () => {
+		const d = setDefaultQueue(one, "build");
+		expect(d.defaultQueue).toBe("build");
+		expect(changes(one, d)).toBe(1);
+		expect(docOf({ ...d, revision: 3 } as RoutingDoc)).toEqual(d);
+		expect(setDefaultQueue(d, null)).toEqual(one);
+		expect(setDefaultQueue(one, "nope")).toEqual(one);
+	});
+	test("removing the default queue clears it", () => {
+		const d = setDefaultQueue(DOC, "web");
+		expect(removeQueue(d, "web").defaultQueue).toBeUndefined();
+		expect(removeQueue(d, "backend").defaultQueue).toBe("web");
 	});
 });

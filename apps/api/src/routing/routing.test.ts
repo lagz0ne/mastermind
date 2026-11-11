@@ -4,6 +4,7 @@ import type { Bead } from "@mastermind/core";
 import { NotFound } from "@mastermind/work";
 import {
 	defaultEnvironment,
+	effectiveRules,
 	explain,
 	queuesOf,
 	ROUTING_KEY,
@@ -145,6 +146,35 @@ describe("explain", () => {
 			queue: null,
 			ruleIndex: null,
 		});
+	});
+	test("default queue: a bead no rule matches goes there", () => {
+		const v = validate({
+			queues: [{ name: "build", members: [] }],
+			rules: [{ match: { type: "bug" }, queue: "build" }],
+			defaultQueue: "build",
+		});
+		if (!v.ok) throw new Error(v.errors.join("; "));
+		expect(v.doc.defaultQueue).toBe("build");
+		const e = explain(bead({ type: "task" }), v.doc);
+		expect(e).toMatchObject({ queue: "build", ruleIndex: null });
+		expect(e.why).toContain("default queue build");
+		// A matching rule still wins and names its index.
+		expect(explain(bead({ type: "bug" }), v.doc).ruleIndex).toBe(0);
+		// The router sees it as one more rule that matches every bead.
+		expect(effectiveRules(v.doc)).toEqual([
+			{ match: { type: "bug" }, queue: "build" },
+			{ match: {}, queue: "build" },
+		]);
+		expect(effectiveRules({ queues: [], rules: [] })).toEqual([]);
+	});
+	test("default queue must exist; empty or null means none", () => {
+		const bad = validate({ queues: [], rules: [], defaultQueue: "nope" });
+		expect(bad.ok).toBe(false);
+		if (!bad.ok) expect(bad.errors[0]).toContain("defaultQueue");
+		for (const none of [null, "", undefined]) {
+			const v = validate({ queues: [], rules: [], defaultQueue: none });
+			expect(v.ok && v.doc.defaultQueue).toBeUndefined();
+		}
 	});
 	test("queuesOf lists the queues of an account", () => {
 		expect(queuesOf(doc.doc, "alice")).toEqual(["backend", "web"]);

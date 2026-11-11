@@ -4,7 +4,8 @@
  * - {@link admit}: may `account` take work from `queue`? Not a member is the
  *   typed bus error `not_a_member`.
  * - {@link reroute}: after the rules or queues change, put every open bead that
- *   has no queue on the queue its first matching rule names.
+ *   has no queue on the queue its first matching rule names (else the default
+ *   queue).
  *
  * Before anybody saves routing (KV revision 0), queues are open: every account
  * may take work from every queue. The first save closes them to their members.
@@ -12,7 +13,7 @@
 import { BusError } from "@mastermind/bus";
 import { type Bead, queueLabel, queueOf } from "@mastermind/core";
 import { route } from "@mastermind/router";
-import { queueNamed, type RoutingState } from "./model.ts";
+import { effectiveRules, queueNamed, type RoutingState } from "./model.ts";
 
 export async function admit(
 	state: RoutingState | null,
@@ -48,7 +49,10 @@ export type RerouteWork = {
 	setLabels(id: string, actor: string, labels: string[]): Promise<Bead>;
 };
 
-/** Route every open, unrouted bead by the current rules. Returns the ids moved. */
+/**
+ * Route every open, unrouted bead by the current rules, then the default
+ * queue. Returns the ids moved.
+ */
 export async function reroute(
 	work: RerouteWork,
 	state: RoutingState,
@@ -56,9 +60,10 @@ export async function reroute(
 	onError?: (error: unknown) => void,
 ): Promise<string[]> {
 	const moved: string[] = [];
+	const rules = effectiveRules(state.doc);
 	for (const bead of await work.unrouted()) {
 		if (bead.status !== "open" || queueOf(bead)) continue;
-		const target = route(bead, state.doc.rules);
+		const target = route(bead, rules);
 		if (!target) continue;
 		try {
 			await work.setLabels(bead.id, actor, [
