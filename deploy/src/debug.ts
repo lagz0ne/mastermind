@@ -4,17 +4,28 @@
  * The key is never printed.
  */
 
-export type DebugArgs = { what: "state"; json: boolean };
+export type DebugArgs =
+	| { what: "state"; json: boolean }
+	| { what: "item"; id: string; json: boolean };
 
 export function parseDebugArgs(argv: string[]): DebugArgs | null {
 	const json = argv.includes("--json");
 	const rest = argv.filter((a) => a !== "--json");
-	if (rest.length !== 1 || rest[0] !== "state") return null;
-	return { what: "state", json };
+	if (rest.length === 1 && rest[0] === "state") return { what: "state", json };
+	if (rest.length === 2 && rest[0] === "item" && rest[1])
+		return { what: "item", id: rest[1], json };
+	return null;
+}
+
+/** The path under /api/debug/ for `args`. */
+export function debugPath(args: DebugArgs): string {
+	return args.what === "item"
+		? `items/${encodeURIComponent(args.id)}`
+		: "state";
 }
 
 export const DEBUG_USAGE =
-	"usage: bun deploy/dokploy.ts debug state [--json]  (MASTERMIND_URL + MASTERMIND_OPERATOR_KEY from env, else the app env in Dokploy)";
+	"usage: bun deploy/dokploy.ts debug state|item <id> [--json]  (MASTERMIND_URL + MASTERMIND_OPERATOR_KEY from env, else the app env in Dokploy)";
 
 export async function fetchDebug(
 	url: string,
@@ -184,5 +195,45 @@ export function formatState(s: Any): string {
 		if (!lines.length) return "  (none)";
 		return lines.map((l) => `  ${l.at}  ${l.line}`).join("\n");
 	});
+	return out.join("\n");
+}
+
+/** One item and why it is or is not dispatched, as text for a human. */
+export function formatItem(x: Any): string {
+	const b = x.item ?? {};
+	const r = x.routing ?? {};
+	const out = [
+		`${b.id}  ${b.title}`,
+		`  status ${b.status}${b.blocked ? " (blocked)" : ""}  type ${b.type}  priority ${b.priority}`,
+		`  labels ${list(b.labels)}`,
+		`  holder ${b.assignee ?? "-"}  lease ${b.lease ? `expires ${b.lease.expiresAt}, heartbeat ${b.lease.heartbeatAt}` : "-"}`,
+		"",
+		"== routing",
+		`  queue ${r.queue ?? "-"} (by ${r.by}${r.ruleIndex != null ? ` rule ${r.ruleIndex}` : ""})  members ${list(r.members)}  requires ${list(r.requires)}`,
+		table(
+			["runner", "online", "member", "missing", "free"],
+			((r.runners ?? []) as Any[]).map((w) => [
+				w.runner,
+				w.online ? "yes" : "NO",
+				w.member == null ? "open" : w.member ? "yes" : "NO",
+				list(w.missing),
+				w.free == null ? "?" : w.free ? "yes" : "NO",
+			]),
+		),
+		(r.blockers ?? []).length
+			? `  NOT OFFERED because:\n${(r.blockers as string[]).map((l) => `    - ${l}`).join("\n")}`
+			: "  nothing blocks it: an idle runner on the queue should get it",
+		"",
+		"== timeline",
+		...((x.timeline ?? []) as Any[]).map(
+			(e) =>
+				`  #${e.seq}  ${e.at}  ${e.op}  ${e.actor}${e.bead ? `  -> ${e.bead.status}${e.bead.assignee ? ` (${e.bead.assignee})` : ""}` : ""}`,
+		),
+		"",
+		"== comments",
+		...((x.comments ?? []) as Any[]).map(
+			(c) => `  ${c.createdAt}  ${c.author}: ${c.text}`,
+		),
+	];
 	return out.join("\n");
 }

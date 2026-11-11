@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { fetchDebug, formatState, parseDebugArgs } from "./debug.ts";
+import {
+	debugPath,
+	fetchDebug,
+	formatItem,
+	formatState,
+	parseDebugArgs,
+} from "./debug.ts";
 
 describe("debug cli", () => {
 	test("parses state and --json", () => {
@@ -78,5 +84,42 @@ describe("debug cli", () => {
 		expect(text).toContain("unrouted (open, no queue): mm-1");
 		expect(text).toContain("main   duke");
 		expect(text).toContain("work: boom");
+	});
+});
+
+describe("debug item cli", () => {
+	test("parses item <id> and builds the path", () => {
+		const a = parseDebugArgs(["item", "mm-1", "--json"]);
+		expect(a).toEqual({ what: "item", id: "mm-1", json: true });
+		expect(debugPath(a as never)).toBe("items/mm-1");
+		expect(parseDebugArgs(["item"])).toBeNull();
+	});
+
+	test("formats the reasons an item is not offered", () => {
+		const text = formatItem({
+			item: { id: "mm-1", title: "fix it", status: "open", labels: [] },
+			routing: {
+				queue: null,
+				by: "none",
+				ruleIndex: null,
+				members: null,
+				requires: [],
+				runners: [],
+				blockers: ["no queue: label and no rule matches (it stays unrouted)"],
+			},
+			timeline: [
+				{
+					seq: 4,
+					at: "t",
+					op: "create",
+					actor: "duke",
+					bead: { status: "open" },
+				},
+			],
+			comments: [],
+		});
+		expect(text).toContain("NOT OFFERED because:");
+		expect(text).toContain("stays unrouted");
+		expect(text).toContain("#4  t  create  duke  -> open");
 	});
 });

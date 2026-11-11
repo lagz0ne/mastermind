@@ -6,18 +6,22 @@
  */
 import { clientIp, RateLimit } from "../auth/rate-limit.ts";
 import { sameSecret, sha256 } from "../auth/secrets.ts";
+import { decide, type ItemSources } from "./item.ts";
 import { type DebugSources, debugState } from "./state.ts";
 
 export type DebugRoutesOptions = {
 	operatorKey?: string;
 	sources: DebugSources;
+	/** The work store, for GET /api/debug/items/:id; null without one. */
+	items?: ItemSources | null;
 	audit?: (line: string) => void;
 	onError?: (error: unknown) => void;
 	/** Requests per minute per address. Default 60. */
 	perMinute?: number;
 };
 
-type Handler = (req: Request) => Promise<Response>;
+type Req = Request & { params?: Record<string, string> };
+type Handler = (req: Req) => Promise<Response>;
 
 const fail = (status: number, error: string) =>
 	Response.json({ error }, { status });
@@ -28,11 +32,12 @@ export function debugRoutes(opts: DebugRoutesOptions) {
 	const audit = opts.audit ?? console.log;
 
 	const operator =
-		(name: string, fn: (req: Request) => Promise<Response>): Handler =>
+		(name: string, fn: (req: Req) => Promise<Response>): Handler =>
 		async (req) => {
 			const ip = clientIp(req);
 			const done = (res: Response) => {
-				audit(`debug: ${name} from ${ip} -> ${res.status}`);
+				const id = req.params?.id ? ` ${req.params.id.slice(0, 64)}` : "";
+				audit(`debug: ${name}${id} from ${ip} -> ${res.status}`);
 				return res;
 			};
 			if (!keyHash) return done(fail(404, "debug is off: no operator key"));
@@ -57,6 +62,45 @@ export function debugRoutes(opts: DebugRoutesOptions) {
 					headers: { "cache-control": "no-store" },
 				}),
 			),
+		},
+		"/api/debug/items/:id": {
+			GET: operator("item", async (req) => {
+				const store = opts.items;
+				if (!store) return fail(503, "the work store is off");
+				const id = req.params?.id ?? "";
+				const src = opts.sources;
+				let bead: Awaited<ReturnType<ItemSources["get"]>>;
+				try {
+					bead = await store.get(id);
+				} catch (error) {
+					if ((error as { name?: string })?.name === "NotFound")
+						return fail(404, `no item ${id}`);
+					throw error;
+				}
+				const [timeline, comments, routing] = await Promise.all([
+					store.journalOf(id),
+					store.comments(id),
+					src
+						.routing?.()
+						?.read()
+						.catch(() => null) ?? null,
+				]);
+				const now = (src.now ?? (() => new Date()))();
+				return Response.json(
+					{
+						item: bead,
+						routing: decide(
+							bead,
+							routing as Parameters<typeof decide>[1],
+							src.runners?.() ?? [],
+							now,
+						),
+						timeline,
+						comments,
+					},
+					{ headers: { "cache-control": "no-store" } },
+				);
+			}),
 		},
 	};
 }

@@ -10,7 +10,7 @@
 //                                    Dokploy queue and status, fail with the log tail, wait for health
 //   bun deploy/dokploy.ts login-approve <code> --account <name>
 //                                    approve a login code shown on <public url>/login (the operator)
-//   bun deploy/dokploy.ts debug state [--json]
+//   bun deploy/dokploy.ts debug state|item <id> [--json]
 //                                    the operator's read-only snapshot of production (runners,
 //                                    routing, items, NATS, last errors). MASTERMIND_URL and
 //                                    MASTERMIND_OPERATOR_KEY from env, else the app env in Dokploy
@@ -34,7 +34,9 @@ import { createAccount, fromSeed } from "@nats-io/nkeys";
 import { probe } from "./nats/smoke.ts";
 import {
 	DEBUG_USAGE,
+	debugPath,
 	fetchDebug,
+	formatItem,
 	formatState,
 	parseDebugArgs,
 } from "./src/debug.ts";
@@ -633,8 +635,9 @@ async function debug(argv: string[]) {
 			);
 		url = cfg.publicUrl;
 	}
-	const body = await fetchDebug(url, key, args.what);
-	console.log(args.json ? JSON.stringify(body, null, 2) : formatState(body));
+	const body = await fetchDebug(url, key, debugPath(args));
+	const text = args.what === "item" ? formatItem(body) : formatState(body);
+	console.log(args.json ? JSON.stringify(body, null, 2) : text);
 }
 
 /** App env keys of the stores Mastermind no longer uses; apply removes them. */
@@ -729,7 +732,7 @@ const commands: Record<string, () => Promise<void>> = {
 const command = commands[process.argv[2] ?? ""];
 if (!command) {
 	console.error(
-		"usage: bun deploy/dokploy.ts status | apply | secrets | release <sha|latest> | login-approve <code> --account <name> | debug state [--json] | retire [--stop] | jetstream <list|backup|restore|usage|marker> ...",
+		"usage: bun deploy/dokploy.ts status | apply | secrets | release <sha|latest> | login-approve <code> --account <name> | debug state|item <id> [--json] | retire [--stop] | jetstream <list|backup|restore|usage|marker> ...",
 	);
 	process.exit(2);
 }

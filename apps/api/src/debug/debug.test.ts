@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Bead } from "@mastermind/core";
+import { decide } from "./item.ts";
 import { LogRing, redact } from "./log-ring.ts";
 import { debugRoutes } from "./routes.ts";
 import { type DebugSources, debugState, type summarizeItems } from "./state.ts";
@@ -184,5 +185,83 @@ describe("debug routes", () => {
 		});
 		expect((await get(routes, "Bearer k")).status).toBe(200);
 		expect((await get(routes, "Bearer k")).status).toBe(429);
+	});
+});
+
+describe("debug item", () => {
+	const runner = (over: Record<string, unknown> = {}) =>
+		({
+			account: "duke",
+			runner: "laptop",
+			serviceAccount: "s1",
+			queues: ["main"],
+			capabilities: ["git"],
+			providers: [],
+			capacity: 1,
+			version: "v1",
+			running: [],
+			lastSeenAt: now.toISOString(),
+			online: true,
+			...over,
+		}) as never;
+	const routing = {
+		revision: 2,
+		doc: {
+			queues: [{ name: "main", members: ["duke"] }],
+			rules: [{ match: { type: "bug" }, queue: "main" }],
+		},
+	};
+
+	test("routed by rule, an online member runner can take it: no blockers", () => {
+		const d = decide(bead("x", { type: "bug" }), routing, [runner()], now);
+		expect(d).toMatchObject({ queue: "main", by: "rule", ruleIndex: 0 });
+		expect(d.blockers).toEqual([]);
+	});
+
+	test("unrouted, and a runner that is offline or lacks a capability", () => {
+		expect(decide(bead("y"), routing, [], now).blockers).toEqual([
+			"no queue: label and no rule matches (it stays unrouted)",
+		]);
+		const d = decide(
+			bead("z", { labels: ["queue:main", "req:gpu"] }),
+			routing,
+			[runner({ online: false })],
+			now,
+		);
+		expect(d.by).toBe("label");
+		expect(d.runners[0]?.missing).toEqual(["gpu"]);
+		expect(d.blockers[0]).toContain("no online runner on main");
+	});
+
+	test("route: item, timeline, routing; 404 for an unknown id", async () => {
+		const items = {
+			get: async (id: string) => {
+				if (id !== "x")
+					throw Object.assign(new Error("nf"), { name: "NotFound" });
+				return bead("x", { type: "bug" });
+			},
+			journalOf: async () => [],
+			comments: async () => [],
+		};
+		const routes = debugRoutes({
+			operatorKey: "k",
+			sources: { ...sources, routing: () => ({ read: async () => routing }) },
+			items: items as never,
+			audit: () => {},
+		});
+		const call = (id: string) =>
+			routes["/api/debug/items/:id"].GET(
+				Object.assign(
+					new Request(`http://x/api/debug/items/${id}`, {
+						headers: { authorization: "Bearer k" },
+					}),
+					{ params: { id } },
+				),
+			);
+		const ok = await call("x");
+		expect(ok.status).toBe(200);
+		const body = (await ok.json()) as { routing: { queue: string } };
+		expect(body.routing.queue).toBe("main");
+		expect((await call("nope")).status).toBe(404);
 	});
 });

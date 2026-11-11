@@ -344,6 +344,7 @@ per minute. Each call writes one audit line (`debug: state from <ip> -> <status>
 ```bash
 bun deploy/dokploy.ts debug state          # tables for a human
 bun deploy/dokploy.ts debug state --json   # the raw snapshot
+bun deploy/dokploy.ts debug item <id>      # one item: routing decision, runners, why it is not offered, timeline
 # Without Dokploy (another site, local dev):
 MASTERMIND_URL=http://localhost:3000 MASTERMIND_OPERATOR_KEY=... bun deploy/dokploy.ts debug state
 ```
@@ -361,6 +362,12 @@ The CLI reads the key from the app env through the Dokploy API and never prints 
 | `environments` | The environment definitions and their revision. |
 | `items` | Counts per board column and per status, ready items per queue, `unrouted` (open items with no `queue:` label: no runner gets them), and `claimed` items with holder, lease state and expiry. |
 | `errors[]` | The last 100 `console.error` lines of the process. Tokens (`mml_`, `mme_`, `mms_`), login codes and Bearer values are redacted. |
+
+`debug item <id>` (`GET /api/debug/items/:id`) shows the item, its timeline and comments, and
+`routing`: the queue and how the system chose it (`label`, `rule` with its index, or `none`), the
+runners on that queue (online, member, missing capabilities, free slot), and `blockers`. The
+`blockers` list gives each reason why no runner gets the item now. An empty list means that an idle
+runner on the queue gets the item.
 
 The snapshot reads each section on its own with a 5 s timeout. A failed section shows
 `{ "error": "..." }`, and the rest of the snapshot is still there.

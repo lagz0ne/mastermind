@@ -163,6 +163,7 @@ const debug = debugRoutes({
 		items: natsWork ? () => natsWork.board.board() : null,
 		errors: () => errorLines.lines(),
 	},
+	items: natsWork ? natsWork.beads : null,
 	onError: (error) => console.error(`debug: ${error}`),
 });
 
