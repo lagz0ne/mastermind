@@ -51,6 +51,8 @@ export type RunnerOptions = {
 	/** Pause after an empty `next`, cut short by a ready notice. Default 2 s. */
 	idleMs?: number;
 	backoff?: Backoff;
+	/** Latest provider check results (false: not available in Paseo). */
+	providerStatus?: () => Record<string, boolean>;
 	/** Called when in-flight work, the last `next` or the last decision changes. */
 	onChange?: () => void;
 };
@@ -291,7 +293,10 @@ export class Runner {
 		const id = d.bead.id;
 		this.#log(`${id}: dispatched (${d.queue}, ${d.stage})`);
 
-		const decision = route(d, this.#routing, settings.providers);
+		const decision = route(d, this.#routing, settings.providers, {
+			agentProvider: settings.agent.provider,
+			available: this.#o.providerStatus?.(),
+		});
 		this.lastDecision = decision.ok
 			? `${id}: ${decisionLine(decision, settings.id)}`
 			: `${id}: declined: ${decision.reason}`;

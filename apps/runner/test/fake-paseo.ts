@@ -50,6 +50,20 @@ switch (args[0]) {
 	}
 	case "run": {
 		const prompt = args.at(-1) ?? "";
+		// Like the real CLI: no --provider, no agent.
+		if (!flags("--provider").length) {
+			console.log(
+				JSON.stringify({
+					error: {
+						code: "MISSING_PROVIDER",
+						message: "Provider is required",
+						details:
+							"Pass --provider <provider> or --provider <provider>/<model>",
+					},
+				}),
+			);
+			process.exit(1);
+		}
 		const agent: Agent = {
 			id: `agent-${agents().length + 1}`,
 			labels: labelsOf(),

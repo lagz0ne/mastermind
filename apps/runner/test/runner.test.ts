@@ -1,9 +1,18 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { rmSync } from "node:fs";
 import type { CheckResult } from "../src/check.ts";
 import { defaultSettings, type RunnerSettings } from "../src/config.ts";
+import { PaseoLauncher } from "../src/launcher.ts";
 import { parseRouting, type Routing } from "../src/routing.ts";
 import { agentPrompt, executionId, Runner } from "../src/runner.ts";
-import { dispatch, FakeLauncher, FakeMastermind, until } from "./fakes.ts";
+import {
+	dispatch,
+	FAKE_PASEO,
+	FakeLauncher,
+	FakeMastermind,
+	fakePaseoDir,
+	until,
+} from "./fakes.ts";
 
 const settings = (over: Partial<RunnerSettings> = {}): RunnerSettings => ({
 	...defaultSettings("laptop"),
@@ -46,6 +55,40 @@ function make(
 }
 
 describe("Runner", () => {
+	test("no --provider configured: paseo run still gets one (mm-210.46)", async () => {
+		// The fake paseo fails like the real one without --provider.
+		const fake = fakePaseoDir();
+		try {
+			const mm = new FakeMastermind();
+			mm.push(dispatch("mm-1"));
+			runner = new Runner({
+				client: mm,
+				launcher: new PaseoLauncher({
+					command: FAKE_PASEO,
+					env: { FAKE_PASEO_DIR: fake.dir, PASEO_AGENT_ID: "" },
+				}),
+				settings: settings({ agent: {}, providers: ["codex", "claude"] }),
+				check: pass,
+				providerStatus: () => ({ codex: false, claude: true }),
+				idleMs: 10,
+				heartbeatMs: 20,
+				backoff: { minMs: 5, maxMs: 20 },
+			});
+			runner.start();
+			await until(() => mm.verbs("complete").length === 1, 10_000);
+			expect(mm.verbs("report")[0]?.text).toBe(
+				"target default on local, provider claude (runner laptop, rule 1)",
+			);
+			const run = fake.calls().find((c) => c.args[0] === "run")?.args ?? [];
+			expect(run[run.indexOf("--provider") + 1]).toBe("claude");
+			expect(mm.verbs("release")).toEqual([]);
+		} finally {
+			await runner?.stop();
+			runner = undefined;
+			rmSync(fake.dir, { recursive: true, force: true });
+		}
+	});
+
 	test("done: completes the bead with the agent's summary", async () => {
 		const mm = new FakeMastermind();
 		const agents = new FakeLauncher({ status: "done", summary: "fixed it" });

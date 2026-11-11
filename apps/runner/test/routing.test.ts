@@ -181,6 +181,50 @@ describe("implicit routing (the old flags)", () => {
 	});
 });
 
+describe("the provider is never empty (paseo run needs --provider)", () => {
+	// The production case (mm-um2m): implicit routing, no --provider flag.
+	const bare = implicitRouting({ agent: {} });
+
+	test("no layer sets it: the first offered provider; the line names it", () => {
+		const r = route(d(), bare, ["claude"]);
+		if (!r.ok) throw new Error(r.reason);
+		expect(r.agent.provider).toBe("claude");
+		expect(decisionLine(r, "box")).toBe(
+			"target default on local, provider claude (runner box, rule 1)",
+		);
+		expect(r.why.join("\n")).toContain("provider claude from runner providers");
+	});
+
+	test("the runner default comes before the provider list", () => {
+		const r = route(d(), bare, ["claude", "codex"], { agentProvider: "codex" });
+		expect(r.ok && r.agent.provider).toBe("codex");
+	});
+
+	test("a provider whose check failed is skipped", () => {
+		const r = route(d(), bare, ["codex", "claude"], {
+			agentProvider: "codex",
+			available: { codex: false, claude: true },
+		});
+		expect(r.ok && r.agent.provider).toBe("claude");
+	});
+
+	test("none available: decline with the reason", () => {
+		const r = route(d(), bare, ["claude"], { available: { claude: false } });
+		expect(r).toMatchObject({
+			ok: false,
+			reason: "no provider available on this runner (offered: claude)",
+		});
+		expect(route(d(), bare, [])).toMatchObject({ ok: false });
+	});
+
+	test("a rule's provider still wins", () => {
+		const r = route(d({ env: "ml" }), sample(), ["claude", "codex"], {
+			available: { codex: false },
+		});
+		expect(r.ok && r.agent.provider).toBe("codex");
+	});
+});
+
 test("parseRouting names the bad field", () => {
 	const bad = (v: unknown) => {
 		try {

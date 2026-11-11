@@ -8,7 +8,10 @@
  *      here (plus requires and secrets, see check.ts): met, or declined
  *   b. the user's rules, in order, first match wins: a target, or decline
  *   c. agent fields: rule, then target, then the instruction's preference
- *      (env.agent, env.provider), then the stage default; first set wins
+ *      (env.agent, env.provider), then the stage default; first set wins.
+ *      The provider is never left empty (paseo run needs --provider): then the
+ *      runner's default provider, then the first offered provider whose check
+ *      did not fail; none: decline
  *   d. no rule matches: decline with the reason (Mastermind gets the bead back)
  *
  * The file is `routing.json` next to the runner config (no secrets in it).
@@ -259,11 +262,20 @@ export function mismatch(m: RuleMatch, d: Routable): string | null {
 	return null;
 }
 
+/** Where the provider comes from when no layer sets one. */
+export type ProviderFallback = {
+	/** The runner's own default (`settings.agent.provider`). */
+	agentProvider?: string;
+	/** Provider check results (diagnostics); false: not available. */
+	available?: Record<string, boolean>;
+};
+
 /** Pick the target and agent for a dispatch. Pure: no files, no commands. */
 export function route(
 	d: Routable,
 	routing: Routing,
 	providers: string[],
+	fallback: ProviderFallback = {},
 ): Decision {
 	const why: string[] = [];
 	const name = d.env.name;
@@ -316,12 +328,12 @@ export function route(
 		mode: d.env.agent?.mode,
 		model: undefined as string | undefined,
 	};
-	const fallback = routing.defaults?.[d.stage] ?? {};
+	const stageDefault = routing.defaults?.[d.stage] ?? {};
 	const layers = [
 		["rule", rule],
 		["target", target],
 		["instruction", pref],
-		["default", fallback],
+		["default", stageDefault],
 	] as const;
 	const agent: AgentSettings = {};
 	const from: string[] = [];
@@ -344,6 +356,22 @@ export function route(
 			}
 		}
 	}
+	if (!agent.provider) {
+		const ok = (p: string) =>
+			fallback.available?.[p.split("/")[0] as string] !== false;
+		const own = fallback.agentProvider;
+		const p = own && ok(own) ? own : providers.find(ok);
+		if (!p)
+			return {
+				ok: false,
+				reason: `no provider available on this runner (offered: ${providers.join(", ") || "none"})`,
+				why,
+			};
+		agent.provider = p;
+		from.push(
+			`provider ${p} from ${p === own ? "runner default" : "runner providers"}`,
+		);
+	}
 	if (from.length) why.push(from.join(", "));
 	return {
 		ok: true,
@@ -364,7 +392,7 @@ export function decisionLine(
 ): string {
 	const parts = [
 		`target ${d.target} on ${d.host ?? "local"}`,
-		`provider ${d.agent.provider ?? "default"}`,
+		`provider ${d.agent.provider ?? "none"}`,
 	];
 	if (d.agent.mode) parts.push(`mode ${d.agent.mode}`);
 	return `${parts.join(", ")} (runner ${runnerId}, rule ${d.rule})`;

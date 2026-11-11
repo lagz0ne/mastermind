@@ -539,7 +539,9 @@ async function cmdRoute(
 	const s = applyFlags(cfg?.runner ?? defaultSettings("dry-run"), f, io.cwd);
 	const { routing, source } = await routingFor(path, s, f, io);
 	const d = await sampleDispatch(file, f, io);
-	const r = route(d, routing, s.providers);
+	const r = route(d, routing, s.providers, {
+		agentProvider: s.agent.provider,
+	});
 	if (r.ok) {
 		io.out(decisionLine(r, s.id));
 		if (r.binding)
@@ -624,6 +626,7 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 			routing,
 			setupMemory: new FileSetupMemory(join(dirname(path), "setup-state.json")),
 			log,
+			providerStatus: () => diag.checks.providers,
 			onChange: () => diag.changed(),
 		});
 		diag.loop = runner;
