@@ -19,18 +19,18 @@ function SheetContent({
 		<SheetPrimitive.Portal>
 			<SheetPrimitive.Overlay
 				data-slot="sheet-overlay"
-				className="fixed inset-0 z-50 bg-black/40"
+				className="fixed inset-0 z-50 bg-black/20"
 			/>
 			<SheetPrimitive.Content
 				data-slot="sheet-content"
 				className={cn(
-					"fixed inset-y-0 right-0 z-50 flex h-full w-full flex-col gap-4 overflow-y-auto border-l bg-background p-4 sm:max-w-md",
+					"fixed inset-y-0 right-0 z-50 flex h-full w-full flex-col gap-3 overflow-y-auto border-l bg-background p-3 sm:max-w-md",
 					className,
 				)}
 				{...props}
 			>
 				{children}
-				<SheetPrimitive.Close className="absolute top-3 right-3 rounded-sm px-1.5 text-lg text-muted-foreground leading-none hover:text-foreground focus-visible:outline-2">
+				<SheetPrimitive.Close className="absolute top-1.5 right-1.5 flex size-7 items-center justify-center rounded-sm text-lg text-muted-foreground leading-none hover:bg-accent hover:text-foreground focus-visible:outline-2 max-sm:size-8">
 					<span aria-hidden>×</span>
 					<span className="sr-only">Close</span>
 				</SheetPrimitive.Close>
@@ -43,7 +43,7 @@ function SheetHeader({ className, ...props }: React.ComponentProps<"div">) {
 	return (
 		<div
 			data-slot="sheet-header"
-			className={cn("flex flex-col gap-1 pr-8", className)}
+			className={cn("flex flex-col gap-0.5 pr-8", className)}
 			{...props}
 		/>
 	);
@@ -56,7 +56,7 @@ function SheetTitle({
 	return (
 		<SheetPrimitive.Title
 			data-slot="sheet-title"
-			className={cn("font-bold text-lg leading-tight", className)}
+			className={cn("font-bold text-base leading-tight", className)}
 			{...props}
 		/>
 	);

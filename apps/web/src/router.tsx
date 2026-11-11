@@ -27,7 +27,7 @@ function Layout() {
 	return (
 		<TooltipProvider>
 			<div className="flex h-dvh flex-col">
-				<header className="sticky top-0 z-10 flex h-(--header-height) shrink-0 items-center gap-4 border-b bg-background px-3">
+				<header className="sticky top-0 z-10 flex h-(--header-height) shrink-0 items-center gap-4 border-b bg-background px-4">
 					<Link to="/board" className="font-bold text-[13px] tracking-tight">
 						mastermind
 					</Link>

@@ -1,8 +1,8 @@
 /*
  * Theme tokens: the only place colours, type and radius are defined.
  * Swiss, light, compact (mm-210.40): one sans family, near-black on white,
- * hairline grey borders, one accent (--signal) used sparingly for state,
- * focus and the rare emphasis. Hierarchy by weight and size only.
+ * hairline grey borders, one accent (--signal, red) used sparingly for state
+ * and the rare emphasis; focus is near-black. Hierarchy by weight and size.
  * Components only reference the tokens (bg-background, text-sm, ...);
  * styles.css maps --type-* to the Tailwind text-* scale.
  */
@@ -46,7 +46,7 @@
 	--live: #1a7f37;
 	--border: #e4e4e4;
 	--input: #dcdcdc;
-	--ring: #d4281c;
+	--ring: #111111;
 }
 
 /*

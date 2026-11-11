@@ -4,7 +4,7 @@ import type * as React from "react";
 import { cn } from "@/lib/utils";
 
 const buttonVariants = cva(
-	"inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md font-medium text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50",
+	"inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md font-medium text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/60 disabled:pointer-events-none disabled:opacity-50",
 	{
 		variants: {
 			variant: {
@@ -13,9 +13,10 @@ const buttonVariants = cva(
 				ghost: "hover:bg-accent hover:text-accent-foreground",
 			},
 			size: {
-				default: "h-8 px-3",
-				sm: "h-7 px-2 text-xs",
-				icon: "size-8",
+				// 28px controls; 32px on a phone (touch target).
+				default: "h-7 px-3 max-sm:h-8",
+				sm: "h-7 px-2 text-xs max-sm:h-8",
+				icon: "size-7 max-sm:size-8",
 			},
 		},
 		defaultVariants: { variant: "default", size: "default" },
