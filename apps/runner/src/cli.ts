@@ -16,7 +16,7 @@
  * Settings: --queue <q> (repeat), --capacity <n|unlimited>, --capability <c> (repeat),
  * --providers a,b, --workdir <dir>, --repo <url>=<dir> (repeat), --id <id>,
  * --provider <p>, --model <m>, --mode <m>, --assistant-provider <p>,
- * --allow-setup, --paseo-host <host>, --routing <file>.
+ * --allow-setup, --allow-remote-probe (the operator may run doctor --deep remotely), --paseo-host <host>, --routing <file>.
  *
  * Environment: MASTERMIND_URL, MASTERMIND_NATS_URL, MASTERMIND_RUNNER_CONFIG,
  * MASTERMIND_RUNNER_ROUTING, MASTERMIND_RUNNER_SECRETS.
@@ -50,13 +50,16 @@ import {
 } from "./config.ts";
 import {
 	Diagnostics,
+	readDoctor,
 	runChecks,
 	startReporter,
 	statusPath,
+	writeDoctor,
 } from "./diagnostics.ts";
 import { formatReport, runDoctor } from "./doctor.ts";
 import { EnrolError, enrol } from "./enroll.ts";
 import { PaseoLauncher } from "./launcher.ts";
+import { serveDoctor } from "./remote-doctor.ts";
 import {
 	decisionLine,
 	lintRouting,
@@ -94,6 +97,7 @@ const OPTIONS = {
 	mode: { type: "string" },
 	"assistant-provider": { type: "string" },
 	"allow-setup": { type: "boolean" },
+	"allow-remote-probe": { type: "boolean" },
 	"paseo-host": { type: "string" },
 	routing: { type: "string" },
 	env: { type: "string" },
@@ -134,7 +138,7 @@ const USAGE = `usage:
 
 settings: --queue <q>... --capacity <n|unlimited> --capability <c>... --providers a,b
   --workdir <dir> --repo <url>=<dir>... --id <id> --provider <p> --model <m>
-  --mode <m> --assistant-provider <p> --allow-setup --paseo-host <host>
+  --mode <m> --assistant-provider <p> --allow-setup --allow-remote-probe --paseo-host <host>
   --routing <file> (default: routing.json next to the config)
 env: MASTERMIND_URL, MASTERMIND_NATS_URL, MASTERMIND_RUNNER_CONFIG,
   MASTERMIND_RUNNER_ROUTING, MASTERMIND_RUNNER_SECRETS`;
@@ -171,6 +175,7 @@ export function applyFlags(
 	if (f["assistant-provider"])
 		s.assistant = { ...s.assistant, provider: f["assistant-provider"] };
 	if (f["allow-setup"]) s.allowSetup = true;
+	if (f["allow-remote-probe"]) s.allowRemoteProbe = true;
 	if (s.workdir && !isAbsolute(s.workdir))
 		throw new UsageError("workdir must be absolute");
 	return s;
@@ -465,6 +470,28 @@ async function cmdStatus(path: string, f: Flags, io: Io): Promise<number> {
  * Test the path a dispatch takes (doctor.ts): a. config, b. NATS, c. routing,
  * d. Paseo, and with --deep e. a real agent. Exit 1 when a step fails.
  */
+/** What the doctor needs, for a local and for a remote run. */
+function doctorInput(
+	path: string,
+	cfg: RunnerConfig | null,
+	s: RunnerSettings,
+	routing: Routing,
+	source: string,
+	io: Io,
+) {
+	return {
+		config: cfg,
+		configPath: path,
+		settings: s,
+		routing,
+		routingSource: source,
+		mastermindUrl: io.env.MASTERMIND_URL ?? cfg?.mastermindUrl,
+		natsUrl: io.env.MASTERMIND_NATS_URL ?? cfg?.natsUrl,
+		version: VERSION,
+		secrets: () => secretsFor(cfg, routing, io),
+	};
+}
+
 async function cmdDoctor(path: string, f: Flags, io: Io): Promise<number> {
 	const cfg = await loadConfig(path);
 	const s = applyFlags(
@@ -494,18 +521,12 @@ async function cmdDoctor(path: string, f: Flags, io: Io): Promise<number> {
 			});
 	}
 	const report = await runDoctor({
-		config: cfg,
-		configPath: path,
-		settings: s,
-		routing,
-		routingSource: source,
-		mastermindUrl: io.env.MASTERMIND_URL ?? cfg?.mastermindUrl,
-		natsUrl: io.env.MASTERMIND_NATS_URL ?? cfg?.natsUrl,
-		version: VERSION,
+		...doctorInput(path, cfg, s, routing, source, io),
 		deep: f.deep === true,
 		runnerProblems,
-		secrets: () => secretsFor(cfg, routing, io),
 	});
+	// The running runner sends it to Mastermind as lastDoctor.
+	if (cfg) await writeDoctor(path, report).catch(() => {});
 	if (f.json) io.out(JSON.stringify(report, null, 2));
 	else for (const l of formatReport(report)) io.out(l);
 	return report.ok ? EXIT.ok : EXIT.error;
@@ -636,7 +657,11 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 			if (conn && !conn.isClosed()) publish(conn, statusSubject, d);
 		},
 		file: statusPath(path),
-		check: () => runChecks(settings, { paseoHost: f["paseo-host"] }),
+		check: async () => {
+			// A local `doctor` run writes doctor.json; send it as lastDoctor.
+			diag.doctor(await readDoctor(path));
+			return runChecks(settings, { paseoHost: f["paseo-host"] });
+		},
 	});
 	const stopping = new AbortController();
 	const onSignal = () => stopping.abort();
@@ -693,6 +718,22 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 		});
 		diag.loop = runner;
 		runner.start();
+		// The operator's remote doctor (debug doctor <account>/<runner>).
+		serveDoctor(nc, {
+			account: cfg.account,
+			runnerId: settings.id,
+			allowRemoteProbe: settings.allowRemoteProbe === true,
+			run: (deep) =>
+				runDoctor({
+					...doctorInput(path, cfg, settings, routing, source, io),
+					deep,
+				}),
+			onReport: (r) => {
+				diag.doctor(r);
+				void writeDoctor(path, r).catch(() => {});
+			},
+			log,
+		});
 		// Needed secret names: at start and every few minutes (names only).
 		let lastMissing = "";
 		const learnSecrets = async () => {

@@ -41,6 +41,11 @@ export type RunnerSettings = {
 	assistant?: AgentSettings;
 	/** Run the shell commands of `env.setup`. Off by default. */
 	allowSetup: boolean;
+	/**
+	 * The operator may run doctor step e (a real agent, costs tokens) on this
+	 * runner remotely (`debug doctor --deep`). Off by default.
+	 */
+	allowRemoteProbe?: boolean;
 };
 
 export type RunnerConfig = {

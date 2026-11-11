@@ -42,6 +42,8 @@ export type DoctorStep = {
 	ms: number;
 	/** What was checked and seen, one line each. */
 	detail: string[];
+	/** The line that made the step WARN or FAIL. */
+	problem?: string;
 	/** How to fix a WARN or FAIL. */
 	fix?: string;
 };
@@ -230,6 +232,7 @@ const RANK: Record<StepStatus, number> = { skip: 0, pass: 1, warn: 2, fail: 3 };
 class Step {
 	status: StepStatus = "pass";
 	readonly detail: string[] = [];
+	problem?: string;
 	fix?: string;
 	ok(line: string) {
 		this.detail.push(line);
@@ -244,6 +247,7 @@ class Step {
 		this.detail.push(line);
 		if (RANK[s] > RANK[this.status]) {
 			this.status = s;
+			this.problem = line;
 			this.fix = fix;
 		} else if (s === this.status && !this.fix) this.fix = fix;
 	}
@@ -308,6 +312,7 @@ export async function runDoctor(
 			status: st.status,
 			ms: Math.round(clock() - t0),
 			detail: st.detail,
+			...(st.problem ? { problem: st.problem } : {}),
 			...(st.fix ? { fix: st.fix } : {}),
 		});
 		return st.status;

@@ -381,3 +381,27 @@ after `--since`, then live events. A keep-alive comment goes every 8 s.
 
 The snapshot reads each section on its own with a 5 s timeout. A failed section shows
 `{ "error": "..." }`, and the rest of the snapshot is still there.
+
+### Runner doctor (remote)
+
+`debug doctor <account>/<runner> [--deep]` (`POST /api/debug/runners/:account/:runner/doctor`,
+add `?deep=1`) asks one running runner to run `mastermind-runner doctor` and returns its report:
+steps a. config, b. NATS, c. routing, d. Paseo, and e. a real agent. The README of `apps/runner`
+lists what each step tests.
+
+```bash
+bun deploy/dokploy.ts debug doctor lagz0ne/yo-buid          # steps a-d, about 5-30 s
+bun deploy/dokploy.ts debug doctor lagz0ne/yo-buid --deep   # also e, up to 2 min
+```
+
+- Transport: a NATS request on `mm.u.<account>.r.<runner>.doctor`. The runner replies on
+  `mm.u.<account>.r.<runner>.doctor.reply.<nonce>`, a subject it may already publish to. The service
+  account may subscribe to `mm.u.<account>.r.*.doctor`, for its own account only.
+- Step e starts an agent and costs tokens. Remotely, the runner runs it only when its owner started
+  it with `--allow-remote-probe`. Otherwise step e says `skipped: not allowed by the runner owner`.
+- Each report goes into the runner diagnostics as `lastDoctor`, from a remote and from a local
+  doctor run. `debug state` shows one line per runner (`doctor <account>/<runner> <age>: a PASS, ...`)
+  and each WARN or FAIL with its fix.
+- 404: the runner does not answer (it is not running, or its version has no remote doctor: update
+  it). 504: no answer in time. Only one doctor runs at a time on a runner (a second request gets an
+  error).

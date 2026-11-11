@@ -16,6 +16,7 @@ import type {
 	RunnerState,
 } from "@mastermind/core";
 import type { RunnerSettings } from "./config.ts";
+import type { DoctorReport } from "./doctor.ts";
 import type { SecretsDiagnostics } from "./secrets/needs.ts";
 
 export const STATUS_EVERY_MS = 15_000;
@@ -45,6 +46,46 @@ export function redactLine(line: string): string {
 
 const PROBLEM =
 	/fail|error|declin|refus|lost|revok|disconnect|retry|timeout|denied|not |cannot|exited/i;
+
+/** The report with every line redacted. */
+export function redactReport(r: DoctorReport): DoctorReport {
+	return {
+		...r,
+		steps: r.steps.map((s) => ({
+			...s,
+			detail: s.detail.map(redactLine),
+			...(s.problem ? { problem: redactLine(s.problem) } : {}),
+			...(s.fix ? { fix: redactLine(s.fix) } : {}),
+		})),
+	};
+}
+
+/** `doctor.json` next to the runner config: the last local doctor report. */
+export const doctorPath = (configPath: string) =>
+	join(dirname(configPath), "doctor.json");
+
+export async function writeDoctor(
+	configPath: string,
+	r: DoctorReport,
+): Promise<void> {
+	const path = doctorPath(configPath);
+	await mkdir(dirname(path), { recursive: true });
+	const tmp = `${path}.tmp-${process.pid}`;
+	await writeFile(tmp, `${JSON.stringify(redactReport(r), null, 2)}\n`, {
+		mode: 0o600,
+	});
+	await rename(tmp, path);
+}
+
+export async function readDoctor(
+	configPath: string,
+): Promise<DoctorReport | null> {
+	try {
+		return (await Bun.file(doctorPath(configPath)).json()) as DoctorReport;
+	} catch {
+		return null;
+	}
+}
 
 /** Is this log line worth keeping as a problem? */
 export const isProblem = (line: string) => PROBLEM.test(line);
@@ -170,6 +211,8 @@ export class Diagnostics {
 	loop: LoopView | null = null;
 	/** Needed and missing secret NAMES (never values); null until learned. */
 	secrets: SecretsDiagnostics | null = null;
+	/** The last doctor report (local or remote), redacted; null: none yet. */
+	lastDoctor: DoctorReport | null = null;
 	readonly #errors: string[] = [];
 	readonly #listeners = new Set<() => void>();
 
@@ -206,7 +249,17 @@ export class Diagnostics {
 		}
 	}
 
-	snapshot(): RunnerDiagnostics & { secrets?: SecretsDiagnostics } {
+	/** Keep `r` as lastDoctor when it is newer than the one kept. */
+	doctor(r: DoctorReport | null): void {
+		if (!r || (this.lastDoctor && this.lastDoctor.at >= r.at)) return;
+		this.lastDoctor = redactReport(r);
+		this.changed();
+	}
+
+	snapshot(): RunnerDiagnostics & {
+		secrets?: SecretsDiagnostics;
+		lastDoctor?: DoctorReport;
+	} {
 		const s = this.settings;
 		const inFlight = this.loop?.inFlight() ?? [];
 		return {
@@ -226,6 +279,7 @@ export class Diagnostics {
 			checks: this.checks,
 			lastErrors: [...this.#errors],
 			...(this.secrets ? { secrets: this.secrets } : {}),
+			...(this.lastDoctor ? { lastDoctor: this.lastDoctor } : {}),
 		};
 	}
 }
