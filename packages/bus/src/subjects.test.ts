@@ -96,4 +96,19 @@ describe("subjects", () => {
 		expect(shape(patterns.ready)).toBe(shape(subjects.ready("a")));
 		expect(shape(patterns.beadEvents)).toBe(shape(subjects.beadEvent("a.1")));
 	});
+
+	test("runner status: one token for the runner id, parse gives it back", () => {
+		expect(subjects.runnerStatus("alice", "laptop.local")).toBe(
+			"mm.u.alice.r.laptop_local.status",
+		);
+		expect(parseSubject("mm.u.alice.r.laptop_local.status")).toEqual({
+			kind: "runnerStatus",
+			account: "alice",
+			runner: "laptop_local",
+		});
+		expect(patterns.runnerStatus.split(".").length).toBe(
+			subjects.runnerStatus("a", "b").split(".").length,
+		);
+		expect(() => subjects.runnerStatus("a.b", "x")).toThrow();
+	});
 });

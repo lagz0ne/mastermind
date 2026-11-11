@@ -160,3 +160,53 @@ export type Ack = { ok: true };
 
 /** Mastermind publishes this when a queue gets work, so idle runners ask `next`. */
 export type ReadyNotice = { queue: string; beadId: string; at: string };
+
+/** Connection state of a runner adapter, as the runner itself sees it. */
+export type RunnerState = "connecting" | "connected" | "revoked" | "stopping";
+
+/** One dispatch the runner is working on. */
+export type RunnerInFlight = {
+	itemId: string;
+	queue: string;
+	stage: DispatchStage;
+	/** Routing target; null until routed. */
+	target: string | null;
+	startedAt: string;
+	/** Paseo agent id, when the launcher knows it. */
+	paseoAgentId: string | null;
+};
+
+/**
+ * What a runner publishes about itself on `mm.u.<account>.r.<runner>.status`
+ * (every 15 s and on change), for troubleshooting from Mastermind. It holds no
+ * secrets: the runner strips credentials and tokens from `lastErrors`.
+ */
+export type RunnerDiagnostics = {
+	runner: string;
+	version: string;
+	/** When the runner made this snapshot (ISO). */
+	at: string;
+	state: RunnerState;
+	/** The NATS server it is connected to, or null. */
+	natsServer: string | null;
+	reconnects: number;
+	queues: string[];
+	capacity: number;
+	running: number;
+	inFlight: RunnerInFlight[];
+	lastNextAt: string | null;
+	lastNextResult: "dispatch" | "empty" | "error" | null;
+	/** Routing of the last dispatch: target line or decline reason. */
+	lastDecision: string | null;
+	checks: {
+		/** The Paseo daemon answers `paseo ls`. */
+		paseo: boolean | null;
+		/** Provider name → available (logged in) in Paseo. */
+		providers: Record<string, boolean>;
+		/** The workdir exists; null when none is set. */
+		workdir: boolean | null;
+		checkedAt: string | null;
+	};
+	/** The last 20 problem lines of the runner log, without secrets. */
+	lastErrors: string[];
+};

@@ -161,6 +161,72 @@ describe("enroll, status, check", () => {
 		expect(t.out.join("\n")).not.toContain("secret");
 	});
 
+	test("status shows the runner's last status.json; --json too", async () => {
+		const path = join(dir, "c", "status.json");
+		writeFileSync(
+			path,
+			JSON.stringify({
+				runner: "laptop",
+				version: "dev",
+				at: new Date().toISOString(),
+				state: "connected",
+				natsServer: "wss://nats.example:443",
+				reconnects: 2,
+				queues: ["backend"],
+				capacity: 1,
+				running: 1,
+				inFlight: [
+					{
+						itemId: "mm-1",
+						queue: "backend",
+						stage: "work",
+						target: "local",
+						startedAt: "2026-11-11T00:00:00.000Z",
+						paseoAgentId: null,
+					},
+				],
+				lastNextAt: null,
+				lastNextResult: "dispatch",
+				lastDecision: "mm-1: target local",
+				checks: {
+					paseo: false,
+					providers: { claude: false },
+					workdir: true,
+					checkedAt: null,
+				},
+				lastErrors: ["next backend: timeout"],
+			}),
+		);
+		const t = io();
+		expect(await main(["status"], t.io)).toBe(EXIT.ok);
+		const text = t.out.join("\n");
+		expect(text).toContain("connected, nats wss://nats.example:443");
+		expect(text).toContain("mm-1 backend/work target local");
+		expect(text).toContain("paseo ✗");
+		expect(text).toContain("next backend: timeout");
+		expect(text).not.toContain("STALE");
+		const j = io();
+		expect(await main(["status", "--json"], j.io)).toBe(EXIT.ok);
+		const parsed = JSON.parse(j.out.join("\n"));
+		expect(parsed.diagnostics.reconnects).toBe(2);
+		expect(parsed.stale).toBe(false);
+		expect(j.out.join("\n")).not.toContain("secret");
+		rmSync(path);
+	});
+
+	test("doctor names each problem with a fix", async () => {
+		const t = io({ MASTERMIND_URL: "http://127.0.0.1:1" });
+		const code = await main(
+			["doctor", "--workdir", "/no/such/dir-mm", "--paseo-host", "127.0.0.1:1"],
+			t.io,
+		);
+		expect(code).toBe(EXIT.error);
+		const text = t.out.join("\n");
+		expect(text).toContain("✗ workdir /no/such/dir-mm does not exist");
+		expect(text).toContain("✗ Mastermind does not answer");
+		expect(text).toContain("fix:");
+	});
+
 	test("check reports missing capabilities", async () => {
 		const t = io();
 		const code = await main(["check", "--capability", "no-such-tool-mm"], t.io);

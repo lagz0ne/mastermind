@@ -7,6 +7,9 @@ import { startAuthInBackground } from "./auth/start.ts";
 import { backupsFromEnv, jetstreamHealth } from "./backup/start.ts";
 import { beadsRoutes } from "./beads/routes.ts";
 import { boardRoutes } from "./board/routes.ts";
+import { ConnectionWatch } from "./debug/connections.ts";
+import { captureConsoleErrors, LogRing } from "./debug/log-ring.ts";
+import { debugRoutes } from "./debug/routes.ts";
 import type { DispatchNats } from "./dispatch/start.ts";
 import { downloadRoutes } from "./download/routes.ts";
 import { environmentRoutes } from "./environments/routes.ts";
@@ -21,6 +24,10 @@ import { startNatsWork } from "./store/nats-work.ts";
 
 const env = process.env;
 const version = env.GIT_SHA ?? "dev";
+const startedAt = new Date();
+// The last error lines, for GET /api/debug/state (redacted).
+const errorLines = new LogRing(100);
+captureConsoleErrors(errorLines);
 // OTLP logs, traces and metrics: no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set.
 const telemetry = telemetryFromEnv(env, {
 	serviceName: env.OTEL_SERVICE_NAME || "mastermind",
@@ -63,7 +70,13 @@ if (!auth && env.AUTH_DISABLED === "1")
 // /people: accounts and the live runner list (the dispatcher feeds the registry).
 const runners = new RunnerRegistry();
 let authNow: Auth | null = null;
-auth?.ready.then((s) => (authNow = s.auth)).catch(() => {});
+auth?.ready
+	.then((s) => {
+		authNow = s.auth;
+		// Runners publish their own diagnostics (mm-210.43).
+		runners.listen(s.app);
+	})
+	.catch(() => {});
 const people = peopleRoutes({
 	requireAccount,
 	auth: () => authNow,
@@ -132,6 +145,27 @@ const beads = beadsRoutes(natsWork ? natsWork.beads : null, {
 	onError: (error) => console.error(`beads: ${error}`),
 });
 
+// Read-only operator snapshot (Bearer MASTERMIND_OPERATOR_KEY; off when unset).
+const connections = new ConnectionWatch();
+auth?.ready
+	.then((s) => connections.watch("mastermind-app", s.app))
+	.catch(() => {});
+const debug = debugRoutes({
+	operatorKey: env.MASTERMIND_OPERATOR_KEY,
+	sources: {
+		version,
+		startedAt,
+		connections: () => connections.list(),
+		auth: () => authNow,
+		runners: () => runners.list(),
+		routing: () => routing?.store() ?? null,
+		environments: () => environments?.store() ?? null,
+		items: natsWork ? () => natsWork.board.board() : null,
+		errors: () => errorLines.lines(),
+	},
+	onError: (error) => console.error(`debug: ${error}`),
+});
+
 const server = Bun.serve({
 	port,
 	development: env.NODE_ENV !== "production",
@@ -151,6 +185,7 @@ const server = Bun.serve({
 			...routingApi,
 			...environmentsApi,
 			...beads,
+			...debug,
 			// Public: /install.sh and the runner binaries of this commit.
 			...downloadRoutes({
 				version,

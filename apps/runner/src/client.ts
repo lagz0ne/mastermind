@@ -180,6 +180,8 @@ export type ConnectRunnerOptions = {
 	onRevoked?: () => void;
 	/** Ask `verify` at most this often while auth errors go on (ms). */
 	verifyEveryMs?: number;
+	/** Every NATS status change (disconnect, reconnect, ...), for diagnostics. */
+	onStatus?: (type: string) => void;
 };
 
 /** While NATS refuses the credential, ask Mastermind at most every 30 s. */
@@ -228,6 +230,7 @@ export async function connectRunner(
 				timeout: 10_000,
 				retryAuthErrors: true,
 				onStatus: (s) => {
+					opts.onStatus?.(s.type);
 					if (s.type === "disconnect" || s.type === "reconnect")
 						log(`nats: ${s.type}`);
 					if (s.type === "error" && isAuthFailure(s.error))

@@ -11,7 +11,7 @@
  *
  * Agents never talk to Mastermind; the runner reports for them.
  */
-import type { Dispatch } from "@mastermind/core";
+import type { Dispatch, RunnerInFlight } from "@mastermind/core";
 import { type CheckResult, checkDispatch, type SetupMemory } from "./check.ts";
 import {
 	BACKOFF,
@@ -51,6 +51,8 @@ export type RunnerOptions = {
 	/** Pause after an empty `next`, cut short by a ready notice. Default 2 s. */
 	idleMs?: number;
 	backoff?: Backoff;
+	/** Called when in-flight work, the last `next` or the last decision changes. */
+	onChange?: () => void;
 };
 
 /** A FIFO counting semaphore. */
@@ -132,6 +134,8 @@ type Execution = {
 	/** Why it was aborted. */
 	why?: "stopped" | "lost";
 	done: Promise<void>;
+	startedAt: string;
+	target: string | null;
 };
 
 /** Read at call time (the heartbeat sets `why` concurrently). */
@@ -148,6 +152,11 @@ export class Runner {
 	readonly #wake = new Map<string, AbortController>();
 	#pollers: Promise<void>[] = [];
 	#unsubscribe: (() => void)[] = [];
+	/** For diagnostics: when the last `next` answered, and how. */
+	lastNextAt: string | null = null;
+	lastNextResult: "dispatch" | "empty" | "error" | null = null;
+	/** For diagnostics: routing of the last dispatch (target line or decline). */
+	lastDecision: string | null = null;
 
 	constructor(options: RunnerOptions) {
 		this.#o = options;
@@ -159,6 +168,30 @@ export class Runner {
 	/** Beads with a running agent. */
 	running(): string[] {
 		return [...this.#running.keys()];
+	}
+
+	/** The dispatches being worked on, for diagnostics. */
+	inFlight(): RunnerInFlight[] {
+		return [...this.#running.values()].map((e) => ({
+			itemId: e.dispatch.bead.id,
+			queue: e.dispatch.queue,
+			stage: e.dispatch.stage,
+			target: e.target,
+			startedAt: e.startedAt,
+			paseoAgentId: null,
+		}));
+	}
+
+	#changed(): void {
+		try {
+			this.#o.onChange?.();
+		} catch {}
+	}
+
+	#nextResult(r: "dispatch" | "empty" | "error"): void {
+		this.lastNextAt = new Date().toISOString();
+		this.lastNextResult = r;
+		this.#changed();
 	}
 
 	/** Start polling every queue. */
@@ -210,7 +243,9 @@ export class Runner {
 			try {
 				dispatch = await client.next(queue);
 				failures = 0;
+				this.#nextResult(dispatch ? "dispatch" : "empty");
 			} catch (error) {
+				this.#nextResult("error");
 				this.#slots.release();
 				failures++;
 				const wait = backoffMs(failures, this.#o.backoff ?? BACKOFF);
@@ -237,11 +272,15 @@ export class Runner {
 			dispatch,
 			abort: new AbortController(),
 			done: Promise.resolve(),
+			startedAt: new Date().toISOString(),
+			target: null,
 		};
 		this.#running.set(dispatch.bead.id, exec);
+		this.#changed();
 		exec.done = this.#execute(exec).finally(() => {
 			this.#running.delete(dispatch.bead.id);
 			this.#slots.release();
+			this.#changed();
 		});
 	}
 
@@ -252,6 +291,11 @@ export class Runner {
 		this.#log(`${id}: dispatched (${d.queue}, ${d.stage})`);
 
 		const decision = route(d, this.#routing, settings.providers);
+		this.lastDecision = decision.ok
+			? `${id}: ${decisionLine(decision, settings.id)}`
+			: `${id}: declined: ${decision.reason}`;
+		if (decision.ok) exec.target = decision.target;
+		this.#changed();
 		if (!decision.ok) {
 			this.#log(`${id}: declined: ${decision.reason}`);
 			await this.#safe(d, "release", decision.reason);

@@ -8,7 +8,8 @@
  *   mastermind-runner start [settings] [--save]
  *   mastermind-runner check [settings]
  *   mastermind-runner route [dispatch.json] [--env e --queue q --stage s --type t --label l --priority n]
- *   mastermind-runner status
+ *   mastermind-runner status [--json]
+ *   mastermind-runner doctor [settings]
  *   mastermind-runner --version
  *
  * Settings: --queue <q> (repeat), --capacity <n>, --capability <c> (repeat),
@@ -21,10 +22,12 @@
  */
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
+import { publish, subjects } from "@mastermind/bus";
 import {
 	DISPATCH_STAGES,
 	type Dispatch,
 	type DispatchStage,
+	type RunnerDiagnostics,
 	type RunnerInfo,
 } from "@mastermind/core";
 import { checkRequirement, FileSetupMemory } from "./check.ts";
@@ -44,6 +47,13 @@ import {
 	type RunnerSettings,
 	saveConfig,
 } from "./config.ts";
+import {
+	Diagnostics,
+	problems,
+	runChecks,
+	startReporter,
+	statusPath,
+} from "./diagnostics.ts";
 import { EnrolError, enrol } from "./enroll.ts";
 import { PaseoLauncher } from "./launcher.ts";
 import {
@@ -89,6 +99,7 @@ const OPTIONS = {
 	priority: { type: "string" },
 	save: { type: "boolean" },
 	force: { type: "boolean" },
+	json: { type: "boolean" },
 	version: { type: "boolean", short: "v" },
 	help: { type: "boolean", short: "h" },
 } as const;
@@ -107,7 +118,8 @@ const USAGE = `usage:
   mastermind-runner check [settings]
   mastermind-runner route [dispatch.json] [--env <name>] [--queue <q>]
       [--stage work] [--type <t>] [--label <l>]... [--priority <n>]
-  mastermind-runner status
+  mastermind-runner status [--json]
+  mastermind-runner doctor [settings]
   mastermind-runner --version
 
 settings: --queue <q>... --capacity <n> --capability <c>... --providers a,b
@@ -301,15 +313,10 @@ export async function main(argv: string[], io: Io): Promise<number> {
 				return await cmdCheck(path, f, io);
 			case "route":
 				return await cmdRoute(path, rest[0], f, io);
-			case "status": {
-				const cfg = await loadConfig(path);
-				io.out(
-					cfg
-						? JSON.stringify({ path, ...redact(cfg) }, null, 2)
-						: `not enrolled (${path})`,
-				);
-				return cfg ? EXIT.ok : EXIT.error;
-			}
+			case "status":
+				return await cmdStatus(path, f, io);
+			case "doctor":
+				return await cmdDoctor(path, f, io);
 			default:
 				throw new UsageError(`unknown command ${cmd}`);
 		}
@@ -328,6 +335,132 @@ export async function main(argv: string[], io: Io): Promise<number> {
 		}
 		throw error;
 	}
+}
+
+/** A status.json older than this: the runner is probably not running. */
+const STALE_MS = 60_000;
+
+async function readStatus(path: string): Promise<RunnerDiagnostics | null> {
+	try {
+		return (await Bun.file(statusPath(path)).json()) as RunnerDiagnostics;
+	} catch {
+		return null;
+	}
+}
+
+/** The config and the last status the running runner wrote. */
+async function cmdStatus(path: string, f: Flags, io: Io): Promise<number> {
+	const cfg = await loadConfig(path);
+	const status = await readStatus(path);
+	const age = status ? Date.now() - Date.parse(status.at) : null;
+	const stale = age === null || Number.isNaN(age) || age > STALE_MS;
+	if (f.json) {
+		io.out(
+			JSON.stringify(
+				{
+					path,
+					config: cfg ? redact(cfg) : null,
+					diagnostics: status,
+					stale,
+				},
+				null,
+				2,
+			),
+		);
+		return cfg ? EXIT.ok : EXIT.error;
+	}
+	if (!cfg) {
+		io.out(`not enrolled (${path})`);
+		return EXIT.error;
+	}
+	io.out(
+		`runner ${cfg.account}/${cfg.runner.id} (${cfg.state}), config ${path}`,
+	);
+	if (!status) {
+		io.out("no status yet: the runner has not run (mastermind-runner start)");
+		return EXIT.ok;
+	}
+	const d = status;
+	io.out(
+		`status at ${d.at}${stale ? " (STALE: is the runner running?)" : ""}: ${d.state}, nats ${d.natsServer ?? "-"}, reconnects ${d.reconnects}, version ${d.version}`,
+	);
+	io.out(
+		`queues ${d.queues.join(",") || "-"}, running ${d.running}/${d.capacity}, last next ${d.lastNextResult ?? "-"} at ${d.lastNextAt ?? "-"}`,
+	);
+	if (d.lastDecision) io.out(`last decision: ${d.lastDecision}`);
+	for (const x of d.inFlight)
+		io.out(
+			`  ${x.itemId} ${x.queue}/${x.stage} target ${x.target ?? "-"} since ${x.startedAt}`,
+		);
+	const c = d.checks;
+	const mark = (v: boolean | null) => (v === null ? "?" : v ? "✓" : "✗");
+	io.out(
+		`checks at ${c.checkedAt ?? "-"}: paseo ${mark(c.paseo)}, workdir ${mark(c.workdir)}, providers ${
+			Object.entries(c.providers)
+				.map(([p, ok]) => `${p} ${mark(ok)}`)
+				.join(", ") || "-"
+		}`,
+	);
+	if (d.lastErrors.length) {
+		io.out("last errors:");
+		for (const l of d.lastErrors) io.out(`  ${l}`);
+	}
+	return EXIT.ok;
+}
+
+/** Run the checks once; name what is wrong and how to fix it. */
+async function cmdDoctor(path: string, f: Flags, io: Io): Promise<number> {
+	const cfg = await loadConfig(path);
+	if (!cfg) {
+		io.out(
+			`✗ not enrolled (${path})\n  fix: mastermind-runner enroll <token> --url <mastermind url>`,
+		);
+		return EXIT.error;
+	}
+	const s = applyFlags(cfg.runner, f, io.cwd);
+	const found = problems(await runChecks(s, { paseoHost: f["paseo-host"] }), s);
+	if (cfg.state === "revoked")
+		found.push({
+			problem: "this runner was revoked",
+			fix: "get a new enrol token on /people, then enroll --force",
+		});
+	else {
+		const url = io.env.MASTERMIND_URL ?? cfg.mastermindUrl;
+		const cred = await checkCredential(url, cfg.credential);
+		if (cred === "revoked")
+			found.push({
+				problem: "Mastermind refuses this runner's credential",
+				fix: "get a new enrol token on /people, then enroll --force",
+			});
+		else if (cred === "unknown")
+			found.push({
+				problem: `Mastermind does not answer at ${url}`,
+				fix: "check the network and MASTERMIND_URL",
+			});
+	}
+	const status = await readStatus(path);
+	if (status) {
+		const age = Date.now() - Date.parse(status.at);
+		if (!(age <= STALE_MS))
+			found.push({
+				problem: `the runner is not running (last status ${status.at})`,
+				fix: "mastermind-runner start",
+			});
+		else if (status.state !== "connected")
+			found.push({
+				problem: `the runner is ${status.state} to NATS (${cfg.natsUrl})`,
+				fix: "check the network; the runner keeps retrying",
+			});
+		else if (status.lastNextResult === "error")
+			found.push({
+				problem: "the last next request failed (no member rights on a queue?)",
+				fix: "see the last errors in: mastermind-runner status; ask the queue owner to add this account",
+			});
+	}
+	for (const p of found) io.out(`✗ ${p.problem}\n  fix: ${p.fix}`);
+	if (!found.length)
+		io.out(`✓ runner ${cfg.account}/${s.id}: no problem found`);
+	return found.length ? EXIT.error : EXIT.ok;
 }
 
 async function cmdEnroll(
@@ -418,7 +551,21 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 	const { routing, source } = await routingFor(path, settings, f, io);
 	if (f.save) await saveConfig(path, { ...cfg, runner: settings });
 	const natsUrl = io.env.MASTERMIND_NATS_URL ?? cfg.natsUrl;
-	const log = (line: string) => io.err(`${stamp()} ${line}`);
+	const diag = new Diagnostics(settings, VERSION);
+	const log = (line: string) => {
+		io.err(`${stamp()} ${line}`);
+		diag.log(line);
+	};
+	let conn: Awaited<ReturnType<typeof connectRunner>> | null = null;
+	const statusSubject = subjects.runnerStatus(cfg.account, settings.id);
+	const reporter = startReporter({
+		diagnostics: diag,
+		publish: (d) => {
+			if (conn && !conn.isClosed()) publish(conn, statusSubject, d);
+		},
+		file: statusPath(path),
+		check: () => runChecks(settings, { paseoHost: f["paseo-host"] }),
+	});
 	const stopping = new AbortController();
 	const onSignal = () => stopping.abort();
 	const mastermindUrl = io.env.MASTERMIND_URL ?? cfg.mastermindUrl;
@@ -429,6 +576,7 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 	});
 	process.once("SIGINT", onSignal);
 	process.once("SIGTERM", onSignal);
+	let finalState: "stopping" | "revoked" = "stopping";
 	try {
 		let nc: Awaited<ReturnType<typeof connectRunner>>;
 		try {
@@ -441,12 +589,26 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 				signal: stopping.signal,
 				verify,
 				onRevoked: () => onRevoked(),
+				onStatus: (type) => {
+					if (type === "disconnect") diag.set("connecting");
+					if (type === "reconnect" && conn) {
+						diag.reconnects++;
+						diag.natsServer = conn.getServer();
+						diag.set("connected");
+						diag.changed();
+					}
+				},
 			});
 		} catch (error) {
-			if (error instanceof RevokedError)
+			if (error instanceof RevokedError) {
+				finalState = "revoked";
 				await saveConfig(path, { ...cfg, state: "revoked" });
+			}
 			throw error;
 		}
+		conn = nc;
+		diag.natsServer = nc.getServer();
+		diag.set("connected");
 		const runner = new Runner({
 			client: natsClient(nc, runnerInfo(cfg, settings, routing)),
 			launcher: new PaseoLauncher({ host: f["paseo-host"] }),
@@ -454,7 +616,9 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 			routing,
 			setupMemory: new FileSetupMemory(join(dirname(path), "setup-state.json")),
 			log,
+			onChange: () => diag.changed(),
 		});
+		diag.loop = runner;
 		runner.start();
 		log(
 			`runner ${cfg.account}/${settings.id} up: queues ${settings.queues.join(",")}, capacity ${settings.capacity}, routing ${source}`,
@@ -467,9 +631,11 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 		);
 		const why = await Promise.race([closed, stopped, revoked]);
 		log("runner stopping");
+		diag.set(why === "revoked" ? "revoked" : "stopping");
 		// Revoked: no request can succeed, so fail the in-flight ones now.
 		if (why === "revoked") await nc.close().catch(() => {});
 		await runner.stop();
+		await reporter.stop();
 		if (why === "stop") {
 			await nc.drain().catch(() => {});
 			return EXIT.ok;
@@ -481,12 +647,15 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 			(why && isAuthFailure(why) && (await verify()) === "revoked")
 		) {
 			await nc.close().catch(() => {});
+			finalState = "revoked";
 			await saveConfig(path, { ...cfg, state: "revoked" });
 			throw new RevokedError("Mastermind revoked this runner");
 		}
 		log(`nats closed: ${why ?? "no error"}`);
 		return EXIT.error;
 	} finally {
+		diag.set(finalState);
+		await reporter.stop();
 		process.off("SIGINT", onSignal);
 		process.off("SIGTERM", onSignal);
 	}

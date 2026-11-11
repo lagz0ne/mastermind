@@ -5,12 +5,16 @@
  *
  * A runner is online while it was heard from within `onlineMs`: an idle runner
  * long-polls `next` (20 s), a full one heartbeats each bead (at most 60 s).
- * Entries not heard from for `forgetMs` are dropped.
+ * Entries not heard from for `forgetMs` are dropped. Runners also publish
+ * their own diagnostics (`mm.u.<account>.r.<runner>.status`, every 15 s);
+ * `listen` keeps the last one per runner.
  *
  * With more than one api replica, each one sees only the requests it served;
  * v0 runs one replica.
  */
-import type { RunnerInfo } from "@mastermind/core";
+import { parseSubject, patterns, subscribe } from "@mastermind/bus";
+import type { RunnerDiagnostics, RunnerInfo } from "@mastermind/core";
+import type { NatsConnection } from "@nats-io/nats-core";
 import type { DispatchSeen } from "../dispatch/dispatcher.ts";
 
 export type RunnerEntry = {
@@ -26,6 +30,8 @@ export type RunnerEntry = {
 	running: string[];
 	lastSeenAt: string;
 	online: boolean;
+	/** The last status the runner published about itself; null before one. */
+	diagnostics: RunnerDiagnostics | null;
 };
 
 export type RegistryOptions = {
@@ -44,6 +50,7 @@ type Entry = {
 	queues: Set<string>;
 	running: Set<string>;
 	lastSeen: number;
+	diagnostics: RunnerDiagnostics | null;
 };
 
 /** `<account>/<runner>` → [account, runner]; null for other actors. */
@@ -87,6 +94,36 @@ export class RunnerRegistry {
 		this.#changed();
 	};
 
+	/**
+	 * Store a runner's own status. `account` comes from the subject (the auth
+	 * callout scopes each service account to its account's prefix).
+	 */
+	status(account: string, d: RunnerDiagnostics): void {
+		if (
+			!d ||
+			typeof d !== "object" ||
+			typeof d.runner !== "string" ||
+			!d.runner
+		)
+			return;
+		const e = this.#entry(account, d.runner, this.#now().getTime());
+		e.diagnostics = d;
+		this.#changed();
+	}
+
+	/** Receive runner status messages on `nc`. Returns a stop function. */
+	listen(nc: NatsConnection): () => void {
+		const sub = subscribe<RunnerDiagnostics>(
+			nc,
+			patterns.runnerStatus,
+			(d, msg) => {
+				const s = parseSubject(msg.subject);
+				if (s?.kind === "runnerStatus") this.status(s.account, d);
+			},
+		);
+		return () => sub.unsubscribe();
+	}
+
 	/** Drop every runner of a service account (it was revoked). */
 	forgetServiceAccount(id: string): void {
 		let dropped = false;
@@ -121,6 +158,7 @@ export class RunnerRegistry {
 				running: [...e.running].sort(),
 				lastSeenAt: new Date(e.lastSeen).toISOString(),
 				online: now - e.lastSeen <= this.#onlineMs,
+				diagnostics: e.diagnostics,
 			});
 		}
 		return out.sort(
@@ -146,6 +184,7 @@ export class RunnerRegistry {
 				queues: new Set(),
 				running: new Set(),
 				lastSeen: now,
+				diagnostics: null,
 			};
 			this.#entries.set(key, e);
 		}

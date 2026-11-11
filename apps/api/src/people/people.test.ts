@@ -7,6 +7,7 @@ import type {
 	Me,
 	NextRequest,
 	PeopleSetup,
+	RunnerDiagnostics,
 	RunnersReply,
 } from "@mastermind/core";
 import { MemoryKv } from "../auth/memory-kv.ts";
@@ -67,6 +68,7 @@ describe("registry", () => {
 				running: [],
 				lastSeenAt: "2026-11-10T08:00:00.000Z",
 				online: true,
+				diagnostics: null,
 			},
 		]);
 		expect(changes).toBe(1);
@@ -91,6 +93,33 @@ describe("registry", () => {
 		expect(r.list()).toHaveLength(1);
 		r.forgetServiceAccount("sa1");
 		expect(r.list()).toEqual([]);
+	});
+
+	test("a runner's own status is kept with its entry and is a sign of life", () => {
+		const c = clock();
+		const r = new RunnerRegistry({ now: c.now, onlineMs: 90_000 });
+		let changes = 0;
+		r.subscribe(() => changes++);
+		r.observe({
+			kind: "next",
+			queue: "q",
+			runner: info("a.local", "sa1").runner,
+		});
+		c.advance(100_000);
+		expect(r.list()[0]?.online).toBe(false);
+		const d = {
+			runner: "a.local",
+			state: "connected",
+			lastErrors: ["x"],
+		} as unknown as RunnerDiagnostics;
+		r.status("alice", d);
+		expect(r.list()).toHaveLength(1);
+		expect(r.list()[0]?.online).toBe(true);
+		expect(r.list()[0]?.diagnostics).toEqual(d);
+		expect(changes).toBe(2);
+		// Not a status: ignored.
+		r.status("alice", {} as RunnerDiagnostics);
+		expect(r.list()).toHaveLength(1);
 	});
 
 	test("the dispatcher's observe hook feeds it", async () => {

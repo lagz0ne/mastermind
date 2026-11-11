@@ -3,6 +3,7 @@
  *
  *   mm.u.<account>.q.<queue>.next    request: next dispatch for a runner
  *   mm.u.<account>.d.<bead>.<verb>    request: heartbeat | report | complete | release
+ *   mm.u.<account>.r.<runner>.status publish: a runner's diagnostics (runnerToken)
  *   mm.q.<queue>.ready               publish: a queue has work
  *   mm.events.bead.<bead>            publish: one bead changed (beads journal)
  *
@@ -56,6 +57,16 @@ export function beadToken(id: string): string {
 	return id.replaceAll(".", "~");
 }
 
+/**
+ * A runner id as one subject token: characters outside [A-Za-z0-9_-] become
+ * '_' (host names have dots). The payload carries the real id.
+ */
+export function runnerToken(id: string): string {
+	const t = id.replace(/[^A-Za-z0-9_-]/g, "_");
+	if (t === "") throw new SubjectError("bad runner id: empty");
+	return t;
+}
+
 function beadFromToken(t: string): string {
 	return t.replaceAll("~", ".");
 }
@@ -65,6 +76,8 @@ export const subjects = {
 		`mm.u.${token("account", account)}.q.${token("queue", queue)}.next`,
 	bead: (account: string, bead: string, verb: BeadVerb) =>
 		`mm.u.${token("account", account)}.d.${beadToken(bead)}.${verb}`,
+	runnerStatus: (account: string, runner: string) =>
+		`mm.u.${token("account", account)}.r.${runnerToken(runner)}.status`,
 	ready: (queue: string) => `mm.q.${token("queue", queue)}.ready`,
 	beadEvent: (bead: string) => `mm.events.bead.${beadToken(bead)}`,
 	/** Everything an account's service accounts may publish to (for the auth callout). */
@@ -76,6 +89,7 @@ export const patterns = {
 	next: "mm.u.*.q.*.next",
 	bead: (verb: BeadVerb) => `mm.u.*.d.*.${verb}`,
 	allBeadVerbs: "mm.u.*.d.*.*",
+	runnerStatus: "mm.u.*.r.*.status",
 	ready: "mm.q.*.ready",
 	beadEvents: "mm.events.bead.*",
 } as const;
@@ -83,6 +97,7 @@ export const patterns = {
 export type ParsedSubject =
 	| { kind: "next"; account: string; queue: string }
 	| { kind: "bead"; account: string; bead: string; verb: BeadVerb }
+	| { kind: "runnerStatus"; account: string; runner: string }
 	| { kind: "ready"; queue: string }
 	| { kind: "beadEvent"; bead: string };
 
@@ -101,6 +116,8 @@ export function parseSubject(subject: string): ParsedSubject | null {
 			return { kind: "next", account: b, queue: d };
 		if (c === "d" && e !== undefined && isVerb(e))
 			return { kind: "bead", account: b, bead: beadFromToken(d), verb: e };
+		if (c === "r" && e === "status" && !d.includes("~"))
+			return { kind: "runnerStatus", account: b, runner: d };
 		return null;
 	}
 	if (a === "q" && p.length === 4 && ok(b) && !b.includes("~") && c === "ready")
