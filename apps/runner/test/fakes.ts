@@ -36,7 +36,13 @@ export function dispatch(id: string, over: Partial<Dispatch> = {}): Dispatch {
 	};
 }
 
-export type Call = { verb: string; bead: string; actor: string; text?: string };
+export type Call = {
+	verb: string;
+	bead: string;
+	actor: string;
+	text?: string;
+	startFailed?: boolean;
+};
 
 /** Hands out queued dispatches; `next` on an empty queue answers null after `waitMs`. */
 export class FakeMastermind implements MastermindClient {
@@ -85,8 +91,19 @@ export class FakeMastermind implements MastermindClient {
 	async complete(bead: string, actor: string, text: string) {
 		this.calls.push({ verb: "complete", bead, actor, text });
 	}
-	async release(bead: string, actor: string, text: string) {
-		this.calls.push({ verb: "release", bead, actor, text });
+	async release(
+		bead: string,
+		actor: string,
+		text: string,
+		o?: { startFailed?: boolean },
+	) {
+		this.calls.push({
+			verb: "release",
+			bead,
+			actor,
+			text,
+			...(o?.startFailed ? { startFailed: true } : {}),
+		});
 	}
 	onReady(queue: string, l: (n: ReadyNotice) => void) {
 		const list = this.listeners.get(queue) ?? [];

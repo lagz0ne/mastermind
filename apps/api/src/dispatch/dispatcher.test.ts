@@ -7,6 +7,7 @@ import {
 	Dispatcher,
 	type DispatchSeen,
 	ENV_TRIAGE_LABEL,
+	FAILED_START_LABEL,
 } from "./dispatcher.ts";
 import { fakeWork, LEASE_MS } from "./fake-work.ts";
 
@@ -234,6 +235,86 @@ describe("bead verbs", () => {
 		expect(await code(d.report("alice", "mm-1.2", { actor } as never))).toBe(
 			"bad_request",
 		);
+	});
+});
+
+describe("no hot loop after a release (mm-sih)", () => {
+	const actor = "alice/a";
+	const take = (d: Dispatcher, id = "a") =>
+		d.next("alice", "build", runner(id)).then((r) => r.dispatch?.bead.id);
+
+	test("the same runner gets a released bead again after 1 min, 5 min, then never", async () => {
+		const { d, work, advance } = setup();
+		work.add({ id: "mm-1" }, "build");
+		const release = () =>
+			d.release("alice", "mm-1", { actor, reason: "no", startFailed: false });
+		expect(await take(d)).toBe("mm-1");
+		await release();
+		expect(await take(d)).toBeUndefined();
+		advance(59_000);
+		expect(await take(d)).toBeUndefined();
+		advance(1_000);
+		expect(await take(d)).toBe("mm-1");
+		await release();
+		advance(299_000);
+		expect(await take(d)).toBeUndefined();
+		advance(1_000);
+		expect(await take(d)).toBe("mm-1");
+		await release();
+		advance(24 * 3600_000);
+		expect(await take(d)).toBeUndefined();
+		// Another runner is not held back.
+		expect(await take(d, "b")).toBe("mm-1");
+	});
+
+	test("a waiting runner in back-off is not woken with that bead", async () => {
+		const { d, work } = setup({ waitMs: 50 });
+		work.add({ id: "mm-1" }, "build");
+		expect(await take(d)).toBe("mm-1");
+		const again = take(d);
+		await d.release("alice", "mm-1", { actor, reason: "no" });
+		expect(await again).toBeUndefined();
+		expect(work.beads.get("mm-1")?.assignee).toBeUndefined();
+	});
+
+	test("3 failed starts: failed:start, a note with the last reason; reopen (label gone) clears it", async () => {
+		const { d, work, advance } = setup();
+		work.add({ id: "mm-1" }, "build");
+		for (const id of ["a", "b", "c"]) {
+			expect(await take(d, id)).toBe("mm-1");
+			await d.release("alice", "mm-1", {
+				actor: `alice/${id}`,
+				reason: `MISSING_PROVIDER on ${id}`,
+				startFailed: true,
+			});
+		}
+		const bead = work.beads.get("mm-1");
+		expect(bead?.labels).toContain(FAILED_START_LABEL);
+		expect(work.comments.at(-1)?.text).toBe(
+			"not dispatched: the agent failed to start 3 times; last: MISSING_PROVIDER on c. Reopen to try again.",
+		);
+		expect(await take(d, "d")).toBeUndefined();
+		// A human removes the label: every runner may take it again at once.
+		await work.setLabels(
+			"mm-1",
+			"alice",
+			(bead?.labels ?? []).filter((l) => l !== FAILED_START_LABEL),
+		);
+		advance(1);
+		expect(await take(d, "a")).toBe("mm-1");
+	});
+
+	test("releases that are not failed starts never set failed:start", async () => {
+		const { d, work } = setup();
+		work.add({ id: "mm-1" }, "build");
+		for (const id of ["a", "b", "c", "d"]) {
+			expect(await take(d, id)).toBe("mm-1");
+			await d.release("alice", "mm-1", {
+				actor: `alice/${id}`,
+				reason: "declined",
+			});
+		}
+		expect(work.beads.get("mm-1")?.labels).not.toContain(FAILED_START_LABEL);
 	});
 });
 

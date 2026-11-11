@@ -118,6 +118,8 @@ describe("Runner", () => {
 		make(mm, new FakeLauncher({ status: "failed", summary: "tests are red" }));
 		await until(() => mm.verbs("release").length === 1);
 		expect(mm.verbs("release")[0]?.text).toBe("tests are red");
+		// The agent ran: not a failed start.
+		expect(mm.verbs("release")[0]?.startFailed).toBeUndefined();
 		expect(mm.verbs("complete")).toHaveLength(0);
 	});
 
@@ -131,6 +133,7 @@ describe("Runner", () => {
 		}));
 		await until(() => mm.verbs("release").length === 1);
 		expect(mm.verbs("release")[0]?.text).toBe("git: not on PATH");
+		expect(mm.verbs("release")[0]?.startFailed).toBe(true);
 		expect(agents.specs).toHaveLength(0);
 	});
 
@@ -234,6 +237,7 @@ describe("Runner", () => {
 		make(mm, agents);
 		await until(() => mm.verbs("release").length === 1);
 		expect(mm.verbs("release")[0]?.text).toContain("daemon is not running");
+		expect(mm.verbs("release")[0]?.startFailed).toBe(true);
 	});
 });
 
@@ -291,6 +295,8 @@ describe("Runner with routing", () => {
 		expect(mm.verbs("release")[0]?.text).toBe(
 			"environment web is not bound on this runner",
 		);
+		// A decline is not a failed start (another runner may take it).
+		expect(mm.verbs("release")[0]?.startFailed).toBeUndefined();
 		expect(agents.specs).toHaveLength(0);
 	});
 

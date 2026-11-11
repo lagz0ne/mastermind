@@ -61,6 +61,12 @@ export function envLabel(name: string): string {
 /** Marks a bead the dispatcher holds back: its environment does not resolve. */
 export const ENV_TRIAGE_LABEL = "triage:env";
 
+/**
+ * Marks a bead the dispatcher holds back: its agent failed to start too many
+ * times (the reason is in the notes). A human reopen clears it.
+ */
+export const FAILED_START_LABEL = "failed:start";
+
 /** The environment name a bead points to, or null. */
 export function envNameOf(bead: Pick<Bead, "labels">): string | null {
 	const label = bead.labels.find(
@@ -152,8 +158,15 @@ export type ReportRequest = { actor: string; message: string };
 /** The stage is done. */
 export type CompleteRequest = { actor: string; summary: string };
 
-/** Give the bead back without finishing it. */
-export type ReleaseRequest = { actor: string; reason: string };
+/**
+ * Give the bead back without finishing it. `startFailed`: the agent did not
+ * start (check refused, paseo run failed); the dispatcher counts these.
+ */
+export type ReleaseRequest = {
+	actor: string;
+	reason: string;
+	startFailed?: boolean;
+};
 
 /** Reply of the verbs that return no data. */
 export type Ack = { ok: true };

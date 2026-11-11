@@ -324,7 +324,7 @@ export class Runner {
 			if (lost(exec)) return;
 			if (!check.ok) {
 				this.#log(`${id}: refused: ${check.reason}`);
-				await this.#safe(d, "release", check.reason);
+				await this.#safe(d, "release", check.reason, true);
 				return;
 			}
 			target = this.#targetSlots(decision.target);
@@ -337,6 +337,7 @@ export class Runner {
 			}
 			await this.#safe(d, "report", decisionLine(decision, settings.id));
 			let result: { status: "done" | "failed"; summary: string };
+			let startFailed = false;
 			try {
 				result = await launcher.run(
 					{
@@ -353,6 +354,7 @@ export class Runner {
 					exec.abort.signal,
 				);
 			} catch (error) {
+				startFailed = !exec.abort.signal.aborted;
 				result = {
 					status: "failed",
 					summary: `agent did not finish: ${error instanceof Error ? error.message : error}`,
@@ -369,7 +371,13 @@ export class Runner {
 			this.#log(`${id}: agent ${result.status}`);
 			if (result.status === "done")
 				await this.#safe(d, "complete", result.summary || "done");
-			else await this.#safe(d, "release", result.summary || "agent failed");
+			else
+				await this.#safe(
+					d,
+					"release",
+					result.summary || "agent failed",
+					startFailed,
+				);
 		} finally {
 			target?.release();
 			exec.abort.abort();
@@ -428,10 +436,15 @@ export class Runner {
 		d: Dispatch,
 		verb: "report" | "complete" | "release",
 		text: string,
+		startFailed = false,
 	): Promise<void> {
 		for (let attempt = 1; attempt <= 3; attempt++) {
 			try {
-				await this.#o.client[verb](d.bead.id, d.actor, text);
+				if (verb === "release")
+					await this.#o.client.release(d.bead.id, d.actor, text, {
+						startFailed,
+					});
+				else await this.#o.client[verb](d.bead.id, d.actor, text);
 				return;
 			} catch (error) {
 				if (isLostClaim(error) || attempt === 3) {

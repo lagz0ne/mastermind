@@ -33,7 +33,13 @@ export interface MastermindClient {
 	heartbeat(beadId: string, actor: string): Promise<Lease>;
 	report(beadId: string, actor: string, message: string): Promise<void>;
 	complete(beadId: string, actor: string, summary: string): Promise<void>;
-	release(beadId: string, actor: string, reason: string): Promise<void>;
+	/** `startFailed`: the agent did not start (Mastermind backs off, then holds the bead). */
+	release(
+		beadId: string,
+		actor: string,
+		reason: string,
+		opts?: { startFailed?: boolean },
+	): Promise<void>;
 	/** Mastermind says a queue has work. Returns an unsubscribe. */
 	onReady(queue: string, listener: (n: ReadyNotice) => void): () => void;
 }
@@ -87,8 +93,12 @@ export function natsClient(
 				summary,
 			});
 		},
-		async release(beadId, actor, reason) {
-			await verb<ReleaseRequest, Ack>(beadId, "release", { actor, reason });
+		async release(beadId, actor, reason, o) {
+			await verb<ReleaseRequest, Ack>(beadId, "release", {
+				actor,
+				reason,
+				...(o?.startFailed ? { startFailed: true } : {}),
+			});
 		},
 		onReady(queue, listener) {
 			const sub = subscribe<ReadyNotice>(nc, subjects.ready(queue), listener);

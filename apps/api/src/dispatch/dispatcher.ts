@@ -7,6 +7,10 @@
  *   request waits (long poll) until the queue gets work or `waitMs` passes.
  * - heartbeat / report / complete / release: only the actor that holds the
  *   bead may call them.
+ * - back-off: a runner that released a bead does not get it again for 1 min,
+ *   then 5 min, then not at all (per runner+bead, in memory). After
+ *   {@link MAX_FAILED_STARTS} failed starts (any runner) the bead gets
+ *   {@link FAILED_START_LABEL} and a note; a human reopen removes the label.
  * - sweep: beads whose lease died go back to their queue.
  * - onEvent: a journal event routes a bead with no queue and wakes the waiters
  *   of a queue that has ready work.
@@ -24,6 +28,7 @@ import {
 	type DispatchEnv,
 	ENV_TRIAGE_LABEL,
 	envNameOf,
+	FAILED_START_LABEL,
 	type HeartbeatReply,
 	type HeartbeatRequest,
 	isAgentActor,
@@ -50,6 +55,12 @@ import type { Work } from "./work.ts";
 
 /** How long `next` waits for work before it answers `{dispatch: null}`. */
 export const DEFAULT_WAIT_MS = 20_000;
+
+/** Back-off of a runner after its 1st, 2nd release of a bead; then never. */
+export const RELEASE_BACKOFF_MS = [60_000, 300_000] as const;
+
+/** Failed starts of a bead (any runner) before it is held back. */
+export const MAX_FAILED_STARTS = 3;
 
 /**
  * What the dispatcher saw of runners, for the live runner list on /people.
@@ -92,7 +103,7 @@ export type EnvResolution =
 	| { ok: true; env: DispatchEnv }
 	| { ok: false; reason: string };
 
-export { ENV_TRIAGE_LABEL };
+export { ENV_TRIAGE_LABEL, FAILED_START_LABEL };
 
 /** Read from the bead's labels: repo:, ref:, provider:, req: (see beads/env.ts). */
 export function defaultEnv(bead: Bead): DispatchEnv {
@@ -197,6 +208,10 @@ export class Dispatcher {
 	readonly #waiting = new Map<string, Waiter[]>();
 	/** When each actor last got a bead (ISO). */
 	readonly #served = new Map<string, string>();
+	/** Releases per `actor bead`, and until when that actor does not get it. */
+	readonly #cool = new Map<string, { n: number; until: number }>();
+	/** Failed starts per bead. */
+	readonly #failed = new Map<string, number>();
 	/** Per-queue lock: one claim pass at a time per queue in this replica. */
 	readonly #locks = new Map<string, Promise<unknown>>();
 	#stopped = false;
@@ -230,7 +245,11 @@ export class Dispatcher {
 		const reply = await this.#lock(queue, async () => {
 			const ready = (
 				await this.#dispatchable(queue, await this.#work.ready(queue))
-			).filter((b) => this.#bound(runner.environments, b, queue));
+			).filter(
+				(b) =>
+					this.#bound(runner.environments, b, queue) &&
+					!this.#cooling(actor, b.id),
+			);
 			const dispatch = await this.#take(state, actor, queue, ready);
 			if (dispatch || this.#stopped || this.#waitMs <= 0) return { dispatch };
 			// Registered under the lock: a ready signal cannot slip in between.
@@ -270,7 +289,11 @@ export class Dispatcher {
 				if (current.length === 0) break;
 				const waiter = selectWaiter(
 					bead,
-					current.filter((w) => this.#bound(w.environments, bead, queue)),
+					current.filter(
+						(w) =>
+							this.#bound(w.environments, bead, queue) &&
+							!this.#cooling(w.actor, bead.id),
+					),
 				);
 				if (!waiter) continue;
 				const dispatch = await this.#claim(bead, waiter.actor, queue);
@@ -325,6 +348,7 @@ export class Dispatcher {
 			await this.#work
 				.close(beadId, actor, summary)
 				.catch((e) => Promise.reject(busError(e)));
+		this.#forget(beadId);
 		this.#see({ kind: "done", actor, beadId });
 		return { ok: true };
 	}
@@ -343,9 +367,52 @@ export class Dispatcher {
 		await this.#work
 			.release(beadId, actor)
 			.catch((e) => Promise.reject(busError(e)));
+		const key = `${actor} ${beadId}`;
+		const n = (this.#cool.get(key)?.n ?? 0) + 1;
+		const ms = RELEASE_BACKOFF_MS[n - 1] ?? Number.POSITIVE_INFINITY;
+		this.#cool.set(key, { n, until: this.#now().getTime() + ms });
+		if (req.startFailed === true) {
+			const failed = (this.#failed.get(beadId) ?? 0) + 1;
+			this.#failed.set(beadId, failed);
+			if (
+				failed >= MAX_FAILED_STARTS &&
+				!bead.labels.includes(FAILED_START_LABEL)
+			)
+				await this.#holdBack(bead, failed, reason);
+		}
 		this.#see({ kind: "done", actor, beadId });
 		this.#signal(bead);
 		return { ok: true };
+	}
+
+	/** Too many failed starts: label the bead and say why. */
+	async #holdBack(bead: Bead, failed: number, reason: string): Promise<void> {
+		try {
+			await this.#work.comment(
+				bead.id,
+				this.#actor,
+				`not dispatched: the agent failed to start ${failed} times; last: ${reason}. Reopen to try again.`,
+			);
+			await this.#work.setLabels(bead.id, this.#actor, [
+				...bead.labels,
+				FAILED_START_LABEL,
+			]);
+		} catch (error) {
+			this.#opts.onError?.(error);
+		}
+	}
+
+	/** Is `actor` in back-off for `beadId`? */
+	#cooling(actor: string, beadId: string): boolean {
+		const c = this.#cool.get(`${actor} ${beadId}`);
+		return c !== undefined && this.#now().getTime() < c.until;
+	}
+
+	/** Drop the back-off and failure count of a bead. */
+	#forget(beadId: string): void {
+		this.#failed.delete(beadId);
+		for (const key of this.#cool.keys())
+			if (key.endsWith(` ${beadId}`)) this.#cool.delete(key);
 	}
 
 	/** Give beads with a dead lease back to their queue. Returns their ids. */
@@ -500,7 +567,14 @@ export class Dispatcher {
 	 * The beads of `ready` whose environment resolves. The others are marked
 	 * once (label + note with the reason); a mark is removed when it resolves.
 	 */
-	async #dispatchable(queue: string, ready: Bead[]): Promise<Bead[]> {
+	async #dispatchable(queue: string, all: Bead[]): Promise<Bead[]> {
+		const ready = all.filter((b) => {
+			if (b.labels.includes(FAILED_START_LABEL)) return false;
+			// Was held back and the label is gone: a human reopened it.
+			if ((this.#failed.get(b.id) ?? 0) >= MAX_FAILED_STARTS)
+				this.#forget(b.id);
+			return true;
+		});
 		const resolve = this.#opts.resolveEnv;
 		if (!resolve) return ready;
 		const ok: Bead[] = [];
