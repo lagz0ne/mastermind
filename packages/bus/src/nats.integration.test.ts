@@ -199,6 +199,26 @@ describe.skipIf(!url)("against nats-server", () => {
 		expect(await accounts.get("nobody")).toBeNull();
 	});
 
+	test("Store.list: empty bucket, subject filter, no consumer per call", async () => {
+		const s = await Store.open<{ n: number }>(mm, `list_${run}`);
+		expect(await s.list()).toEqual([]);
+		await s.put("alice.a", { n: 1 });
+		await s.put("alice.b", { n: 2 });
+		await s.put("bob.a", { n: 3 });
+		expect((await s.list()).sort()).toEqual(["alice.a", "alice.b", "bob.a"]);
+		expect((await s.list("alice.*")).sort()).toEqual(["alice.a", "alice.b"]);
+		expect(await s.list("carol.*")).toEqual([]);
+		// kv.keys() made an ordered push consumer per call (mm-210.41).
+		const consumers = async () =>
+			(
+				await mm.request(`$JS.API.STREAM.INFO.KV_list_${run}`, "", {
+					timeout: 2000,
+				})
+			).json<{ state: { consumer_count: number } }>().state.consumer_count;
+		for (let i = 0; i < 5; i++) await s.list();
+		expect(await consumers()).toBe(0);
+	});
+
 	test("Store: consume is single use under a race", async () => {
 		const tokens = await Store.open<{ account: string }>(
 			mm,

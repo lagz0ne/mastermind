@@ -9,11 +9,13 @@ import {
 	connect,
 	request,
 	SERVICE_QUEUE,
+	Store,
 	serve,
 	subjects,
 } from "@mastermind/bus";
 import type { NatsConnection } from "@nats-io/nats-core";
 import { createAccount } from "@nats-io/nkeys";
+import { BUCKETS, type ServiceAccount } from "./service.ts";
 import { type AuthService, startAuth } from "./start.ts";
 
 const bin = process.env.NATS_SERVER ?? Bun.which("nats-server");
@@ -87,6 +89,20 @@ describe.skipIf(!bin)("auth against nats-server", () => {
 		return nc;
 	};
 
+	/** serviceAccounts() answers fast; returns the count (mm-210.41). */
+	const timedList = async () => {
+		const t = performance.now();
+		const sas = await svc.auth.serviceAccounts();
+		const ms = performance.now() - t;
+		expect(ms).toBeLessThan(200);
+		return sas.length;
+	};
+
+	test("serviceAccounts() on the empty bucket answers in < 200 ms", async () => {
+		expect(await timedList()).toBe(0);
+		expect(await svc.auth.serviceAccounts("admin")).toEqual([]);
+	});
+
 	test("login by code on JetStream KV: N approvals and N polls, one session", async () => {
 		const { code, cookie } = await svc.auth.startLogin("test-browser");
 		const approvals = await Promise.allSettled(
@@ -122,6 +138,39 @@ describe.skipIf(!bin)("auth against nats-server", () => {
 			request(nc, subjects.next("bob", "backend"), {}, { timeout: 1000 }),
 		).rejects.toThrow();
 	});
+
+	test("serviceAccounts() with 1 and 100 service accounts answers in < 200 ms, also while a runner is online", async () => {
+		expect(await timedList()).toBe(1);
+		// Seed 99 records straight into the bucket: one write each. Enrol does
+		// several, and nats.conf fsyncs every write (slow disks: ~35 ms each).
+		const bucket = await Store.open<ServiceAccount>(
+			svc.app,
+			BUCKETS.serviceAccounts.name,
+		);
+		for (let i = 0; i < 99; i++) {
+			const account = `acct${i % 7}`;
+			const id = `seed${i}`;
+			await bucket.create(`${account}.${id}`, {
+				id,
+				account,
+				name: `sa${i}`,
+				createdAt: new Date().toISOString(),
+				secretHash: "x",
+			});
+		}
+		expect(await timedList()).toBe(100);
+		// What /people does: many lists at once (one per open tab and tick).
+		const t = performance.now();
+		const all = await Promise.all(
+			Array.from({ length: 20 }, () => svc.auth.serviceAccounts()),
+		);
+		expect(performance.now() - t).toBeLessThan(1000);
+		expect(all.every((sas) => sas.length === 100)).toBe(true);
+		expect(await svc.auth.serviceAccounts("acct0")).toHaveLength(15);
+		// A deleted key keeps a marker message; list() must not return it.
+		await bucket.delete("acct0.seed0");
+		expect(await timedList()).toBe(99);
+	}, 60_000);
 
 	test("unknown or forged credentials cannot connect", async () => {
 		await expect(runner("mms_admin_00_nope", "admin")).rejects.toThrow(

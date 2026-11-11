@@ -24,6 +24,15 @@ function isWrongLastSequence(err: unknown): boolean {
 	return code === 10071 || /wrong last sequence/i.test(err.message);
 }
 
+/** One STREAM.INFO request must answer within this, ms. */
+export const LIST_TIMEOUT_MS = 2_000;
+
+type StreamInfoReply = {
+	error?: { code: number; err_code?: number; description: string };
+	total?: number;
+	state?: { subjects?: Record<string, number> };
+};
+
 const live = (e: KvEntry | null): e is KvEntry =>
 	e !== null && e.operation === "PUT";
 
@@ -36,6 +45,7 @@ export class Store<T> {
 	private constructor(
 		readonly bucket: string,
 		private readonly kv: KV,
+		private readonly nc: NatsConnection,
 	) {}
 
 	/** Create the bucket, or bind to it when it already exists with the same settings. */
@@ -48,7 +58,7 @@ export class Store<T> {
 			history: opts.history ?? 1,
 			...(opts.ttlMs ? { ttl: opts.ttlMs } : {}),
 		});
-		return new Store<T>(bucket, kv);
+		return new Store<T>(bucket, kv, nc);
 	}
 
 	async get(key: string): Promise<StoreEntry<T> | null> {
@@ -127,11 +137,56 @@ export class Store<T> {
 		}
 	}
 
-	/** Live keys, optionally filtered by a subject-style pattern (`runner.alice.*`). */
-	async list(filter?: string): Promise<string[]> {
-		const keys: string[] = [];
-		for await (const k of await this.kv.keys(filter)) keys.push(k);
-		return keys;
+	/**
+	 * Live keys, optionally filtered by a subject-style pattern (`runner.alice.*`).
+	 *
+	 * Reads the key subjects with one STREAM.INFO request (`subjects_filter`),
+	 * then each value: reads only. It does not use `kv.keys()`: that creates an
+	 * ordered push consumer per call, and on a NATS that fsyncs every write
+	 * (deploy/nats/nats.conf) that create queued for > 5 s and timed out
+	 * (mm-210.41). Errors name the bucket and the step.
+	 */
+	async list(filter = ">"): Promise<string[]> {
+		const prefix = `$KV.${this.bucket}.`;
+		const subjects: string[] = [];
+		try {
+			for (let offset = 0; ; ) {
+				const msg = await this.nc.request(
+					`$JS.API.STREAM.INFO.KV_${this.bucket}`,
+					JSON.stringify({ subjects_filter: prefix + filter, offset }),
+					{ timeout: LIST_TIMEOUT_MS },
+				);
+				const info = msg.json<StreamInfoReply>();
+				if (info.error)
+					throw new Error(
+						`${info.error.description} (${info.error.err_code ?? info.error.code})`,
+					);
+				const page = Object.keys(info.state?.subjects ?? {});
+				subjects.push(...page);
+				offset += page.length;
+				if (page.length === 0 || offset >= (info.total ?? 0)) break;
+			}
+		} catch (err) {
+			throw new Error(
+				`${this.bucket}: list keys (stream info): ${err instanceof Error ? `${err.name}: ${err.message}` : err}`,
+				{ cause: err },
+			);
+		}
+		const keys = subjects.map((s) => s.slice(prefix.length));
+		// Deleted keys keep a marker message, so their subject is still there.
+		const found = await Promise.all(
+			keys.map(async (k) => {
+				try {
+					return live(await this.kv.get(k)) ? k : null;
+				} catch (err) {
+					throw new Error(
+						`${this.bucket}: list keys (get ${k}): ${err instanceof Error ? `${err.name}: ${err.message}` : err}`,
+						{ cause: err },
+					);
+				}
+			}),
+		);
+		return found.filter((k): k is string => k !== null);
 	}
 
 	/**
