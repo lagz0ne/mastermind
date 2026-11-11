@@ -63,6 +63,20 @@ describe("PaseoLauncher (fake paseo CLI)", () => {
 		expect(args).toContain("pool=gpu");
 	});
 
+	test("paseo's JSON error is the reason; a permission wait names the fix", async () => {
+		const run = (agent: AgentSpec["agent"]) =>
+			launcher.run(spec("x", { agent }), never).then(
+				() => "ok",
+				(e: Error) => e.message,
+			);
+		expect(await run({})).toBe(
+			"paseo run exited 1: MISSING_PROVIDER: Provider is required: Pass --provider <provider> or --provider <provider>/<model>",
+		);
+		expect(await run({ provider: "claude", mode: "plan" })).toBe(
+			"paseo run exited 1: OUTPUT_SCHEMA_FAILED: Agent is waiting for permission before producing structured output (the agent mode asks for permission; fix: mastermind-runner start --mode auto --save)",
+		);
+	});
+
 	test("does not pass the caller's Paseo agent scope to the CLI", async () => {
 		const scoped = new PaseoLauncher({
 			command: FAKE_PASEO,

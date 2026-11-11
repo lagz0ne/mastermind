@@ -64,6 +64,23 @@ switch (args[0]) {
 			);
 			process.exit(1);
 		}
+		// Like claude in a mode that asks: nobody answers, no structured output.
+		const mode = flags("--mode")[0];
+		if (
+			flags("--provider")[0]?.startsWith("claude") &&
+			["default", "plan", "acceptEdits", undefined].includes(mode)
+		) {
+			console.log(
+				JSON.stringify({
+					error: {
+						code: "OUTPUT_SCHEMA_FAILED",
+						message:
+							"Agent is waiting for permission before producing structured output",
+					},
+				}),
+			);
+			process.exit(1);
+		}
 		const agent: Agent = {
 			id: `agent-${agents().length + 1}`,
 			labels: labelsOf(),

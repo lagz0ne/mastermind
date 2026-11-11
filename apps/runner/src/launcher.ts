@@ -53,6 +53,28 @@ export class LaunchError extends Error {
 	override name = "LaunchError";
 }
 
+/**
+ * Why `paseo run` failed, from its JSON error on stdout
+ * ({error: {code, message, details}}) or else stderr, with a fix when known.
+ */
+export function runFailure(res: {
+	code: number;
+	stdout: string;
+	stderr: string;
+}): string {
+	let err: { code?: string; message?: string; details?: string } | undefined;
+	try {
+		err = (JSON.parse(res.stdout.trim()) as { error?: typeof err }).error;
+	} catch {}
+	const text = err
+		? [err.code, err.message, err.details].filter(Boolean).join(": ")
+		: res.stderr.trim();
+	const fix = /waiting for permission/i.test(text)
+		? " (the agent mode asks for permission; fix: mastermind-runner start --mode auto --save)"
+		: "";
+	return `paseo run exited ${res.code}: ${text.slice(-500)}${fix}`;
+}
+
 export function parseResult(stdout: string): AgentResult {
 	let v: unknown;
 	try {
@@ -187,9 +209,7 @@ export class PaseoLauncher implements AgentLauncher {
 				throw new LaunchError("agent stopped");
 			}
 			if (res.code !== 0) {
-				throw new LaunchError(
-					`paseo run exited ${res.code}: ${res.stderr.trim().slice(-500)}`,
-				);
+				throw new LaunchError(runFailure(res));
 			}
 			return parseResult(res.stdout);
 		} finally {

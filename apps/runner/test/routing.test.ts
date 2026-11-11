@@ -4,6 +4,7 @@ import type { Dispatch } from "@mastermind/core";
 import { ConfigError } from "../src/config.ts";
 import {
 	decisionLine,
+	defaultMode,
 	implicitRouting,
 	lintRouting,
 	parseRouting,
@@ -190,7 +191,7 @@ describe("the provider is never empty (paseo run needs --provider)", () => {
 		if (!r.ok) throw new Error(r.reason);
 		expect(r.agent.provider).toBe("claude");
 		expect(decisionLine(r, "box")).toBe(
-			"target default on local, provider claude (runner box, rule 1)",
+			"target default on local, provider claude, mode auto (runner box, rule 1)",
 		);
 		expect(r.why.join("\n")).toContain("provider claude from runner providers");
 	});
@@ -215,6 +216,20 @@ describe("the provider is never empty (paseo run needs --provider)", () => {
 			reason: "no provider available on this runner (offered: claude)",
 		});
 		expect(route(d(), bare, [])).toMatchObject({ ok: false });
+	});
+
+	test("claude without a mode gets auto (a mode that does not ask); a set mode stays", () => {
+		const r = route(d(), bare, ["claude"]);
+		expect(r.ok && r.agent.mode).toBe("auto");
+		expect(r.why.join("\n")).toContain("mode auto (unattended default)");
+		const set = route(
+			d(),
+			implicitRouting({ agent: { mode: "bypassPermissions" } }),
+			["claude"],
+		);
+		expect(set.ok && set.agent.mode).toBe("bypassPermissions");
+		expect(defaultMode("claude/claude-haiku-5-5")).toBe("auto");
+		expect(defaultMode("codex")).toBeUndefined();
 	});
 
 	test("a rule's provider still wins", () => {

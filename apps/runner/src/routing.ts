@@ -262,6 +262,16 @@ export function mismatch(m: RuleMatch, d: Routable): string | null {
 	return null;
 }
 
+/**
+ * The mode of an unattended agent when no layer sets one: a mode that does
+ * not stop to ask for permission (nobody is there to answer). Undefined: the
+ * provider's own default.
+ */
+const UNATTENDED_MODE: Record<string, string> = { claude: "auto" };
+export function defaultMode(provider: string): string | undefined {
+	return UNATTENDED_MODE[provider.split("/")[0] as string];
+}
+
 /** Where the provider comes from when no layer sets one. */
 export type ProviderFallback = {
 	/** The runner's own default (`settings.agent.provider`). */
@@ -371,6 +381,13 @@ export function route(
 		from.push(
 			`provider ${p} from ${p === own ? "runner default" : "runner providers"}`,
 		);
+	}
+	if (!agent.mode) {
+		const m = defaultMode(agent.provider);
+		if (m) {
+			agent.mode = m;
+			from.push(`mode ${m} (unattended default)`);
+		}
 	}
 	if (from.length) why.push(from.join(", "));
 	return {

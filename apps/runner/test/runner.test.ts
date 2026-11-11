@@ -77,10 +77,11 @@ describe("Runner", () => {
 			runner.start();
 			await until(() => mm.verbs("complete").length === 1, 10_000);
 			expect(mm.verbs("report")[0]?.text).toBe(
-				"target default on local, provider claude (runner laptop, rule 1)",
+				"target default on local, provider claude, mode auto (runner laptop, rule 1)",
 			);
 			const run = fake.calls().find((c) => c.args[0] === "run")?.args ?? [];
 			expect(run[run.indexOf("--provider") + 1]).toBe("claude");
+			expect(run[run.indexOf("--mode") + 1]).toBe("auto");
 			expect(mm.verbs("release")).toEqual([]);
 		} finally {
 			await runner?.stop();
@@ -102,7 +103,7 @@ describe("Runner", () => {
 			text: "fixed it",
 		});
 		expect(mm.verbs("report")[0]?.text).toBe(
-			"target default on local, provider claude (runner laptop, rule 1)",
+			"target default on local, provider claude, mode auto (runner laptop, rule 1)",
 		);
 		const spec = agents.specs[0];
 		expect(spec?.cwd).toBe("/work");
