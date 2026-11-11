@@ -260,9 +260,12 @@ describe("enroll, status, check", () => {
 		);
 		expect(code).toBe(EXIT.error);
 		const text = t.out.join("\n");
-		expect(text).toContain("✗ workdir /no/such/dir-mm does not exist");
-		expect(text).toContain("✗ Mastermind does not answer");
+		expect(text).toContain("FAIL a. config");
+		expect(text).toContain("Mastermind does not answer");
+		expect(text).toContain("FAIL d. paseo");
+		expect(text).toContain("workdir /no/such/dir-mm does not exist");
 		expect(text).toContain("fix:");
+		expect(text).toContain("SKIP e. agent");
 	});
 
 	test("check reports missing capabilities", async () => {

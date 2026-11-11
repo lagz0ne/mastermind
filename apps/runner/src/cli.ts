@@ -9,7 +9,7 @@
  *   mastermind-runner check [settings]
  *   mastermind-runner route [dispatch.json] [--env e --queue q --stage s --type t --label l --priority n]
  *   mastermind-runner status [--json]
- *   mastermind-runner doctor [settings]
+ *   mastermind-runner doctor [--deep] [--json] [settings]
  *   mastermind-runner --version
  *
  * Settings: --queue <q> (repeat), --capacity <n|unlimited>, --capability <c> (repeat),
@@ -49,11 +49,11 @@ import {
 } from "./config.ts";
 import {
 	Diagnostics,
-	problems,
 	runChecks,
 	startReporter,
 	statusPath,
 } from "./diagnostics.ts";
+import { formatReport, runDoctor } from "./doctor.ts";
 import { EnrolError, enrol } from "./enroll.ts";
 import { PaseoLauncher } from "./launcher.ts";
 import {
@@ -99,6 +99,7 @@ const OPTIONS = {
 	priority: { type: "string" },
 	save: { type: "boolean" },
 	force: { type: "boolean" },
+	deep: { type: "boolean" },
 	json: { type: "boolean" },
 	version: { type: "boolean", short: "v" },
 	help: { type: "boolean", short: "h" },
@@ -119,7 +120,8 @@ const USAGE = `usage:
   mastermind-runner route [dispatch.json] [--env <name>] [--queue <q>]
       [--stage work] [--type <t>] [--label <l>]... [--priority <n>]
   mastermind-runner status [--json]
-  mastermind-runner doctor [settings]
+  mastermind-runner doctor [--deep] [--json] [settings]
+      steps a-d: config, NATS, routing, Paseo; --deep: e. a real agent
   mastermind-runner --version
 
 settings: --queue <q>... --capacity <n|unlimited> --capability <c>... --providers a,b
@@ -416,59 +418,53 @@ async function cmdStatus(path: string, f: Flags, io: Io): Promise<number> {
 	return EXIT.ok;
 }
 
-/** Run the checks once; name what is wrong and how to fix it. */
+/**
+ * Test the path a dispatch takes (doctor.ts): a. config, b. NATS, c. routing,
+ * d. Paseo, and with --deep e. a real agent. Exit 1 when a step fails.
+ */
 async function cmdDoctor(path: string, f: Flags, io: Io): Promise<number> {
 	const cfg = await loadConfig(path);
-	if (!cfg) {
-		io.out(
-			`✗ not enrolled (${path})\n  fix: mastermind-runner enroll <token> --url <mastermind url>`,
-		);
-		return EXIT.error;
-	}
-	const s = applyFlags(cfg.runner, f, io.cwd);
-	const found = problems(await runChecks(s, { paseoHost: f["paseo-host"] }), s);
-	if (cfg.state === "revoked")
-		found.push({
-			problem: "this runner was revoked",
-			fix: "get a new enrol token on /people, then enroll --force",
-		});
-	else {
-		const url = io.env.MASTERMIND_URL ?? cfg.mastermindUrl;
-		const cred = await checkCredential(url, cfg.credential);
-		if (cred === "revoked")
-			found.push({
-				problem: "Mastermind refuses this runner's credential",
-				fix: "get a new enrol token on /people, then enroll --force",
-			});
-		else if (cred === "unknown")
-			found.push({
-				problem: `Mastermind does not answer at ${url}`,
-				fix: "check the network and MASTERMIND_URL",
-			});
-	}
-	const status = await readStatus(path);
+	const s = applyFlags(
+		cfg?.runner ?? defaultSettings("not-enrolled"),
+		f,
+		io.cwd,
+	);
+	const { routing, source } = await routingFor(path, s, f, io);
+	const runnerProblems: { problem: string; fix: string }[] = [];
+	const status = cfg ? await readStatus(path) : null;
 	if (status) {
 		const age = Date.now() - Date.parse(status.at);
 		if (!(age <= STALE_MS))
-			found.push({
+			runnerProblems.push({
 				problem: `the runner is not running (last status ${status.at})`,
 				fix: "mastermind-runner start",
 			});
 		else if (status.state !== "connected")
-			found.push({
-				problem: `the runner is ${status.state} to NATS (${cfg.natsUrl})`,
+			runnerProblems.push({
+				problem: `the running runner is ${status.state} to NATS`,
 				fix: "check the network; the runner keeps retrying",
 			});
 		else if (status.lastNextResult === "error")
-			found.push({
+			runnerProblems.push({
 				problem: "the last next request failed (no member rights on a queue?)",
 				fix: "see the last errors in: mastermind-runner status; ask the queue owner to add this account",
 			});
 	}
-	for (const p of found) io.out(`✗ ${p.problem}\n  fix: ${p.fix}`);
-	if (!found.length)
-		io.out(`✓ runner ${cfg.account}/${s.id}: no problem found`);
-	return found.length ? EXIT.error : EXIT.ok;
+	const report = await runDoctor({
+		config: cfg,
+		configPath: path,
+		settings: s,
+		routing,
+		routingSource: source,
+		mastermindUrl: io.env.MASTERMIND_URL ?? cfg?.mastermindUrl,
+		natsUrl: io.env.MASTERMIND_NATS_URL ?? cfg?.natsUrl,
+		version: VERSION,
+		deep: f.deep === true,
+		runnerProblems,
+	});
+	if (f.json) io.out(JSON.stringify(report, null, 2));
+	else for (const l of formatReport(report)) io.out(l);
+	return report.ok ? EXIT.ok : EXIT.error;
 }
 
 async function cmdEnroll(

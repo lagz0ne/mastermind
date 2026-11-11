@@ -44,6 +44,24 @@ Config: `$MASTERMIND_RUNNER_CONFIG`, else `$XDG_CONFIG_HOME/mastermind/runner.js
 else `~/.config/mastermind/runner.json`. `MASTERMIND_URL` and `MASTERMIND_NATS_URL`
 override the URLs. There is no default host.
 
+## Doctor: test the real path
+
+`mastermind-runner doctor [--deep] [--json] [settings]` tests what a dispatch really does.
+Each step prints PASS, WARN, FAIL or SKIP, the time it took, and a `fix:` line. The exit code is 1 when a step fails.
+
+| Step | What it tests |
+|---|---|
+| a. config | The config is readable. Mastermind accepts the credential (`GET /api/auth/credential`). The server version is the same as the runner version (WARN with the install command). |
+| b. nats | The connection to NATS with the credential, with its time (WARN over 2 s). The runner may publish its status subject. |
+| c. routing | For plain work on each queue: target, host, provider, mode, and the exact `paseo run` command line (no secret values). WARN when the mode asks for permission (claude: `default`, `plan`, `acceptEdits`): an unattended agent then waits forever. |
+| d. paseo | The Paseo daemon answers. The decided provider is `available`. The workdir exists. The repo and environment checkouts are git checkouts. |
+| e. agent | Only with `--deep`: a REAL `paseo run` with the arguments a dispatch uses and the prompt "Reply with the single word OK" (timeout 120 s). The agent has the labels `purpose=probe` and `mastermind.doctor=1`. The doctor archives it after the step. |
+
+```bash
+mastermind-runner doctor --deep          # all steps, starts one short agent
+mastermind-runner doctor --deep --mode auto   # try a setting before you --save it with start
+```
+
 ## Routing: which Paseo runs a dispatch
 
 The user who runs the runner decides where work runs. Put `routing.json` next to the
