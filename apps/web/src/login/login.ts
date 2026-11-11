@@ -1,3 +1,5 @@
+import { loadMe } from "../session/session.ts";
+
 /**
  * Login by code: the page asks for a code, shows it, and polls. An approver
  * (the operator, or a logged-in account) approves the code; then the poll
@@ -86,3 +88,20 @@ export function secondsLeft(expiresAt: string, now = Date.now()): number {
 /** 125 -> "2:05". */
 export const clock = (s: number) =>
 	`${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+
+/**
+ * A poll said the code is used or expired. Another /login tab of this
+ * browser may have collected the approved login (all tabs share the
+ * pending-login cookie): if the browser has a session now, it is logged in.
+ */
+export async function usedOrExpired(
+	fetcher: typeof fetch = fetch,
+): Promise<{ kind: "ok"; account: string } | { kind: "expired" }> {
+	const me = await loadMe(fetcher);
+	return me.kind === "ok"
+		? { kind: "ok", account: me.me.account }
+		: { kind: "expired" };
+}
+
+/** One tab's login moves every /login tab of this browser to the board. */
+export const LOGIN_CHANNEL = "mm-login";

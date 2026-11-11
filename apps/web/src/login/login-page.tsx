@@ -1,14 +1,16 @@
 import type { PeopleSetup } from "@mastermind/core";
 import { Link } from "@tanstack/react-router";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { loadSetup } from "../session/session.ts";
+import { loadMe, loadSetup } from "../session/session.ts";
 import {
 	type CodeStart,
 	clock,
+	LOGIN_CHANNEL,
 	pollCode,
 	resumeOrStart,
 	secondsLeft,
 	startCode,
+	usedOrExpired,
 } from "./login.ts";
 
 type Phase =
@@ -27,9 +29,26 @@ export function LoginPage() {
 
 	// A full navigation: the board loads the new session from the server,
 	// so no stale "anon" state sends the user back here.
+	// Other /login tabs of this browser follow (they share the cookie).
 	const done = useCallback((account: string) => {
 		setPhase({ kind: "ok", account });
+		if (typeof BroadcastChannel !== "undefined") {
+			const ch = new BroadcastChannel(LOGIN_CHANNEL);
+			ch.postMessage({ account });
+			ch.close();
+		}
 		window.location.assign("/board");
+	}, []);
+
+	useEffect(() => {
+		if (typeof BroadcastChannel === "undefined") return;
+		const ch = new BroadcastChannel(LOGIN_CHANNEL);
+		ch.onmessage = (e: MessageEvent<{ account?: unknown }>) => {
+			if (typeof e.data?.account !== "string") return;
+			setPhase({ kind: "ok", account: e.data.account });
+			window.location.assign("/board");
+		};
+		return () => ch.close();
 	}, []);
 
 	const newCode = useCallback(async () => {
@@ -45,6 +64,9 @@ export function LoginPage() {
 			setSetup(s);
 			if (s?.auth === "off" || s?.auth === "unconfigured")
 				return setPhase({ kind: "skip" });
+			// Another tab may have logged this browser in already.
+			const me = await loadMe();
+			if (me.kind === "ok") return done(me.me.account);
 			// A reload keeps the pending code of this browser.
 			const r = await resumeOrStart();
 			if (r.kind === "ok") done(r.account);
@@ -70,7 +92,14 @@ export function LoginPage() {
 			if (r.kind === "ok") {
 				stop = true;
 				done(r.account);
-			} else if (r.kind === "expired") setPhase({ kind: "expired" });
+			} else if (r.kind === "expired") {
+				const after = await usedOrExpired();
+				if (stop) return;
+				if (after.kind === "ok") {
+					stop = true;
+					done(after.account);
+				} else setPhase(after);
+			}
 		};
 		const onVisible = () => {
 			if (document.visibilityState === "visible") void check();

@@ -5,6 +5,7 @@ import {
 	resumeOrStart,
 	secondsLeft,
 	startCode,
+	usedOrExpired,
 } from "./login.ts";
 
 const reply = (status: number, body: unknown) =>
@@ -99,6 +100,15 @@ describe("login by code", () => {
 			expiresAt: "2026-11-10T10:10:00Z",
 		});
 		expect(calls).toEqual(["/api/auth/login/poll", "/api/auth/login/start"]);
+	});
+
+	test("used or expired: another tab logged this browser in", async () => {
+		expect(
+			await usedOrExpired(reply(200, { account: "duke", auth: "on" })),
+		).toEqual({ kind: "ok", account: "duke" });
+		expect(await usedOrExpired(reply(401, { error: "not logged in" }))).toEqual(
+			{ kind: "expired" },
+		);
 	});
 
 	test("countdown", () => {
