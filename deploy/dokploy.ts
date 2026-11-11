@@ -69,7 +69,7 @@ async function api<T = unknown>(
 	input?: Record<string, unknown>,
 ): Promise<T> {
 	key ??= await apiKey();
-	const get = /\.(one|all|by[A-Z]\w*|get\w*|load\w*)$/.test(proc);
+	const get = /\.(one|all|by[A-Z]\w*|get\w*|load\w*|read\w*)$/.test(proc);
 	const qs =
 		get && input
 			? `?${new URLSearchParams(input as Record<string, string>)}`
