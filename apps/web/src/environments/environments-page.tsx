@@ -1,5 +1,5 @@
-// /environments: named environments (repo, ref, setup, check, ...), list + editor.
-// Frame "Environments (mm-210.30)" (Jwc8-YTZLu).
+// /environments: named box recipes, list + editor.
+// Frame "Environments — box recipe (mm-210.50)" (VWYybImf2j).
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -14,6 +14,7 @@ import {
 	erroredIndexes,
 	errorsFor,
 	type FieldError,
+	formErrors,
 	fromForm,
 	getEnvironments,
 	removeEnvironment,
@@ -23,12 +24,20 @@ import {
 } from "./environments.ts";
 
 const input =
-	"h-6 w-full rounded-[var(--radius)] border bg-card px-1.5 text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring";
+	"h-7 w-full min-w-0 rounded-[var(--radius)] border border-input bg-card px-2 text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring";
 const area =
-	"w-full resize-y rounded-[var(--radius)] border bg-card px-1.5 py-1 text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring";
+	"w-full resize-y rounded-[var(--radius)] border border-input bg-card px-2 py-1 text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring";
 const mono = "font-mono";
 
+const OUTPUTS: { kind: EnvForm["outputKind"]; label: string }[] = [
+	{ kind: "pr", label: "Pull request" },
+	{ kind: "branch", label: "Branch mm/<item>" },
+	{ kind: "none", label: "Nothing (answer only)" },
+];
+
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+type Errors = Partial<Record<keyof EnvForm, string>>;
 
 function Field({
 	label,
@@ -43,8 +52,8 @@ function Field({
 }) {
 	return (
 		<div className="grid grid-cols-[120px_1fr] gap-x-3 border-b py-1">
-			<span className="pt-1 font-medium text-xs">{label}</span>
-			<div>
+			<span className="pt-1.5 font-medium text-xs">{label}</span>
+			<div className="min-w-0">
 				{children}
 				{error ? (
 					<p className="mt-0.5 text-[11px] text-destructive">{error}</p>
@@ -56,6 +65,27 @@ function Field({
 	);
 }
 
+/** A labelled block of fields: Box, In, Out. */
+function Group({
+	title,
+	id,
+	children,
+}: {
+	title: string;
+	id: string;
+	children: React.ReactNode;
+}) {
+	return (
+		<div
+			data-doop-id={id}
+			className="mt-3 grid grid-cols-1 gap-x-3 border-foreground border-t sm:grid-cols-[96px_1fr]"
+		>
+			<span className="label-caps pt-2">{title}</span>
+			<div>{children}</div>
+		</div>
+	);
+}
+
 function Editor({
 	form,
 	errors,
@@ -63,162 +93,207 @@ function Editor({
 	onDelete,
 }: {
 	form: EnvForm;
-	errors: Partial<Record<keyof EnvForm, string>>;
+	errors: Errors;
 	onChange: (form: EnvForm) => void;
 	onDelete: () => void;
 }) {
 	const set =
 		(key: keyof EnvForm) =>
-		(e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
+		(
+			e: React.ChangeEvent<
+				HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
+			>,
+		) =>
 			onChange({ ...form, [key]: e.target.value });
 	const nameError =
 		errors.name ??
 		(ENV_NAME.test(form.name) ? undefined : "1-64 letters, digits, '_' or '-'");
 	const bad = (key: keyof EnvForm) =>
 		errors[key] || (key === "name" && nameError) ? "border-destructive" : "";
+	const text = (
+		key: keyof EnvForm,
+		label: string,
+		opts: { placeholder?: string; code?: boolean } = {},
+	) => (
+		<input
+			aria-label={label}
+			className={cn(input, opts.code && mono, bad(key))}
+			placeholder={opts.placeholder}
+			value={form[key]}
+			onChange={set(key)}
+		/>
+	);
+	const lines = (key: keyof EnvForm, label: string, placeholder: string) => (
+		<textarea
+			aria-label={label}
+			rows={2}
+			className={cn(area, mono, bad(key))}
+			placeholder={placeholder}
+			value={form[key]}
+			onChange={set(key)}
+		/>
+	);
+	const unit = (key: keyof EnvForm, label: string, u: string) => (
+		<div className="relative">
+			{text(key, label)}
+			<span className="pointer-events-none absolute top-1.5 right-2 text-[11px] text-muted-foreground">
+				{u}
+			</span>
+		</div>
+	);
 	return (
 		<section data-doop-id="env-editor">
 			<div className="flex items-center gap-2 border-foreground border-t-2 border-b py-1.5 text-xs">
 				<span className="font-semibold">{form.name || "unnamed"}</span>
 				<span className="text-muted-foreground">
-					used when a runner prepares a checkout for a bead
+					the recipe of a box: one throwaway box per task
 				</span>
 				<span className="flex-1" />
-				<Button
-					size="sm"
-					variant="outline"
-					className="h-5 px-1.5 text-[11px]"
-					onClick={onDelete}
-				>
+				<Button size="sm" variant="outline" onClick={onDelete}>
 					Delete
 				</Button>
 			</div>
 			<Field label="Name" error={nameError}>
-				<input
-					aria-label="Name"
-					className={cn(input, bad("name"))}
-					value={form.name}
-					onChange={set("name")}
-				/>
+				{text("name", "Name")}
 			</Field>
 			<Field label="Description" error={errors.description}>
-				<input
-					aria-label="Description"
-					className={input}
-					value={form.description}
-					onChange={set("description")}
-				/>
+				{text("description", "Description")}
 			</Field>
-			<Field
-				label="Repo and ref"
-				error={errors.repo ?? errors.ref}
-				hint="A bead label ref:<branch> overrides the ref."
-			>
-				<div className="grid grid-cols-[1fr_160px] gap-2">
-					<input
-						aria-label="Repo"
-						className={cn(input, mono, bad("repo"))}
-						placeholder="https://github.com/org/repo.git"
-						value={form.repo}
-						onChange={set("repo")}
+
+			<Group title="Box" id="env-grp-box">
+				<Field
+					label="Image"
+					error={errors.image}
+					hint="Base image. Empty: the default box image."
+				>
+					{text("image", "Image", {
+						placeholder: "default box image",
+						code: true,
+					})}
+				</Field>
+				<Field
+					label="Tools"
+					error={errors.tools}
+					hint="One line each. Baked once into a cached image."
+				>
+					{lines("tools", "Tools", "RUN apt-get install -y jq")}
+				</Field>
+				<Field
+					label="Setup"
+					error={errors.setup}
+					hint="One command per line. Runs in each new box, after the checkout."
+				>
+					{lines("setup", "Setup", "bun install")}
+				</Field>
+				<Field
+					label="Check"
+					error={errors.check}
+					hint="Must pass before the agent starts; a failure ends the task with the reason."
+				>
+					{lines("check", "Check", "bun test")}
+				</Field>
+				<Field
+					label="Limits"
+					error={errors.cpu ?? errors.memoryMb ?? errors.timeoutMin}
+				>
+					<div className="grid grid-cols-3 gap-2">
+						{unit("cpu", "CPU", "cpu")}
+						{unit("memoryMb", "Memory (MB)", "MB")}
+						{unit("timeoutMin", "Timeout (minutes)", "min")}
+					</div>
+				</Field>
+				<Field
+					label="Network"
+					error={errors.network}
+					hint="open, or the allowed hosts (host, host:port, *.host)."
+				>
+					{text("network", "Network", { placeholder: "open", code: true })}
+				</Field>
+			</Group>
+
+			<Group title="In" id="env-grp-in">
+				<Field
+					label="Repo and ref"
+					error={errors.repo ?? errors.ref}
+					hint="A label ref:<branch> on the item overrides the ref."
+				>
+					<div className="grid grid-cols-[1fr_140px] gap-2">
+						{text("repo", "Repo", {
+							placeholder: "https://github.com/org/repo.git",
+							code: true,
+						})}
+						{text("ref", "Ref", { placeholder: "main", code: true })}
+					</div>
+				</Field>
+				<Field
+					label="Secrets"
+					error={errors.secrets}
+					hint="Names only. The values stay on the runner machine."
+				>
+					{text("secrets", "Secrets", { placeholder: "GH_TOKEN", code: true })}
+				</Field>
+				<Field
+					label="Provider"
+					error={errors.provider ?? errors.providerAuth ?? errors.mode}
+					hint="Provider, the secret with its login, and the mode."
+				>
+					<div className="grid grid-cols-3 gap-2">
+						{text("provider", "Provider", { placeholder: "claude" })}
+						{text("providerAuth", "Provider login secret", {
+							placeholder: "CLAUDE_TOKEN",
+							code: true,
+						})}
+						{text("mode", "Mode", { placeholder: "mode (optional)" })}
+					</div>
+				</Field>
+				<Field
+					label="Requires"
+					error={errors.requires}
+					hint="Capabilities the runner must have, for example docker."
+				>
+					{text("requires", "Requires", { code: true })}
+				</Field>
+			</Group>
+
+			<Group title="Out" id="env-grp-out">
+				<Field
+					label="Output"
+					error={errors.outputKind ?? errors.outputBase}
+					hint="Pull request, branch mm/<item>, or nothing (answer only). Right: base branch."
+				>
+					<div className="grid grid-cols-[1fr_140px] gap-2">
+						<select
+							aria-label="Output"
+							className={cn(input, bad("outputKind"))}
+							value={form.outputKind}
+							onChange={set("outputKind")}
+						>
+							{OUTPUTS.map((o) => (
+								<option key={o.kind} value={o.kind}>
+									{o.label}
+								</option>
+							))}
+						</select>
+						{text("outputBase", "Base branch", {
+							placeholder: "the ref",
+							code: true,
+						})}
+					</div>
+				</Field>
+				<Field
+					label="Instructions"
+					error={errors.instructions}
+					hint="Added to every prompt."
+				>
+					<textarea
+						aria-label="Instructions"
+						rows={2}
+						className={area}
+						value={form.instructions}
+						onChange={set("instructions")}
 					/>
-					<input
-						aria-label="Ref"
-						className={cn(input, mono, bad("ref"))}
-						placeholder="main"
-						value={form.ref}
-						onChange={set("ref")}
-					/>
-				</div>
-			</Field>
-			<Field
-				label="Requires"
-				error={errors.requires}
-				hint="Capabilities the runner must have, space separated: bun>=1.4 docker"
-			>
-				<input
-					aria-label="Requires"
-					className={cn(input, mono, bad("requires"))}
-					value={form.requires}
-					onChange={set("requires")}
-				/>
-			</Field>
-			<Field
-				label="Setup"
-				error={errors.setup}
-				hint="One command per line. Runs once per checkout, before the agent starts."
-			>
-				<textarea
-					aria-label="Setup"
-					rows={3}
-					className={cn(area, mono, bad("setup"))}
-					placeholder="bun install"
-					value={form.setup}
-					onChange={set("setup")}
-				/>
-			</Field>
-			<Field
-				label="Check"
-				error={errors.check}
-				hint="One command per line. Runs before every start; a failed check gives the bead back."
-			>
-				<textarea
-					aria-label="Check"
-					rows={2}
-					className={cn(area, mono, bad("check"))}
-					placeholder="bun test"
-					value={form.check}
-					onChange={set("check")}
-				/>
-			</Field>
-			<Field
-				label="Secrets"
-				error={errors.secrets}
-				hint="Names only, space separated. Never the value."
-			>
-				<input
-					aria-label="Secrets"
-					className={cn(input, mono, bad("secrets"))}
-					placeholder="GH_TOKEN"
-					value={form.secrets}
-					onChange={set("secrets")}
-				/>
-			</Field>
-			<Field
-				label="Agent"
-				error={errors.provider ?? errors.mode}
-				hint="A preference: the runner's own rules win."
-			>
-				<div className="grid grid-cols-2 gap-2">
-					<input
-						aria-label="Agent provider"
-						className={cn(input, bad("provider"))}
-						placeholder="provider (optional)"
-						value={form.provider}
-						onChange={set("provider")}
-					/>
-					<input
-						aria-label="Agent mode"
-						className={cn(input, bad("mode"))}
-						placeholder="mode (optional)"
-						value={form.mode}
-						onChange={set("mode")}
-					/>
-				</div>
-			</Field>
-			<Field
-				label="Instructions"
-				error={errors.instructions}
-				hint="Added to every prompt for this environment."
-			>
-				<textarea
-					aria-label="Instructions"
-					rows={3}
-					className={area}
-					value={form.instructions}
-					onChange={set("instructions")}
-				/>
-			</Field>
+				</Field>
+			</Group>
 		</section>
 	);
 }
@@ -307,6 +382,8 @@ export function EnvironmentsPage() {
 			.finally(() => setSaving(false));
 	};
 	const failed = erroredIndexes(fieldErrors);
+	// A number field holds a word: say so before the round trip.
+	const local = form ? Object.keys(formErrors(form)).length > 0 : false;
 
 	return (
 		<div className="h-full overflow-auto pb-8">
@@ -336,7 +413,7 @@ export function EnvironmentsPage() {
 				<Button
 					size="sm"
 					className="h-6 px-2 text-xs"
-					disabled={dirty === 0 || saving}
+					disabled={dirty === 0 || saving || local}
 					onClick={save}
 				>
 					{saving ? "Saving…" : "Save"}
@@ -386,7 +463,7 @@ export function EnvironmentsPage() {
 			<div className="grid grid-cols-1 gap-6 px-4 md:grid-cols-[400px_1fr]">
 				<section data-doop-id="env-list">
 					<div className="flex items-center gap-2 border-foreground border-t-2 border-b py-1.5 text-xs">
-						<span className="font-semibold">Environments</span>
+						<span className="label-caps">Environments</span>
 						<span className="text-muted-foreground">
 							beads use the label env:&lt;name&gt;
 						</span>
@@ -428,14 +505,12 @@ export function EnvironmentsPage() {
 								>
 									{e.name || "unnamed"}
 								</span>
-								<span className="block truncate font-mono text-muted-foreground text-xs">
-									{e.repo || "no repo"} @ {e.ref}
+								<span className="block truncate font-mono text-[11px] text-muted-foreground">
+									{e.image || "default image"} · {e.repo || "no repo"} @ {e.ref}
 								</span>
 							</span>
 							<span className="whitespace-nowrap text-[11px] text-muted-foreground tabular-nums">
-								{e.setup.length || e.check.length
-									? `${e.setup.length} setup · ${e.check.length} check`
-									: "no setup"}
+								{e.output.kind} · {e.limits.cpu} cpu
 							</span>
 						</button>
 					))}
@@ -443,7 +518,10 @@ export function EnvironmentsPage() {
 				{form && (
 					<Editor
 						form={form}
-						errors={errorsFor(fieldErrors, selected)}
+						errors={{
+							...errorsFor(fieldErrors, selected),
+							...formErrors(form),
+						}}
 						onChange={editForm}
 						onDelete={remove}
 					/>
