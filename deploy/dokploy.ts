@@ -10,6 +10,10 @@
 //                                    Dokploy queue and status, fail with the log tail, wait for health
 //   bun deploy/dokploy.ts login-approve <code> --account <name>
 //                                    approve a login code shown on <public url>/login (the operator)
+//   bun deploy/dokploy.ts debug state [--json]
+//                                    the operator's read-only snapshot of production (runners,
+//                                    routing, items, NATS, last errors). MASTERMIND_URL and
+//                                    MASTERMIND_OPERATOR_KEY from env, else the app env in Dokploy
 //   bun deploy/dokploy.ts retire [--stop]
 //                                    list the services in site.json "retired"; --stop stops them.
 //                                    It never deletes: a human does that in Dokploy.
@@ -28,6 +32,12 @@ import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { createAccount, fromSeed } from "@nats-io/nkeys";
 import { probe } from "./nats/smoke.ts";
+import {
+	DEBUG_USAGE,
+	fetchDebug,
+	formatState,
+	parseDebugArgs,
+} from "./src/debug.ts";
 import { mergeEnv, parseEnv, serializeEnv } from "./src/env.ts";
 import {
 	type Approval,
@@ -601,6 +611,32 @@ async function loginApprove(argv: string[]) {
 	log(describeApproval(body as Approval));
 }
 
+/**
+ * The operator's read-only view of a running Mastermind. MASTERMIND_URL and
+ * MASTERMIND_OPERATOR_KEY from env when both are set (no Dokploy needed);
+ * otherwise the public URL of the site and the key from the app env in Dokploy.
+ * The key is never printed.
+ */
+async function debug(argv: string[]) {
+	const args = parseDebugArgs(argv);
+	if (!args) throw new Error(DEBUG_USAGE);
+	let url = process.env.MASTERMIND_URL;
+	let key = process.env.MASTERMIND_OPERATOR_KEY;
+	if (!url || !key) {
+		const { applicationId } = await findProject();
+		if (!applicationId) throw new Error(`no app '${cfg.app}' in Dokploy`);
+		const app = await api<App>("application.one", { applicationId });
+		key = parseEnv(app.env).get("MASTERMIND_OPERATOR_KEY");
+		if (!key)
+			throw new Error(
+				"MASTERMIND_OPERATOR_KEY is not in the app env: run 'bun deploy/dokploy.ts apply' first",
+			);
+		url = cfg.publicUrl;
+	}
+	const body = await fetchDebug(url, key, args.what);
+	console.log(args.json ? JSON.stringify(body, null, 2) : formatState(body));
+}
+
 /** App env keys of the stores Mastermind no longer uses; apply removes them. */
 const RETIRED_APP_KEYS = [
 	"DOLT_URL",
@@ -685,6 +721,7 @@ const commands: Record<string, () => Promise<void>> = {
 	apply,
 	secrets,
 	"login-approve": () => loginApprove(process.argv.slice(3)),
+	debug: () => debug(process.argv.slice(3)),
 	release: () => release(process.argv[3]),
 	jetstream: () => jetstream(process.argv.slice(3)),
 	retire: () => retire(process.argv.slice(3)),
@@ -692,7 +729,7 @@ const commands: Record<string, () => Promise<void>> = {
 const command = commands[process.argv[2] ?? ""];
 if (!command) {
 	console.error(
-		"usage: bun deploy/dokploy.ts status | apply | secrets | release <sha|latest> | login-approve <code> --account <name> | retire [--stop] | jetstream <list|backup|restore|usage|marker> ...",
+		"usage: bun deploy/dokploy.ts status | apply | secrets | release <sha|latest> | login-approve <code> --account <name> | debug state [--json] | retire [--stop] | jetstream <list|backup|restore|usage|marker> ...",
 	);
 	process.exit(2);
 }

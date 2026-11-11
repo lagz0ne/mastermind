@@ -333,3 +333,34 @@ protects only against one NATS process or one volume failing, not against the lo
 for that it needs three machines (three small VMs, routes over a private network, Dokploy in swarm
 mode or NATS outside Dokploy). At Mastermind's size an S3 `BACKUP_URL` gives most of the protection
 for little cost.
+
+## Troubleshooting (operator, read-only)
+
+`/api/debug/*` gives the operator a read-only view of the running process. Auth is
+`Authorization: Bearer <MASTERMIND_OPERATOR_KEY>`, the same key as `login-approve`. Without the key
+in the app env the routes answer 404. A wrong or missing key gets 401. Each address may make 60 calls
+per minute. Each call writes one audit line (`debug: state from <ip> -> <status>`) without the key.
+
+```bash
+bun deploy/dokploy.ts debug state          # tables for a human
+bun deploy/dokploy.ts debug state --json   # the raw snapshot
+# Without Dokploy (another site, local dev):
+MASTERMIND_URL=http://localhost:3000 MASTERMIND_OPERATOR_KEY=... bun deploy/dokploy.ts debug state
+```
+
+The CLI reads the key from the app env through the Dokploy API and never prints it.
+
+| Field | Meaning |
+|---|---|
+| `version`, `uptimeSeconds` | The commit that runs and the time since the process started. |
+| `nats[]` | Each watched NATS connection: `state` (connected, reconnecting, draining, closed), `reconnects`, `disconnects`, `lastError`. |
+| `accounts[]` | Account ids and creation times. |
+| `serviceAccounts[]` | Id, account, name and creation time. The snapshot never includes secrets or hashes. |
+| `runners[]` | The runner registry of this replica: `online` (heard from within 90 s), `lastSeenAt`, `queues`, `capacity`, `running` item ids, and `diagnostics` when the runner reports them. |
+| `routing` | The routing document (queues, members, ordered rules) and its KV revision (0: never saved, all queues open). |
+| `environments` | The environment definitions and their revision. |
+| `items` | Counts per board column and per status, ready items per queue, `unrouted` (open items with no `queue:` label: no runner gets them), and `claimed` items with holder, lease state and expiry. |
+| `errors[]` | The last 100 `console.error` lines of the process. Tokens (`mml_`, `mme_`, `mms_`), login codes and Bearer values are redacted. |
+
+The snapshot reads each section on its own with a 5 s timeout. A failed section shows
+`{ "error": "..." }`, and the rest of the snapshot is still there.
