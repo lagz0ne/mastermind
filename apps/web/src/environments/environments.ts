@@ -2,7 +2,11 @@
  * Environments in the browser: the document the api serves
  * (GET/PUT /api/environments), pure edits on it, and the api calls.
  */
-import type { Environment } from "@mastermind/core";
+import {
+	DEFAULT_LIMITS,
+	type Environment,
+	type EnvironmentOutput,
+} from "@mastermind/core";
 
 export type EnvironmentsDoc = { environments: Environment[] };
 export type Environments = EnvironmentsDoc & { revision: number };
@@ -14,14 +18,29 @@ export const ENV_NAME = /^[A-Za-z0-9_-]{1,64}$/;
 export type EnvForm = {
 	name: string;
 	description: string;
+	// the box
+	image: string;
+	tools: string;
+	setup: string;
+	check: string;
+	cpu: string;
+	memoryMb: string;
+	timeoutMin: string;
+	/** Empty or `open`: open. Else allowed hosts, space separated. */
+	network: string;
+	// what goes in
 	repo: string;
 	ref: string;
 	requires: string;
-	setup: string;
-	check: string;
 	secrets: string;
+	/** Provider name, for example claude. */
 	provider: string;
+	/** Name of the provider login secret. */
+	providerAuth: string;
 	mode: string;
+	// what comes out
+	outputKind: EnvironmentOutput["kind"];
+	outputBase: string;
 	instructions: string;
 };
 
@@ -38,35 +57,74 @@ export function toForm(e: Environment): EnvForm {
 	return {
 		name: e.name,
 		description: e.description,
+		image: e.image,
+		tools: e.tools.join("\n"),
+		setup: e.setup.join("\n"),
+		check: e.check.join("\n"),
+		cpu: String(e.limits.cpu),
+		memoryMb: String(e.limits.memoryMb),
+		timeoutMin: String(e.limits.timeoutMin),
+		network: e.network === "open" ? "open" : e.network.allow.join(" "),
 		repo: e.repo,
 		ref: e.ref,
 		requires: e.requires.join(" "),
-		setup: e.setup.join("\n"),
-		check: e.check.join("\n"),
 		secrets: e.secrets.join(" "),
-		provider: e.agent?.provider ?? "",
+		provider: e.provider?.name ?? e.agent?.provider ?? "",
+		providerAuth: e.provider?.auth ?? "",
 		mode: e.agent?.mode ?? "",
+		outputKind: e.output.kind,
+		outputBase: e.output.base ?? "",
 		instructions: e.instructions ?? "",
 	};
 }
 
+/** A number typed in the form; empty: the default. Not a number: NaN (see formErrors). */
+const numberOr = (text: string, fallback: number) =>
+	text.trim() === "" ? fallback : Number(text.trim());
+
 export function fromForm(f: EnvForm): Environment {
+	const hosts = words(f.network);
 	const e: Environment = {
 		name: f.name.trim(),
 		description: f.description.trim(),
+		image: f.image.trim(),
+		tools: lines(f.tools),
+		setup: lines(f.setup),
+		check: lines(f.check),
+		limits: {
+			cpu: numberOr(f.cpu, DEFAULT_LIMITS.cpu),
+			memoryMb: numberOr(f.memoryMb, DEFAULT_LIMITS.memoryMb),
+			timeoutMin: numberOr(f.timeoutMin, DEFAULT_LIMITS.timeoutMin),
+		},
+		network:
+			hosts.length === 0 || (hosts.length === 1 && hosts[0] === "open")
+				? "open"
+				: { allow: hosts },
 		repo: f.repo.trim(),
 		ref: f.ref.trim() || "main",
 		requires: words(f.requires),
-		setup: lines(f.setup),
-		check: lines(f.check),
 		secrets: words(f.secrets),
+		output: {
+			kind: f.outputKind,
+			...(f.outputBase.trim() ? { base: f.outputBase.trim() } : {}),
+		},
 	};
 	const provider = f.provider.trim();
-	const mode = f.mode.trim();
-	if (provider || mode)
-		e.agent = { ...(provider ? { provider } : {}), ...(mode ? { mode } : {}) };
+	const auth = f.providerAuth.trim();
+	if (provider)
+		e.provider = auth ? { name: provider, auth } : { name: provider };
+	if (f.mode.trim()) e.agent = { mode: f.mode.trim() };
 	if (f.instructions.trim()) e.instructions = f.instructions.trim();
 	return e;
+}
+
+/** Problems the browser can see before a save: numbers that are not numbers. */
+export function formErrors(f: EnvForm): Partial<Record<keyof EnvForm, string>> {
+	const out: Partial<Record<keyof EnvForm, string>> = {};
+	for (const k of ["cpu", "memoryMb", "timeoutMin"] as const)
+		if (f[k].trim() !== "" && !Number.isFinite(Number(f[k].trim())))
+			out[k] = "a number";
+	return out;
 }
 
 /** A new environment with a free name (`new`, `new-2`, ...). */
@@ -80,12 +138,17 @@ export function addEnvironment(doc: EnvironmentsDoc): {
 	const env: Environment = {
 		name,
 		description: "",
+		image: "",
+		tools: [],
+		setup: [],
+		check: [],
+		limits: { ...DEFAULT_LIMITS },
+		network: "open",
 		repo: "",
 		ref: "main",
 		requires: [],
-		setup: [],
-		check: [],
 		secrets: [],
+		output: { kind: "none" },
 	};
 	return {
 		doc: { environments: [...doc.environments, env] },
@@ -132,17 +195,36 @@ export function errorsFor(
 	const prefix = `environments.${i}.`;
 	for (const e of errors) {
 		if (!e.field.startsWith(prefix)) continue;
-		const parts = e.field.slice(prefix.length).split(".");
-		const key = (
-			parts[0] === "agent" ? (parts[1] ?? "provider") : parts[0]
-		) as keyof EnvForm;
-		const at =
-			parts[0] !== "agent" && parts[1] ? ` (${Number(parts[1]) + 1})` : "";
+		const [head = "", sub, index] = e.field.slice(prefix.length).split(".");
+		const { key, item } = formKey(head, sub, index);
+		const at = item === undefined ? "" : ` (${Number(item) + 1})`;
 		out[key] = out[key]
 			? `${out[key]}; ${e.message}${at}`
 			: `${e.message}${at}`;
 	}
 	return out;
+}
+
+/** The form field of a server field path: `limits.cpu` → cpu, `setup.0` → setup (item 0). */
+function formKey(
+	head: string,
+	sub: string | undefined,
+	index: string | undefined,
+): { key: keyof EnvForm; item?: string } {
+	switch (head) {
+		case "limits":
+			return { key: (sub ?? "cpu") as keyof EnvForm };
+		case "network":
+			return { key: "network", item: index };
+		case "provider":
+			return { key: sub === "auth" ? "providerAuth" : "provider" };
+		case "agent":
+			return { key: sub === "provider" ? "provider" : "mode" };
+		case "output":
+			return { key: sub === "base" ? "outputBase" : "outputKind" };
+		default:
+			return { key: head as keyof EnvForm, item: sub };
+	}
 }
 
 /** Indexes of environments that have a server error. */

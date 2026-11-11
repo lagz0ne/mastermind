@@ -11,6 +11,13 @@
  *   mm.u.<account>.d.<bead>.release     ReleaseRequest   -> Ack
  *   mm.q.<queue>.ready                  ReadyNotice      (publish)
  */
+import type {
+	EnvironmentAgent,
+	EnvironmentLimits,
+	EnvironmentNetwork,
+	EnvironmentOutput,
+	EnvironmentProvider,
+} from "./environment.ts";
 import type { Bead, Lease } from "./work.ts";
 
 /**
@@ -23,33 +30,6 @@ export const DISPATCH_STAGES = [
 	"enrich_output",
 ] as const;
 export type DispatchStage = (typeof DISPATCH_STAGES)[number];
-
-/**
- * A named environment: where and how an agent works on a bead. Defined once in
- * Mastermind (`/environments`, KV), referenced by a bead with the label
- * `env:<name>`, resolved by the dispatcher into {@link DispatchEnv}.
- */
-export type Environment = {
-	/** A single NATS subject token: letters, digits, '_' and '-'. */
-	name: string;
-	description: string;
-	/** Git remote URL of the repo to work in. */
-	repo: string;
-	/** Default branch, tag or commit; a bead's `ref:` label overrides it. */
-	ref: string;
-	/** Capabilities the runner must have (tools, CLIs, platforms), e.g. `bun>=1.4`. */
-	requires: string[];
-	/** Shell commands that prepare a checkout (install, build, seed). */
-	setup: string[];
-	/** Shell commands that prove the checkout is ready; run before each start. */
-	check: string[];
-	/** Names of secrets the runner must supply. Never the values. */
-	secrets: string[];
-	/** A preference only: the user's runner may override it. */
-	agent?: EnvironmentAgent;
-	/** Text added to every prompt for this environment. */
-	instructions?: string;
-};
 
 /** A bead names its environment with ONE label `env:<name>`. */
 export const ENV_LABEL_PREFIX = "env:";
@@ -74,9 +54,6 @@ export function envNameOf(bead: Pick<Bead, "labels">): string | null {
 	);
 	return label ? label.slice(ENV_LABEL_PREFIX.length) : null;
 }
-
-/** Which agent an environment prefers. */
-export type EnvironmentAgent = { provider?: string; mode?: string };
 
 /** What the runner must prepare before it starts the agent. */
 export type DispatchEnv = {
@@ -103,6 +80,18 @@ export type DispatchEnv = {
 	agent?: EnvironmentAgent;
 	/** Text the environment adds to every prompt. */
 	instructions?: string;
+	// --- the box recipe (named environments; absent for old label beads)
+	/** Base image; empty: the runner's default box image. */
+	image?: string;
+	/** Lines baked into the cached image. */
+	tools?: string[];
+	/** sha256 (hex) of {image, tools}: the runner's image cache key. */
+	recipeHash?: string;
+	limits?: EnvironmentLimits;
+	network?: EnvironmentNetwork;
+	/** Provider and the name of its login secret (also listed in `secrets`). */
+	providerLogin?: EnvironmentProvider;
+	output?: EnvironmentOutput;
 };
 
 /** One unit of dispatched work: this bead, this stage, to this actor. */

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { BusError, type StoreEntry } from "@mastermind/bus";
-import { ENVIRONMENTS_KEY, resolveEnv, validate } from "./model.ts";
+import { ENVIRONMENTS_KEY, recipeHash, resolveEnv, validate } from "./model.ts";
 import { environmentRoutes } from "./routes.ts";
 import {
 	EnvironmentStore,
@@ -44,34 +44,80 @@ const SCRATCH = {
 	instructions: "Keep commits small.",
 };
 
+/** A full box recipe: every field set. */
+const BOX = {
+	name: "box",
+	description: "every field",
+	image: "ghcr.io/acme/box:1",
+	tools: ["RUN apt-get install -y jq"],
+	setup: ["bun install"],
+	check: ["bun test"],
+	limits: { cpu: 1.5, memoryMb: 2048, timeoutMin: 30 },
+	network: { allow: ["github.com", "*.npmjs.org", "registry.local:5000"] },
+	repo: "https://github.com/acme/box.git",
+	ref: "dev",
+	requires: ["docker"],
+	secrets: ["GH_TOKEN"],
+	provider: { name: "claude", auth: "CLAUDE_TOKEN" },
+	agent: { mode: "bypass" },
+	output: { kind: "pr" as const, base: "main" },
+	instructions: "Small commits.",
+};
+
 describe("validate", () => {
-	test("a good document passes; lists default to empty, ref to main", () => {
-		const v = validate({
-			environments: [SCRATCH, { name: "min", repo: "git@host:a/b.git" }],
-		});
+	test("an environment saved before box recipes loads with defaults", () => {
+		const v = validate(
+			{ environments: [SCRATCH, { name: "min", repo: "git@host:a/b.git" }] },
+			"ghcr.io/acme/default:1",
+		);
 		expect(v.ok).toBe(true);
 		if (!v.ok) return;
-		expect(v.doc.environments[0]).toEqual(SCRATCH);
+		expect(v.doc.environments[0]).toEqual({
+			...SCRATCH,
+			image: "ghcr.io/acme/default:1",
+			tools: [],
+			limits: { cpu: 2, memoryMb: 4096, timeoutMin: 60 },
+			network: "open",
+			output: { kind: "none" },
+			// The old preference becomes the provider.
+			provider: { name: "claude" },
+		});
 		expect(v.doc.environments[1]).toEqual({
 			name: "min",
 			description: "",
+			image: "ghcr.io/acme/default:1",
+			tools: [],
+			setup: [],
+			check: [],
+			limits: { cpu: 2, memoryMb: 4096, timeoutMin: 60 },
+			network: "open",
 			repo: "git@host:a/b.git",
 			ref: "main",
 			requires: [],
-			setup: [],
-			check: [],
 			secrets: [],
+			output: { kind: "none" },
 		});
 	});
 
+	test("a full recipe round-trips; no default image config leaves image empty", () => {
+		const v = validate({ environments: [BOX] }, "");
+		expect(v.ok).toBe(true);
+		if (v.ok) expect(v.doc.environments[0]).toEqual(BOX);
+		const none = validate({ environments: [{ name: "x", repo: "r" }] }, "");
+		expect(none.ok && none.doc.environments[0]?.image).toBe("");
+	});
+
 	test("errors are tied to fields", () => {
-		const v = validate({
-			environments: [
-				{ name: "a.b", repo: "" },
-				{ name: "ok", repo: "x", setup: ["", 3], secrets: ["NOT OK"] },
-				{ name: "ok", repo: "x y", agent: { mode: "two words" } },
-			],
-		});
+		const v = validate(
+			{
+				environments: [
+					{ name: "a.b", repo: "" },
+					{ name: "ok", repo: "x", setup: ["", 3], secrets: ["NOT OK"] },
+					{ name: "ok", repo: "x y", agent: { mode: "two words" } },
+				],
+			},
+			"",
+		);
 		expect(v.ok).toBe(false);
 		if (v.ok) return;
 		expect(v.errors.map((e) => e.field)).toEqual([
@@ -85,28 +131,103 @@ describe("validate", () => {
 			"environments.2.agent.mode",
 		]);
 	});
+
+	test("box fields: limits, network, provider, output and image are checked by field", () => {
+		const v = validate(
+			{
+				environments: [
+					{
+						name: "b",
+						repo: "",
+						image: "two words",
+						limits: { cpu: 0, memoryMb: 100.5, timeoutMin: 2000 },
+						network: { allow: ["ok.com", "not a host"] },
+						provider: { name: "", auth: "bad-name" },
+						output: { kind: "pr", base: "a b" },
+					},
+					{ name: "c", repo: "r", network: "closed", output: { kind: "zip" } },
+				],
+			},
+			"",
+		);
+		expect(v.ok).toBe(false);
+		if (v.ok) return;
+		expect(v.errors.map((e) => e.field)).toEqual([
+			"environments.0.repo",
+			"environments.0.image",
+			"environments.0.limits.cpu",
+			"environments.0.limits.memoryMb",
+			"environments.0.limits.timeoutMin",
+			"environments.0.network.allow.1",
+			"environments.0.output.base",
+			"environments.0.output.kind",
+			"environments.0.provider.name",
+			"environments.0.provider.auth",
+			"environments.1.network",
+			"environments.1.output.kind",
+		]);
+	});
+});
+
+describe("recipeHash", () => {
+	test("stable for image + tools; any change in them changes it; other fields do not", () => {
+		const h = recipeHash(BOX);
+		expect(h).toMatch(/^[0-9a-f]{64}$/);
+		const otherSetup = {
+			...BOX,
+			setup: ["other"],
+			limits: { cpu: 9, memoryMb: 9999, timeoutMin: 9 },
+		};
+		expect(recipeHash(otherSetup)).toBe(h);
+		expect(recipeHash({ ...BOX, tools: [...BOX.tools, "RUN true"] })).not.toBe(
+			h,
+		);
+		expect(recipeHash({ ...BOX, image: "ghcr.io/acme/box:2" })).not.toBe(h);
+	});
 });
 
 describe("resolveEnv", () => {
-	const doc = { environments: [validateOk(SCRATCH)] };
+	const doc = { environments: [validateOk(SCRATCH), validateOk(BOX)] };
 
 	test("env:<name> resolves to the definition; ref: and req: labels add to it", () => {
 		const r = resolveEnv(
 			{ labels: ["env:scratch", "ref:feat-x", "req:docker", "req:bun>=1.4"] },
 			doc,
 		);
+		expect(r.ok && r.env).toMatchObject({
+			name: "scratch",
+			repo: SCRATCH.repo,
+			ref: "feat-x",
+			requires: ["bun>=1.4", "docker"],
+			setup: ["bun install"],
+			check: ["bun test"],
+			secrets: ["GH_TOKEN"],
+			agent: { provider: "claude" },
+			instructions: "Keep commits small.",
+		});
+	});
+
+	test("the envelope carries the whole recipe with its hash; the provider login is a needed secret", () => {
+		const r = resolveEnv({ labels: ["env:box"] }, doc);
 		expect(r).toEqual({
 			ok: true,
 			env: {
-				name: "scratch",
-				repo: SCRATCH.repo,
-				ref: "feat-x",
-				requires: ["bun>=1.4", "docker"],
+				name: "box",
+				repo: BOX.repo,
+				ref: "dev",
+				requires: ["docker"],
 				setup: ["bun install"],
 				check: ["bun test"],
-				secrets: ["GH_TOKEN"],
-				agent: { provider: "claude" },
-				instructions: "Keep commits small.",
+				secrets: ["GH_TOKEN", "CLAUDE_TOKEN"],
+				image: BOX.image,
+				tools: BOX.tools,
+				recipeHash: recipeHash(BOX),
+				limits: BOX.limits,
+				network: BOX.network,
+				output: BOX.output,
+				providerLogin: { name: "claude", auth: "CLAUDE_TOKEN" },
+				agent: { mode: "bypass", provider: "claude" },
+				instructions: "Small commits.",
 			},
 		});
 	});
@@ -140,7 +261,7 @@ describe("resolveEnv", () => {
 });
 
 function validateOk(e: unknown) {
-	const v = validate({ environments: [e] });
+	const v = validate({ environments: [e] }, "");
 	if (!v.ok) throw new Error(JSON.stringify(v.errors));
 	return v.doc.environments[0] as NonNullable<
 		(typeof v.doc.environments)[number]
