@@ -234,7 +234,9 @@ export function formatState(s: Any): string {
 	);
 	section("routing", s.routing, (v) => {
 		const doc = v.doc ?? {};
-		const lines = [`  revision ${v.revision}`];
+		const lines = [
+			`  revision ${v.revision}  default queue ${doc.defaultQueue ?? "-"}`,
+		];
 		lines.push(
 			table(
 				["queue", "members"],

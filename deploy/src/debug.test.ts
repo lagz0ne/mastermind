@@ -85,6 +85,7 @@ describe("debug cli", () => {
 		expect(text).toContain("ERROR: timed out after 5000ms");
 		expect(text).toContain("unrouted (open, no queue): mm-1");
 		expect(text).toContain("main   duke");
+		expect(text).toContain("default queue -");
 		expect(text).toContain("work: boom");
 	});
 });

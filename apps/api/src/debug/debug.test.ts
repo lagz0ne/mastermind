@@ -220,7 +220,7 @@ describe("debug item", () => {
 
 	test("unrouted, and a runner that is offline or lacks a capability", () => {
 		expect(decide(bead("y"), routing, [], now).blockers).toEqual([
-			"no queue: label and no rule matches (it stays unrouted)",
+			"no queue: label, no rule matches and no default queue (it stays unrouted)",
 		]);
 		const d = decide(
 			bead("z", { labels: ["queue:main", "req:gpu"] }),
@@ -231,6 +231,17 @@ describe("debug item", () => {
 		expect(d.by).toBe("label");
 		expect(d.runners[0]?.missing).toEqual(["gpu"]);
 		expect(d.blockers[0]).toContain("no online runner on main");
+	});
+
+	test("the default queue takes an item that no rule matches", () => {
+		const d = decide(
+			bead("y"),
+			{ revision: 3, doc: { ...routing.doc, rules: [], defaultQueue: "main" } },
+			[runner()],
+			now,
+		);
+		expect(d).toMatchObject({ queue: "main", by: "default", ruleIndex: null });
+		expect(d.blockers).toEqual([]);
 	});
 
 	test("route: item, timeline, routing; 404 for an unknown id", async () => {
