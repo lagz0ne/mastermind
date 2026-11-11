@@ -4,6 +4,7 @@
  *   mm.u.<account>.q.<queue>.next    request: next dispatch for a runner
  *   mm.u.<account>.d.<bead>.<verb>    request: heartbeat | report | complete | release
  *   mm.u.<account>.r.<runner>.status publish: a runner's diagnostics (runnerToken)
+ *   mm.u.<account>.r.<runner>.doctor request: run the runner's doctor (operator)
  *   mm.q.<queue>.ready               publish: a queue has work
  *   mm.events.bead.<bead>            publish: one bead changed (beads journal)
  *
@@ -78,6 +79,12 @@ export const subjects = {
 		`mm.u.${token("account", account)}.d.${beadToken(bead)}.${verb}`,
 	runnerStatus: (account: string, runner: string) =>
 		`mm.u.${token("account", account)}.r.${runnerToken(runner)}.status`,
+	/** Request to a runner: run its doctor, reply with the report (mm-210.47). */
+	runnerDoctor: (account: string, runner: string) =>
+		`mm.u.${token("account", account)}.r.${runnerToken(runner)}.doctor`,
+	/** The doctor requests of every runner of an account (the runner's subscribe permission). */
+	runnerDoctorScope: (account: string) =>
+		`mm.u.${token("account", account)}.r.*.doctor`,
 	ready: (queue: string) => `mm.q.${token("queue", queue)}.ready`,
 	beadEvent: (bead: string) => `mm.events.bead.${beadToken(bead)}`,
 	/** Everything an account's service accounts may publish to (for the auth callout). */

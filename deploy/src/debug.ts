@@ -1,5 +1,5 @@
 /**
- * `bun deploy/dokploy.ts debug state|item <id>|events [--follow] [--since n]|errors [--json]`:
+ * `bun deploy/dokploy.ts debug state|item <id>|events [--follow] [--since n]|errors|doctor <account>/<runner> [--deep] [--json]`:
  * the operator's read-only view of a running Mastermind (GET <url>/api/debug/*,
  * Bearer operator key).
  * The key is never printed.
@@ -9,16 +9,25 @@ export type DebugArgs =
 	| { what: "state"; json: boolean }
 	| { what: "errors"; json: boolean }
 	| { what: "item"; id: string; json: boolean }
-	| { what: "events"; follow: boolean; since: number; json: boolean };
+	| { what: "events"; follow: boolean; since: number; json: boolean }
+	| {
+			what: "doctor";
+			account: string;
+			runner: string;
+			deep: boolean;
+			json: boolean;
+	  };
 
 export function parseDebugArgs(argv: string[]): DebugArgs | null {
 	const json = argv.includes("--json");
 	const follow = argv.includes("--follow") || argv.includes("-f");
+	const deep = argv.includes("--deep");
 	let since = 0;
 	const rest: string[] = [];
 	for (let i = 0; i < argv.length; i++) {
 		const a = argv[i] as string;
-		if (a === "--json" || a === "--follow" || a === "-f") continue;
+		if (a === "--json" || a === "--follow" || a === "-f" || a === "--deep")
+			continue;
 		if (a === "--since") {
 			since = Number(argv[++i]);
 			if (!Number.isInteger(since) || since < 0) return null;
@@ -29,6 +38,11 @@ export function parseDebugArgs(argv: string[]): DebugArgs | null {
 	if ((what === "state" || what === "errors") && !id) return { what, json };
 	if (what === "item" && id) return { what, id, json };
 	if (what === "events" && !id) return { what, follow, since, json };
+	if (what === "doctor" && id) {
+		const [account, runner, extra] = id.split("/");
+		if (!account || !runner || extra !== undefined) return null;
+		return { what, account, runner, deep, json };
+	}
 	return null;
 }
 
@@ -39,6 +53,8 @@ export function debugPath(args: DebugArgs): string {
 			return `items/${encodeURIComponent(args.id)}`;
 		case "events":
 			return `events?since=${args.since}${args.follow ? "&follow=1" : ""}`;
+		case "doctor":
+			return `runners/${encodeURIComponent(args.account)}/${encodeURIComponent(args.runner)}/doctor${args.deep ? "?deep=1" : ""}`;
 		default:
 			return "state";
 	}
@@ -113,17 +129,19 @@ export function formatErrors(s: Any): string {
 }
 
 export const DEBUG_USAGE =
-	"usage: bun deploy/dokploy.ts debug state | item <id> | events [--follow] [--since <seq>] | errors   [--json]  (MASTERMIND_URL + MASTERMIND_OPERATOR_KEY from env, else the app env in Dokploy)";
+	"usage: bun deploy/dokploy.ts debug state | item <id> | events [--follow] [--since <seq>] | errors | doctor <account>/<runner> [--deep]   [--json]  (MASTERMIND_URL + MASTERMIND_OPERATOR_KEY from env, else the app env in Dokploy)";
 
 export async function fetchDebug(
 	url: string,
 	key: string,
 	path: string,
 	fetcher: typeof fetch = fetch,
+	opts: { method?: "GET" | "POST"; timeoutMs?: number } = {},
 ): Promise<unknown> {
 	const res = await fetcher(`${url.replace(/\/$/, "")}/api/debug/${path}`, {
+		method: opts.method ?? "GET",
 		headers: { authorization: `Bearer ${key}` },
-		signal: AbortSignal.timeout(20_000),
+		signal: AbortSignal.timeout(opts.timeoutMs ?? 20_000),
 	});
 	const body = (await res.json().catch(() => ({}))) as { error?: string };
 	if (!res.ok) throw new Error(debugError(res.status, body.error ?? ""));
@@ -232,6 +250,16 @@ export function formatState(s: Any): string {
 			]),
 		),
 	);
+	if (!isErr(s.runners))
+		for (const r of s.runners as Any[])
+			if (r.diagnostics?.lastDoctor)
+				out.push(
+					...doctorSummary(
+						`${r.account}/${r.runner}`,
+						r.diagnostics.lastDoctor,
+						now,
+					),
+				);
 	section("routing", s.routing, (v) => {
 		const doc = v.doc ?? {};
 		const lines = [
@@ -286,6 +314,45 @@ export function formatState(s: Any): string {
 		return lines.map((l) => `  ${l.at}  ${l.line}`).join("\n");
 	});
 	return out.join("\n");
+}
+
+const MARK: Record<string, string> = {
+	pass: "PASS",
+	warn: "WARN",
+	fail: "FAIL",
+	skip: "SKIP",
+};
+
+/** A runner doctor report (mastermind-runner doctor.ts), as text. */
+export function formatDoctor(r: Any): string {
+	const out = [
+		`runner ${r.runner} doctor at ${r.at}${r.deep ? " (deep)" : ""}: ${r.ok ? "no failure" : "FAIL"}`,
+	];
+	for (const st of (r.steps ?? []) as Any[]) {
+		out.push(
+			`${MARK[st.status] ?? st.status} ${st.id}. ${st.name} (${st.ms} ms)`,
+		);
+		for (const l of (st.detail ?? []) as string[]) out.push(`     ${l}`);
+		if (st.fix && (st.status === "warn" || st.status === "fail"))
+			out.push(`     fix: ${st.fix}`);
+	}
+	return out.join("\n");
+}
+
+/** One line per step, and the problems with their fix: for `debug state`. */
+function doctorSummary(who: string, r: Any, now: Date): string[] {
+	const steps = (r.steps ?? []) as Any[];
+	const out = [
+		`  doctor ${who} ${ago(r.at, now)}${r.deep ? " (deep)" : ""}: ${steps
+			.map((st) => `${st.id} ${MARK[st.status] ?? st.status}`)
+			.join(", ")}`,
+	];
+	for (const st of steps)
+		if (st.status === "warn" || st.status === "fail")
+			out.push(
+				`    ${st.id}. ${st.problem ?? (st.detail ?? []).at(-1) ?? ""}${st.fix ? `  fix: ${st.fix}` : ""}`,
+			);
+	return out;
 }
 
 /** One item and why it is or is not dispatched, as text for a human. */

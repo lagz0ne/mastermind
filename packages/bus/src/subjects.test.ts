@@ -110,5 +110,9 @@ describe("subjects", () => {
 			subjects.runnerStatus("a", "b").split(".").length,
 		);
 		expect(() => subjects.runnerStatus("a.b", "x")).toThrow();
+		expect(subjects.runnerDoctor("alice", "laptop.local")).toBe(
+			"mm.u.alice.r.laptop_local.doctor",
+		);
+		expect(subjects.runnerDoctorScope("alice")).toBe("mm.u.alice.r.*.doctor");
 	});
 });

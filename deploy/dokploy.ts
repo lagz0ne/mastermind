@@ -10,7 +10,7 @@
 //                                    Dokploy queue and status, fail with the log tail, wait for health
 //   bun deploy/dokploy.ts login-approve <code> --account <name>
 //                                    approve a login code shown on <public url>/login (the operator)
-//   bun deploy/dokploy.ts debug state|item <id>|events [--follow] [--since <seq>]|errors [--json]
+//   bun deploy/dokploy.ts debug state|item <id>|events [--follow] [--since <seq>]|errors|doctor <account>/<runner> [--deep] [--json]
 //                                    the operator's read-only snapshot of production (runners,
 //                                    routing, items, NATS, last errors). MASTERMIND_URL and
 //                                    MASTERMIND_OPERATOR_KEY from env, else the app env in Dokploy
@@ -37,6 +37,7 @@ import {
 	debugPath,
 	fetchDebug,
 	followDebug,
+	formatDoctor,
 	formatErrors,
 	formatEvent,
 	formatEvents,
@@ -647,7 +648,15 @@ async function debug(argv: string[]) {
 		);
 		return;
 	}
-	const body = await fetchDebug(url, key, debugPath(args));
+	const body = await fetchDebug(
+		url,
+		key,
+		debugPath(args),
+		fetch,
+		args.what === "doctor"
+			? { method: "POST", timeoutMs: args.deep ? 200_000 : 60_000 }
+			: {},
+	);
 	if (args.json) {
 		console.log(JSON.stringify(body, null, 2));
 		return;
@@ -657,6 +666,7 @@ async function debug(argv: string[]) {
 		item: formatItem,
 		events: formatEvents,
 		errors: formatErrors,
+		doctor: formatDoctor,
 	}[args.what];
 	console.log(format(body));
 }
@@ -753,7 +763,7 @@ const commands: Record<string, () => Promise<void>> = {
 const command = commands[process.argv[2] ?? ""];
 if (!command) {
 	console.error(
-		"usage: bun deploy/dokploy.ts status | apply | secrets | release <sha|latest> | login-approve <code> --account <name> | debug state|item <id>|events [--follow]|errors [--json] | retire [--stop] | jetstream <list|backup|restore|usage|marker> ...",
+		"usage: bun deploy/dokploy.ts status | apply | secrets | release <sha|latest> | login-approve <code> --account <name> | debug state|item <id>|events [--follow]|errors|doctor <account>/<runner> [--deep] [--json] | retire [--stop] | jetstream <list|backup|restore|usage|marker> ...",
 	);
 	process.exit(2);
 }

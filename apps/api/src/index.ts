@@ -8,6 +8,7 @@ import { backupsFromEnv, jetstreamHealth } from "./backup/start.ts";
 import { beadsRoutes } from "./beads/routes.ts";
 import { boardRoutes } from "./board/routes.ts";
 import { ConnectionWatch } from "./debug/connections.ts";
+import { remoteDoctor } from "./debug/doctor.ts";
 import { captureConsoleErrors, LogRing } from "./debug/log-ring.ts";
 import { debugRoutes } from "./debug/routes.ts";
 import type { DispatchNats } from "./dispatch/start.ts";
@@ -170,6 +171,8 @@ const debug = debugRoutes({
 		runners,
 		errors: errorLines,
 	},
+	// POST /api/debug/runners/:account/:runner/doctor, on auth's APP connection.
+	doctor: appNats ? remoteDoctor(() => appNats) : null,
 	onError: (error) => console.error(`debug: ${error}`),
 });
 

@@ -3,6 +3,7 @@ import {
 	debugPath,
 	fetchDebug,
 	followDebug,
+	formatDoctor,
 	formatEvent,
 	formatItem,
 	formatState,
@@ -182,5 +183,79 @@ describe("debug events cli", () => {
 				lastSeenAt: "t",
 			}),
 		).toContain("OFFLINE");
+	});
+});
+
+describe("debug doctor cli", () => {
+	test("parses <account>/<runner> and --deep; POSTs to the runner's doctor route", async () => {
+		const a = parseDebugArgs(["doctor", "lagz0ne/yo-buid", "--deep"]);
+		expect(a).toEqual({
+			what: "doctor",
+			account: "lagz0ne",
+			runner: "yo-buid",
+			deep: true,
+			json: false,
+		});
+		expect(debugPath(a as never)).toBe("runners/lagz0ne/yo-buid/doctor?deep=1");
+		expect(parseDebugArgs(["doctor", "lagz0ne"])).toBeNull();
+		expect(parseDebugArgs(["doctor"])).toBeNull();
+		let method = "";
+		const fake = (async (_url: string, init: RequestInit) => {
+			method = init.method ?? "";
+			return Response.json({ ok: true });
+		}) as unknown as typeof fetch;
+		await fetchDebug("https://m", "k", "runners/a/b/doctor", fake, {
+			method: "POST",
+		});
+		expect(method).toBe("POST");
+	});
+
+	test("formats a report and shows lastDoctor in debug state", () => {
+		const report = {
+			runner: "yo-buid",
+			at: "2026-11-11T09:59:00Z",
+			deep: true,
+			ok: false,
+			steps: [
+				{ id: "a", name: "config", status: "pass", ms: 80, detail: ["ok"] },
+				{
+					id: "e",
+					name: "agent",
+					status: "fail",
+					ms: 4000,
+					detail: ["paseo run exited 1: OUTPUT_SCHEMA_FAILED"],
+					fix: "mastermind-runner start --mode auto --save",
+				},
+			],
+		};
+		const text = formatDoctor(report);
+		expect(text).toContain("FAIL e. agent (4000 ms)");
+		expect(text).toContain("fix: mastermind-runner start --mode auto --save");
+		const state = formatState({
+			version: "abc",
+			now: "2026-11-11T10:00:00Z",
+			startedAt: "2026-11-11T09:00:00Z",
+			uptimeSeconds: 3600,
+			nats: [],
+			accounts: [],
+			serviceAccounts: [],
+			runners: [
+				{
+					account: "lagz0ne",
+					runner: "yo-buid",
+					online: true,
+					queues: [],
+					running: [],
+					diagnostics: { lastDoctor: report },
+				},
+			],
+			routing: { error: "x" },
+			environments: { error: "x" },
+			items: { error: "x" },
+			errors: [],
+		});
+		expect(state).toContain("doctor lagz0ne/yo-buid");
+		expect(state).toContain("a PASS, e FAIL");
+		expect(state).toContain("OUTPUT_SCHEMA_FAILED  fix: mastermind-runner");
 	});
 });

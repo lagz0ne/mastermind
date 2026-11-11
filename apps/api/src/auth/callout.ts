@@ -15,8 +15,9 @@ import type { ServiceAccountView } from "./service.ts";
  * APP, SYS). The server sends every client CONNECT to $SYS.REQ.USER.AUTH;
  * Mastermind answers with a user JWT signed by the issuer key, or an error.
  *
- *   service account   APP, pub mm.u.<account>.>, sub _INBOX.<account>.> and
- *                     the ready signals of its queues
+ *   service account   APP, pub mm.u.<account>.>, sub _INBOX.<account>.>,
+ *                     the ready signals of its queues and the doctor
+ *                     requests of its account's runners
  *   mastermind app    APP, no limits (KV buckets, dispatcher)
  *   mastermind sys    SYS (connz + kick, to disconnect revoked clients)
  */
@@ -52,7 +53,13 @@ export function serviceAccountGrant(
 		account: "APP",
 		permissions: {
 			pub: { allow: [subjects.accountScope(sa.account)] },
-			sub: { allow: [`_INBOX.${sa.account}.>`, ...ready] },
+			sub: {
+				allow: [
+					`_INBOX.${sa.account}.>`,
+					...ready,
+					subjects.runnerDoctorScope(sa.account),
+				],
+			},
 		},
 	};
 }

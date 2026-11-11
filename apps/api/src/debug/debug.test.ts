@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { BusError } from "@mastermind/bus";
 import type { Bead } from "@mastermind/core";
 import { decide } from "./item.ts";
 import { LogRing, redact } from "./log-ring.ts";
@@ -185,6 +186,64 @@ describe("debug routes", () => {
 		});
 		expect((await get(routes, "Bearer k")).status).toBe(200);
 		expect((await get(routes, "Bearer k")).status).toBe(429);
+	});
+});
+
+describe("debug doctor", () => {
+	const post = (
+		routes: ReturnType<typeof debugRoutes>,
+		path: string,
+		params: Record<string, string>,
+	) =>
+		routes["/api/debug/runners/:account/:runner/doctor"].POST(
+			Object.assign(
+				new Request(`http://x${path}`, {
+					method: "POST",
+					headers: { authorization: "Bearer k" },
+				}),
+				{ params },
+			),
+		);
+	const params = { account: "alice", runner: "laptop" };
+
+	test("asks the runner and returns its report; deep=1 asks for step e", async () => {
+		const asked: unknown[] = [];
+		const lines: string[] = [];
+		const routes = debugRoutes({
+			operatorKey: "k",
+			sources,
+			audit: (l) => lines.push(l),
+			doctor: async (account, runner, deep) => {
+				asked.push([account, runner, deep]);
+				return { runner, ok: true, steps: [] };
+			},
+		});
+		const res = await post(
+			routes,
+			"/api/debug/runners/alice/laptop/doctor?deep=1",
+			params,
+		);
+		expect(res.status).toBe(200);
+		expect(await res.json()).toEqual({ runner: "laptop", ok: true, steps: [] });
+		expect(asked).toEqual([["alice", "laptop", true]]);
+		expect(lines[0]).toContain("debug: doctor alice/laptop");
+	});
+
+	test("a runner that does not answer: 404 or 504 with the reason; no NATS: 503", async () => {
+		const answer = (code: "unavailable" | "timeout") =>
+			debugRoutes({
+				operatorKey: "k",
+				sources,
+				audit: () => {},
+				doctor: async () => {
+					throw new BusError(code, "x");
+				},
+			});
+		const path = "/api/debug/runners/alice/laptop/doctor";
+		expect((await post(answer("unavailable"), path, params)).status).toBe(404);
+		expect((await post(answer("timeout"), path, params)).status).toBe(504);
+		const off = debugRoutes({ operatorKey: "k", sources, audit: () => {} });
+		expect((await post(off, path, params)).status).toBe(503);
 	});
 });
 
