@@ -138,7 +138,14 @@ const server = Bun.serve({
 	routes: traced(
 		telemetry,
 		{
-			"/api/health": () => health(deps, version),
+			"/api/health": async () => {
+				const res = await health(deps, version);
+				// The container healthcheck asks every 15 s; alert on ok=false (docs/deploy.md).
+				telemetry.count("mastermind.health.checks", 1, {
+					ok: String(res.ok),
+				});
+				return res;
+			},
 			...board.routes,
 			...people,
 			...routingApi,

@@ -85,6 +85,10 @@ export async function startAuth(cfg: AuthConfig): Promise<AuthService> {
 			// Bounds each dial, also every reconnect. The default (20 s) let one
 			// dial that hung while NATS restarted delay recovery by 20 s.
 			timeout: DIAL_TIMEOUT_MS,
+			onStatus: (status) => {
+				if (status.type === "disconnect" || status.type === "reconnect")
+					log(`nats: ${name} ${status.type}`);
+			},
 			...login,
 		});
 		names.set(nc, name);
