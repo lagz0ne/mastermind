@@ -67,6 +67,17 @@ describe("statsOf", () => {
 			slots: 4,
 		});
 	});
+
+	test("slots are unlimited when one runner is", () => {
+		const g = groupByAccount(
+			[account("admin")],
+			[
+				runner("admin", "a1", { capacity: 3 }),
+				runner("admin", "a2", { capacity: "unlimited", running: ["mm-1"] }),
+			],
+		);
+		expect(statsOf(g)).toMatchObject({ busy: 1, slots: null });
+	});
 });
 
 describe("ago", () => {

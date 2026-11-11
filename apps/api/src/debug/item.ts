@@ -85,7 +85,12 @@ export function decide(
 			online: r.online,
 			member: open ? null : q ? q.members.includes(r.account) : false,
 			missing,
-			free: r.capacity == null ? null : r.running.length < r.capacity,
+			free:
+				r.capacity === "unlimited"
+					? true
+					: r.capacity == null
+						? null
+						: r.running.length < r.capacity,
 		};
 	});
 	if (queue && column === "ready") {

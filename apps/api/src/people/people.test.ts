@@ -74,6 +74,24 @@ describe("registry", () => {
 		expect(changes).toBe(1);
 	});
 
+	test("a runner with capacity null is unlimited; one that does not say is null", () => {
+		const r = new RunnerRegistry({ now: clock().now });
+		r.observe({
+			kind: "next",
+			queue: "build",
+			runner: info("laptop", "sa1", { capacity: null }).runner,
+		});
+		r.observe({
+			kind: "next",
+			queue: "build",
+			runner: info("old", "sa2").runner,
+		});
+		expect(r.list().map((e) => [e.runner, e.capacity])).toEqual([
+			["laptop", "unlimited"],
+			["old", null],
+		]);
+	});
+
 	test("holds and done track the running beads; online expires; forget drops", () => {
 		const c = clock();
 		const r = new RunnerRegistry({ now: c.now, onlineMs: 90_000 });

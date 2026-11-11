@@ -32,8 +32,8 @@ export type RunnerView = {
 	queues: string[];
 	capabilities: string[];
 	providers: string[];
-	/** Agents at once; null when the runner does not say. */
-	capacity: number | null;
+	/** Agents at once; "unlimited"; null when the runner does not say. */
+	capacity: number | "unlimited" | null;
 	/** Ids of the beads its agents hold now. */
 	running: string[];
 	version: string | null;

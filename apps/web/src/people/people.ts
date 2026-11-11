@@ -127,7 +127,8 @@ export type PeopleStats = {
 	online: number;
 	runners: number;
 	busy: number;
-	slots: number;
+	/** null: a runner has unlimited capacity. */
+	slots: number | null;
 };
 
 export function statsOf(groups: AccountGroup[]): PeopleStats {
@@ -137,7 +138,12 @@ export function statsOf(groups: AccountGroup[]): PeopleStats {
 		runners: rows.length,
 		online: rows.filter((r) => r.online).length,
 		busy: rows.reduce((n, r) => n + r.running.length, 0),
-		slots: rows.reduce((n, r) => n + (r.capacity ?? 0), 0),
+		slots: rows.some((r) => r.capacity === "unlimited")
+			? null
+			: rows.reduce(
+					(n, r) => n + (typeof r.capacity === "number" ? r.capacity : 0),
+					0,
+				),
 	};
 }
 

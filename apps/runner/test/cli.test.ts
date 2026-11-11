@@ -9,12 +9,20 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applyFlags, EXIT, main, runnerInfo, VERSION } from "../src/cli.ts";
+import {
+	applyFlags,
+	capacityText,
+	EXIT,
+	main,
+	runnerInfo,
+	VERSION,
+} from "../src/cli.ts";
 import {
 	configPath,
 	defaultSettings,
 	loadConfig,
 	modeOf,
+	parseConfig,
 } from "../src/config.ts";
 import { parseRouting } from "../src/routing.ts";
 
@@ -110,7 +118,37 @@ test("applyFlags", () => {
 		agent: { provider: "claude", mode: "bypassPermissions" },
 		assistant: { provider: "claude/claude-haiku-5-5" },
 	});
-	expect(() => applyFlags(defaultSettings("x"), { capacity: "0" })).toThrow();
+	expect(() => applyFlags(defaultSettings("x"), { capacity: "-1" })).toThrow();
+	expect(() =>
+		applyFlags(defaultSettings("x"), { capacity: "lots" }),
+	).toThrow();
+});
+
+test("--capacity unlimited (or 0) is null", () => {
+	for (const v of ["unlimited", "0"])
+		expect(applyFlags(defaultSettings("x"), { capacity: v }).capacity).toBe(
+			null,
+		);
+	expect(capacityText(null)).toBe("unlimited");
+	expect(capacityText(2)).toBe("2");
+});
+
+test("runner.json keeps capacity null (unlimited) and a number; refuses 0", () => {
+	const file = (capacity: unknown) => ({
+		version: 1,
+		mastermindUrl: "https://mm.example",
+		natsUrl: "wss://nats.example",
+		account: "alice",
+		credential: "c",
+		inboxPrefix: "_INBOX.alice",
+		enrolledAt: "2026-11-11T00:00:00.000Z",
+		serviceAccount: { id: "sa1", name: "laptop" },
+		state: "active",
+		runner: { id: "laptop", capacity },
+	});
+	expect(parseConfig(file(null)).runner.capacity).toBe(null);
+	expect(parseConfig(file(4)).runner.capacity).toBe(4);
+	expect(() => parseConfig(file(0))).toThrow();
 });
 
 describe("enroll, status, check", () => {

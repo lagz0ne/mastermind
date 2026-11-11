@@ -124,8 +124,8 @@ export type RunnerInfo = {
 	providers: string[];
 	/** Capabilities it offers; matched against `DispatchEnv.requires`. */
 	capabilities: string[];
-	/** How many agents it runs at once (shown on /people). */
-	capacity?: number;
+	/** How many agents it runs at once (shown on /people); null: unlimited. */
+	capacity?: number | null;
 	/** Every queue it takes work from (shown on /people). */
 	queues?: string[];
 	/** Runner software version. */
@@ -191,7 +191,8 @@ export type RunnerDiagnostics = {
 	natsServer: string | null;
 	reconnects: number;
 	queues: string[];
-	capacity: number;
+	/** Most agents at once; null: unlimited. */
+	capacity: number | null;
 	running: number;
 	inFlight: RunnerInFlight[];
 	lastNextAt: string | null;

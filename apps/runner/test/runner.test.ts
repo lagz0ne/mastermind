@@ -103,6 +103,15 @@ describe("Runner", () => {
 		expect(agents.maxActive).toBe(2);
 	});
 
+	test("unlimited capacity (null) runs every dispatch at once", async () => {
+		const mm = new FakeMastermind();
+		const agents = new FakeLauncher();
+		for (const id of ["a", "b", "c", "d", "e"]) mm.push(dispatch(id));
+		make(mm, agents, { capacity: null });
+		await until(() => agents.specs.length === 5);
+		expect(agents.maxActive).toBe(5);
+	});
+
 	test("capacity is shared by all queues", async () => {
 		const mm = new FakeMastermind();
 		const agents = new FakeLauncher();

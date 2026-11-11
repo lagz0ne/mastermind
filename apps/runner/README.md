@@ -31,12 +31,13 @@ the targets in `RUNNER_TARGETS` (build arg, default `all`; ~45 MiB gzipped each)
 # 1. In Mastermind, the account mints an enrol token (POST /api/auth/tokens {kind: "enrol", name}).
 # 2. Spend it once; settings given here are saved with the credential (mode 0600).
 bun src/cli.ts enroll <mme_token> --url <mastermind url> --queue <q> --workdir <dir> \
-  [--provider claude] [--mode bypassPermissions] [--capacity 1] [--capability git]...
+  [--provider claude] [--mode bypassPermissions] [--capacity 1|unlimited] [--capability git]...
 # 3. Run.
 bun src/cli.ts start          # flags here override the saved settings; --save keeps them
 bun src/cli.ts check          # are the declared capabilities and the routing right?
 bun src/cli.ts route --env web --queue q   # dry run: which target, and why
 bun src/cli.ts status         # config without the secret
+# --capacity unlimited (or 0): no limit on agents at once; runner.json stores "capacity": null.
 ```
 
 Config: `$MASTERMIND_RUNNER_CONFIG`, else `$XDG_CONFIG_HOME/mastermind/runner.json`,

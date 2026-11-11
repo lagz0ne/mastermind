@@ -12,7 +12,7 @@
  *   mastermind-runner doctor [settings]
  *   mastermind-runner --version
  *
- * Settings: --queue <q> (repeat), --capacity <n>, --capability <c> (repeat),
+ * Settings: --queue <q> (repeat), --capacity <n|unlimited>, --capability <c> (repeat),
  * --providers a,b, --workdir <dir>, --repo <url>=<dir> (repeat), --id <id>,
  * --provider <p>, --model <m>, --mode <m>, --assistant-provider <p>,
  * --allow-setup, --paseo-host <host>, --routing <file>.
@@ -122,7 +122,7 @@ const USAGE = `usage:
   mastermind-runner doctor [settings]
   mastermind-runner --version
 
-settings: --queue <q>... --capacity <n> --capability <c>... --providers a,b
+settings: --queue <q>... --capacity <n|unlimited> --capability <c>... --providers a,b
   --workdir <dir> --repo <url>=<dir>... --id <id> --provider <p> --model <m>
   --mode <m> --assistant-provider <p> --allow-setup --paseo-host <host>
   --routing <file> (default: routing.json next to the config)
@@ -142,12 +142,7 @@ export function applyFlags(
 	};
 	if (f.id) s.id = f.id;
 	if (f.queue?.length) s.queues = f.queue;
-	if (f.capacity !== undefined) {
-		const n = Number(f.capacity);
-		if (!Number.isInteger(n) || n < 1)
-			throw new UsageError("--capacity must be a positive integer");
-		s.capacity = n;
-	}
+	if (f.capacity !== undefined) s.capacity = parseCapacity(f.capacity);
 	if (f.capability?.length) s.capabilities = f.capability;
 	if (f.providers)
 		s.providers = f.providers
@@ -169,6 +164,19 @@ export function applyFlags(
 	if (s.workdir && !isAbsolute(s.workdir))
 		throw new UsageError("workdir must be absolute");
 	return s;
+}
+
+/** `--capacity`: a positive integer, or "unlimited" (0 is the same): null. */
+export function parseCapacity(v: string): number | null {
+	if (v === "unlimited" || v === "0") return null;
+	const n = Number(v);
+	if (!Number.isInteger(n) || n < 1)
+		throw new UsageError("--capacity must be a positive integer or unlimited");
+	return n;
+}
+
+export function capacityText(capacity: number | null): string {
+	return capacity === null ? "unlimited" : String(capacity);
 }
 
 export function runnerInfo(
@@ -385,7 +393,7 @@ async function cmdStatus(path: string, f: Flags, io: Io): Promise<number> {
 		`status at ${d.at}${stale ? " (STALE: is the runner running?)" : ""}: ${d.state}, nats ${d.natsServer ?? "-"}, reconnects ${d.reconnects}, version ${d.version}`,
 	);
 	io.out(
-		`queues ${d.queues.join(",") || "-"}, running ${d.running}/${d.capacity}, last next ${d.lastNextResult ?? "-"} at ${d.lastNextAt ?? "-"}`,
+		`queues ${d.queues.join(",") || "-"}, running ${d.running}/${capacityText(d.capacity)}, last next ${d.lastNextResult ?? "-"} at ${d.lastNextAt ?? "-"}`,
 	);
 	if (d.lastDecision) io.out(`last decision: ${d.lastDecision}`);
 	for (const x of d.inFlight)
@@ -515,7 +523,7 @@ async function cmdCheck(path: string, f: Flags, io: Io): Promise<number> {
 		`routing ${source}: ${Object.keys(routing.targets).length} targets, ${routing.rules.length} rules, environments ${Object.keys(routing.environments).join(",") || "-"}`,
 	);
 	io.out(
-		`runner ${cfg.account}/${s.id}: queues ${s.queues.join(",") || "-"}, capacity ${s.capacity}, nats ${cfg.natsUrl}`,
+		`runner ${cfg.account}/${s.id}: queues ${s.queues.join(",") || "-"}, capacity ${capacityText(s.capacity)}, nats ${cfg.natsUrl}`,
 	);
 	return bad ? EXIT.error : EXIT.ok;
 }
@@ -621,7 +629,7 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 		diag.loop = runner;
 		runner.start();
 		log(
-			`runner ${cfg.account}/${settings.id} up: queues ${settings.queues.join(",")}, capacity ${settings.capacity}, routing ${source}`,
+			`runner ${cfg.account}/${settings.id} up: queues ${settings.queues.join(",")}, capacity ${capacityText(settings.capacity)}, routing ${source}`,
 		);
 		const closed = nc.closed();
 		const stopped = new Promise<"stop">((r) =>

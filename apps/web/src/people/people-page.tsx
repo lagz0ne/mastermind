@@ -215,6 +215,15 @@ function AddRunnerPanel({ onDone }: { onDone: () => void }) {
 }
 
 function Capacity({ r }: { r: RunnerView }) {
+	if (r.capacity === "unlimited") {
+		return (
+			<span className="text-[11px] text-muted-foreground">
+				{r.running.length
+					? `${r.running.length} / unlimited`
+					: "idle · unlimited"}
+			</span>
+		);
+	}
 	if (r.capacity === null) {
 		return r.running.length ? (
 			<span className="text-xs">{r.running.length} busy</span>
@@ -461,7 +470,7 @@ export function PeoplePage() {
 						<b className="mr-1 font-semibold text-foreground text-sm">
 							{stats.busy}
 						</b>
-						of {stats.slots} slots busy
+						of {stats.slots === null ? "unlimited" : stats.slots} slots busy
 					</span>
 				</div>
 				<span className="flex-1" />

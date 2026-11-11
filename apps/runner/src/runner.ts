@@ -1,6 +1,6 @@
 /**
  * The runner loop. One poller per queue asks `next` while a slot is free
- * (capacity slots in total, never more agents than that). Each dispatch:
+ * (capacity slots in total, never more agents than that; null: no limit). Each dispatch:
  *
  *   route (routing.ts) -> declined: release with the reason
  *   check env, setup, check commands -> fail: release with the reason
@@ -59,8 +59,9 @@ export type RunnerOptions = {
 class Slots {
 	#free: number;
 	readonly #waiters: (() => void)[] = [];
-	constructor(n: number) {
-		this.#free = n;
+	/** null: unlimited. */
+	constructor(n: number | null) {
+		this.#free = n ?? Number.POSITIVE_INFINITY;
 	}
 	get free() {
 		return this.#free;

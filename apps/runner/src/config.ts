@@ -25,8 +25,8 @@ export type RunnerSettings = {
 	id: string;
 	/** Queues to take work from. */
 	queues: string[];
-	/** How many agents may run at the same time. */
-	capacity: number;
+	/** How many agents may run at the same time; null: unlimited. */
+	capacity: number | null;
 	/** Capabilities this machine offers (matched against `req:` labels). */
 	capabilities: string[];
 	/** Agent providers the runner can start. */
@@ -123,8 +123,11 @@ export function parseConfig(v: unknown): RunnerConfig {
 	if (!isStrings(settings.capabilities))
 		fail("runner.capabilities must be strings");
 	if (!isStrings(settings.providers)) fail("runner.providers must be strings");
-	if (!Number.isInteger(settings.capacity) || settings.capacity < 1)
-		fail("runner.capacity must be a positive integer");
+	if (
+		settings.capacity !== null &&
+		(!Number.isInteger(settings.capacity) || settings.capacity < 1)
+	)
+		fail("runner.capacity must be a positive integer or null (unlimited)");
 	if (!isObj(settings.repos)) fail("runner.repos must be an object");
 	return { ...(v as unknown as RunnerConfig), runner: settings };
 }

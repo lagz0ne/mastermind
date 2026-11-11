@@ -25,7 +25,8 @@ export type RunnerEntry = {
 	queues: string[];
 	capabilities: string[];
 	providers: string[];
-	capacity: number | null;
+	/** "unlimited" when the runner says null; null when it does not say. */
+	capacity: number | "unlimited" | null;
 	version: string | null;
 	running: string[];
 	lastSeenAt: string;
@@ -153,7 +154,8 @@ export class RunnerRegistry {
 				queues: [...new Set([...stated, ...e.queues])].sort(),
 				capabilities: e.info?.capabilities ?? [],
 				providers: e.info?.providers ?? [],
-				capacity: e.info?.capacity ?? null,
+				capacity:
+					e.info?.capacity === null ? "unlimited" : (e.info?.capacity ?? null),
 				version: e.info?.version ?? null,
 				running: [...e.running].sort(),
 				lastSeenAt: new Date(e.lastSeen).toISOString(),

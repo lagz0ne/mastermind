@@ -57,7 +57,7 @@ describe("debug cli", () => {
 					lastSeenAt: "2026-11-11T09:58:00Z",
 					version: "v1",
 					queues: ["main"],
-					capacity: 1,
+					capacity: "unlimited",
 					running: [],
 					serviceAccount: "s1",
 				},
@@ -82,6 +82,7 @@ describe("debug cli", () => {
 		expect(text).toContain("duke/laptop");
 		expect(text).toContain("NO");
 		expect(text).toContain("2m ago");
+		expect(text).toContain("unlimited");
 		expect(text).toContain("ERROR: timed out after 5000ms");
 		expect(text).toContain("unrouted (open, no queue): mm-1");
 		expect(text).toContain("main   duke");
