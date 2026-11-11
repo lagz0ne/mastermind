@@ -1,4 +1,4 @@
-import { formatCode } from "./code.ts";
+import { formatCode, normalizeCode } from "./code.ts";
 import { clientIp, RateLimit } from "./rate-limit.ts";
 import { sameSecret, sha256 } from "./secrets.ts";
 import {
@@ -184,9 +184,18 @@ export function authRoutes(
 		"/api/auth/login/approve": { POST: approve },
 		"/api/auth/login/poll": {
 			GET: handle(async (req, auth) => {
-				const r = await auth.pollLogin(cookieOf(req, LOGIN_COOKIE));
-				if (r.status === "pending")
-					return json(r, 200, { "cache-control": "no-store" });
+				const cookie = cookieOf(req, LOGIN_COOKIE);
+				const r = await auth.pollLogin(cookie);
+				// Pending: the cookie is valid, so its code part is the code. The
+				// page shows it again after a reload instead of starting a new one.
+				if (r.status === "pending") {
+					const code = normalizeCode(cookie?.split(".", 1)[0] ?? "");
+					return json(
+						{ ...r, ...(code ? { code: formatCode(code) } : {}) },
+						200,
+						{ "cache-control": "no-store" },
+					);
+				}
 				const headers = new Headers({
 					"set-cookie": loginCookie("", secure, 0),
 					"cache-control": "no-store",

@@ -8,7 +8,7 @@ export type CodeStart =
 	| { kind: "error"; message: string };
 
 export type CodePoll =
-	| { kind: "pending" }
+	| { kind: "pending"; code?: string; expiresAt?: string }
 	| { kind: "expired" }
 	| { kind: "ok"; account: string }
 	| { kind: "error"; message: string };
@@ -53,11 +53,29 @@ export async function pollCode(
 			};
 		if (b.status === "approved" && typeof b.account === "string")
 			return { kind: "ok", account: b.account };
-		if (b.status === "pending") return { kind: "pending" };
+		if (b.status === "pending")
+			return typeof b.code === "string" && typeof b.expiresAt === "string"
+				? { kind: "pending", code: b.code, expiresAt: b.expiresAt }
+				: { kind: "pending" };
 		return { kind: "expired" };
 	} catch (error) {
 		return { kind: "error", message: String(error) };
 	}
+}
+
+/**
+ * On page load: resume the pending login of this browser (a reload, or a tab
+ * the browser put to sleep, keeps its code), else start a new code. A resume
+ * may find the code already approved: then the poll has logged in.
+ */
+export async function resumeOrStart(
+	fetcher: typeof fetch = fetch,
+): Promise<CodeStart | { kind: "ok"; account: string }> {
+	const r = await pollCode(fetcher);
+	if (r.kind === "ok") return r;
+	if (r.kind === "pending" && r.code && r.expiresAt)
+		return { kind: "code", code: r.code, expiresAt: r.expiresAt };
+	return startCode(fetcher);
 }
 
 /** Seconds left until `expiresAt`, never below 0. */

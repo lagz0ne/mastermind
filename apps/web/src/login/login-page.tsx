@@ -1,11 +1,12 @@
 import type { PeopleSetup } from "@mastermind/core";
-import { Link, useNavigate } from "@tanstack/react-router";
+import { Link } from "@tanstack/react-router";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { loadSetup, setMe } from "../session/session.ts";
+import { loadSetup } from "../session/session.ts";
 import {
 	type CodeStart,
 	clock,
 	pollCode,
+	resumeOrStart,
 	secondsLeft,
 	startCode,
 } from "./login.ts";
@@ -20,18 +21,16 @@ type Phase =
 const POLL_MS = 1500;
 
 export function LoginPage() {
-	const navigate = useNavigate();
 	const [phase, setPhase] = useState<Phase>({ kind: "starting" });
 	const [setup, setSetup] = useState<PeopleSetup | null>(null);
 	const started = useRef(false);
 
-	const done = useCallback(
-		(account: string) => {
-			setMe({ account, auth: "on" });
-			void navigate({ to: "/board" });
-		},
-		[navigate],
-	);
+	// A full navigation: the board loads the new session from the server,
+	// so no stale "anon" state sends the user back here.
+	const done = useCallback((account: string) => {
+		setPhase({ kind: "ok", account });
+		window.location.assign("/board");
+	}, []);
 
 	const newCode = useCallback(async () => {
 		setPhase({ kind: "starting" });
@@ -42,31 +41,50 @@ export function LoginPage() {
 		// Strict mode runs effects twice; one code per page load.
 		if (started.current) return;
 		started.current = true;
-		void loadSetup().then((s) => {
+		void loadSetup().then(async (s) => {
 			setSetup(s);
 			if (s?.auth === "off" || s?.auth === "unconfigured")
-				setPhase({ kind: "skip" });
-			else void newCode();
+				return setPhase({ kind: "skip" });
+			// A reload keeps the pending code of this browser.
+			const r = await resumeOrStart();
+			if (r.kind === "ok") done(r.account);
+			else setPhase(r);
 		});
-	}, [newCode]);
+	}, [done]);
 
-	// Poll while a code is shown.
+	// Poll while a code is shown: on an interval, and at once when the tab
+	// comes back (a sleeping or background tab throttles its timers).
+	const showing = phase.kind === "code";
 	useEffect(() => {
-		if (phase.kind !== "code") return;
+		if (!showing) return;
 		let stop = false;
-		const timer = setInterval(async () => {
-			const r = await pollCode();
+		let busy = false;
+		const check = async () => {
+			// One poll at a time: an approved poll uses up the pending login.
+			if (stop || busy) return;
+			busy = true;
+			const r = await pollCode().finally(() => {
+				busy = false;
+			});
 			if (stop) return;
 			if (r.kind === "ok") {
-				setPhase(r);
+				stop = true;
 				done(r.account);
 			} else if (r.kind === "expired") setPhase({ kind: "expired" });
-		}, POLL_MS);
+		};
+		const onVisible = () => {
+			if (document.visibilityState === "visible") void check();
+		};
+		const timer = setInterval(check, POLL_MS);
+		document.addEventListener("visibilitychange", onVisible);
+		window.addEventListener("focus", check);
 		return () => {
 			stop = true;
 			clearInterval(timer);
+			document.removeEventListener("visibilitychange", onVisible);
+			window.removeEventListener("focus", check);
 		};
-	}, [phase, done]);
+	}, [showing, done]);
 
 	return (
 		<div className="mx-auto max-w-sm px-4 py-10">
@@ -153,7 +171,7 @@ function ShowCode({
 				{code}
 			</p>
 			<p className="text-muted-foreground" role="status">
-				Waiting for approval. This page logs you in by itself.{" "}
+				Keep this page open. It logs in by itself when the code is approved.{" "}
 				{left > 0 ? `The code expires in ${clock(left)}.` : "The code expired."}
 			</p>
 			<NewCode onClick={onNewCode} />

@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { clock, pollCode, secondsLeft, startCode } from "./login.ts";
+import {
+	clock,
+	pollCode,
+	resumeOrStart,
+	secondsLeft,
+	startCode,
+} from "./login.ts";
 
 const reply = (status: number, body: unknown) =>
 	(async () => Response.json(body, { status })) as unknown as typeof fetch;
@@ -35,6 +41,64 @@ describe("login by code", () => {
 			kind: "error",
 			message: "auth is starting",
 		});
+	});
+
+	test("poll gives the pending code back", async () => {
+		expect(
+			await pollCode(
+				reply(200, {
+					status: "pending",
+					code: "ABCD-EFGH",
+					expiresAt: "2026-11-10T10:10:00Z",
+				}),
+			),
+		).toEqual({
+			kind: "pending",
+			code: "ABCD-EFGH",
+			expiresAt: "2026-11-10T10:10:00Z",
+		});
+	});
+
+	test("resume after a reload: same code, no new start", async () => {
+		const calls: string[] = [];
+		const fetcher = (async (url: string) => {
+			calls.push(url);
+			return url.endsWith("/poll")
+				? Response.json({
+						status: "pending",
+						code: "ABCD-EFGH",
+						expiresAt: "2026-11-10T10:10:00Z",
+					})
+				: Response.json({ code: "WXYZ-2345", expiresAt: "x" }, { status: 201 });
+		}) as unknown as typeof fetch;
+		expect(await resumeOrStart(fetcher)).toEqual({
+			kind: "code",
+			code: "ABCD-EFGH",
+			expiresAt: "2026-11-10T10:10:00Z",
+		});
+		expect(calls).toEqual(["/api/auth/login/poll"]);
+	});
+
+	test("resume: approved while away logs in; none pending starts a code", async () => {
+		expect(
+			await resumeOrStart(reply(200, { status: "approved", account: "duke" })),
+		).toEqual({ kind: "ok", account: "duke" });
+		const calls: string[] = [];
+		const fetcher = (async (url: string) => {
+			calls.push(url);
+			return url.endsWith("/poll")
+				? Response.json({ status: "expired" })
+				: Response.json(
+						{ code: "WXYZ-2345", expiresAt: "2026-11-10T10:10:00Z" },
+						{ status: 201 },
+					);
+		}) as unknown as typeof fetch;
+		expect(await resumeOrStart(fetcher)).toEqual({
+			kind: "code",
+			code: "WXYZ-2345",
+			expiresAt: "2026-11-10T10:10:00Z",
+		});
+		expect(calls).toEqual(["/api/auth/login/poll", "/api/auth/login/start"]);
 	});
 
 	test("countdown", () => {

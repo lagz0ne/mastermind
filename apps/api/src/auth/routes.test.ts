@@ -179,8 +179,11 @@ describe("login by code (routes)", () => {
 		expect(set).toContain("HttpOnly");
 		expect(set).toContain("Secure");
 		const pending = cookieOf(start, LOGIN_COOKIE);
+		// A reload resumes the pending login: the poll gives the same code.
 		expect(await (await poll(routes, pending)).json()).toMatchObject({
 			status: "pending",
+			code,
+			expiresAt: expect.any(String),
 		});
 
 		const approve = await routes["/api/auth/login/approve"].POST(
