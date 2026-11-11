@@ -6,6 +6,7 @@
  */
 import { clientIp, RateLimit } from "../auth/rate-limit.ts";
 import { sameSecret, sha256 } from "../auth/secrets.ts";
+import { type EventSources, eventsPage, eventsStream } from "./events.ts";
 import { decide, type ItemSources } from "./item.ts";
 import { type DebugSources, debugState } from "./state.ts";
 
@@ -14,6 +15,8 @@ export type DebugRoutesOptions = {
 	sources: DebugSources;
 	/** The work store, for GET /api/debug/items/:id; null without one. */
 	items?: ItemSources | null;
+	/** Work events, runner changes, error lines, for GET /api/debug/events. */
+	events?: EventSources;
 	audit?: (line: string) => void;
 	onError?: (error: unknown) => void;
 	/** Requests per minute per address. Default 60. */
@@ -62,6 +65,18 @@ export function debugRoutes(opts: DebugRoutesOptions) {
 					headers: { "cache-control": "no-store" },
 				}),
 			),
+		},
+		"/api/debug/events": {
+			GET: operator("events", async (req) => {
+				const q = new URL(req.url).searchParams;
+				const since = Math.max(0, Number(q.get("since") ?? 0) || 0);
+				const src = opts.events ?? {};
+				if (q.get("follow") === "1")
+					return eventsStream(src, since, req.signal);
+				return Response.json(await eventsPage(src, since), {
+					headers: { "cache-control": "no-store" },
+				});
+			}),
 		},
 		"/api/debug/items/:id": {
 			GET: operator("item", async (req) => {

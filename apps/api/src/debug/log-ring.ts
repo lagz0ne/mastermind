@@ -22,17 +22,32 @@ export type LogLine = { at: string; line: string };
 
 export class LogRing {
 	readonly #lines: LogLine[] = [];
+	readonly #listeners = new Set<(line: LogLine) => void>();
 	constructor(
 		readonly size = 100,
 		private readonly now: () => Date = () => new Date(),
 	) {}
 
 	push(line: string): void {
-		this.#lines.push({
+		const entry = {
 			at: this.now().toISOString(),
 			line: redact(line).slice(0, 2_000),
-		});
+		};
+		this.#lines.push(entry);
 		if (this.#lines.length > this.size) this.#lines.shift();
+		for (const l of this.#listeners) {
+			try {
+				l(entry);
+			} catch {
+				// A listener must not break logging.
+			}
+		}
+	}
+
+	/** Every new line, redacted. */
+	subscribe(listener: (line: LogLine) => void): () => void {
+		this.#listeners.add(listener);
+		return () => this.#listeners.delete(listener);
 	}
 
 	/** Oldest first. */

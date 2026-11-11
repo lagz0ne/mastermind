@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import {
 	debugPath,
 	fetchDebug,
+	followDebug,
+	formatEvent,
 	formatItem,
 	formatState,
 	parseDebugArgs,
@@ -121,5 +123,62 @@ describe("debug item cli", () => {
 		expect(text).toContain("NOT OFFERED because:");
 		expect(text).toContain("stays unrouted");
 		expect(text).toContain("#4  t  create  duke  -> open");
+	});
+});
+
+describe("debug events cli", () => {
+	test("parses events and errors", () => {
+		expect(parseDebugArgs(["events", "--follow", "--since", "7"])).toEqual({
+			what: "events",
+			follow: true,
+			since: 7,
+			json: false,
+		});
+		expect(parseDebugArgs(["errors"])).toEqual({ what: "errors", json: false });
+		expect(parseDebugArgs(["events", "--since", "x"])).toBeNull();
+		expect(
+			debugPath({ what: "events", follow: true, since: 3, json: false }),
+		).toBe("events?since=3&follow=1");
+		expect(debugPath({ what: "errors", json: false })).toBe("state");
+	});
+
+	test("follows an SSE answer split across chunks", async () => {
+		const body = new ReadableStream<Uint8Array>({
+			start(c) {
+				const e = new TextEncoder();
+				c.enqueue(e.encode(': keep-alive\n\nevent: work\ndata: {"seq":1,'));
+				c.enqueue(
+					e.encode(
+						'"op":"create","item":"mm-1"}\n\nevent: error\ndata: {"line":"x"}\n\n',
+					),
+				);
+				c.close();
+			},
+		});
+		const fake = (async () =>
+			new Response(body, {
+				headers: { "content-type": "text/event-stream" },
+			})) as unknown as typeof fetch;
+		const got: [string, unknown][] = [];
+		await followDebug(
+			"https://m",
+			"k",
+			"events?follow=1",
+			(ev, d) => got.push([ev, d]),
+			fake,
+		);
+		expect(got).toEqual([
+			["work", { seq: 1, op: "create", item: "mm-1" }],
+			["error", { line: "x" }],
+		]);
+		expect(
+			formatEvent("runner", {
+				runner: "a/b",
+				online: false,
+				queues: ["build"],
+				running: [],
+				lastSeenAt: "t",
+			}),
+		).toContain("OFFLINE");
 	});
 });

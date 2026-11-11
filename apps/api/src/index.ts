@@ -164,6 +164,12 @@ const debug = debugRoutes({
 		errors: () => errorLines.lines(),
 	},
 	items: natsWork ? natsWork.beads : null,
+	events: {
+		journalSince: natsWork ? (seq) => natsWork.board.journalSince(seq) : null,
+		hub: () => board.hub,
+		runners,
+		errors: errorLines,
+	},
 	onError: (error) => console.error(`debug: ${error}`),
 });
 

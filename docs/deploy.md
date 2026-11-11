@@ -345,6 +345,9 @@ per minute. Each call writes one audit line (`debug: state from <ip> -> <status>
 bun deploy/dokploy.ts debug state          # tables for a human
 bun deploy/dokploy.ts debug state --json   # the raw snapshot
 bun deploy/dokploy.ts debug item <id>      # one item: routing decision, runners, why it is not offered, timeline
+bun deploy/dokploy.ts debug events --follow   # live: work events, runner changes, error lines
+bun deploy/dokploy.ts debug events --since 40 # one page: work events after seq 40, runners, errors
+bun deploy/dokploy.ts debug errors         # the last 100 error lines of the process
 # Without Dokploy (another site, local dev):
 MASTERMIND_URL=http://localhost:3000 MASTERMIND_OPERATOR_KEY=... bun deploy/dokploy.ts debug state
 ```
@@ -368,6 +371,13 @@ The CLI reads the key from the app env through the Dokploy API and never prints 
 runners on that queue (online, member, missing capabilities, free slot), and `blockers`. The
 `blockers` list gives each reason why no runner gets the item now. An empty list means that an idle
 runner on the queue gets the item.
+
+`debug events` (`GET /api/debug/events?since=<seq>`, add `&follow=1` for Server-Sent Events) has
+three event kinds. `work` is one journal event (seq, op, item, actor, status, holder, queue).
+`runner` comes when a runner changes: online or offline, queues, running items, version, or the
+state and reconnect count from its diagnostics. A poll (`lastSeenAt` only) does not make a `runner`
+event. `error` is one new error line. With `--follow`, the stream first sends the work backlog
+after `--since`, then live events. A keep-alive comment goes every 8 s.
 
 The snapshot reads each section on its own with a 5 s timeout. A failed section shows
 `{ "error": "..." }`, and the rest of the snapshot is still there.

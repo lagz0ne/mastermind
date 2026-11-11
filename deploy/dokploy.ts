@@ -10,7 +10,7 @@
 //                                    Dokploy queue and status, fail with the log tail, wait for health
 //   bun deploy/dokploy.ts login-approve <code> --account <name>
 //                                    approve a login code shown on <public url>/login (the operator)
-//   bun deploy/dokploy.ts debug state|item <id> [--json]
+//   bun deploy/dokploy.ts debug state|item <id>|events [--follow] [--since <seq>]|errors [--json]
 //                                    the operator's read-only snapshot of production (runners,
 //                                    routing, items, NATS, last errors). MASTERMIND_URL and
 //                                    MASTERMIND_OPERATOR_KEY from env, else the app env in Dokploy
@@ -36,6 +36,10 @@ import {
 	DEBUG_USAGE,
 	debugPath,
 	fetchDebug,
+	followDebug,
+	formatErrors,
+	formatEvent,
+	formatEvents,
 	formatItem,
 	formatState,
 	parseDebugArgs,
@@ -635,9 +639,26 @@ async function debug(argv: string[]) {
 			);
 		url = cfg.publicUrl;
 	}
+	if (args.what === "events" && args.follow) {
+		await followDebug(url, key, debugPath(args), (event, data) =>
+			console.log(
+				args.json ? JSON.stringify({ event, data }) : formatEvent(event, data),
+			),
+		);
+		return;
+	}
 	const body = await fetchDebug(url, key, debugPath(args));
-	const text = args.what === "item" ? formatItem(body) : formatState(body);
-	console.log(args.json ? JSON.stringify(body, null, 2) : text);
+	if (args.json) {
+		console.log(JSON.stringify(body, null, 2));
+		return;
+	}
+	const format = {
+		state: formatState,
+		item: formatItem,
+		events: formatEvents,
+		errors: formatErrors,
+	}[args.what];
+	console.log(format(body));
 }
 
 /** App env keys of the stores Mastermind no longer uses; apply removes them. */
@@ -732,7 +753,7 @@ const commands: Record<string, () => Promise<void>> = {
 const command = commands[process.argv[2] ?? ""];
 if (!command) {
 	console.error(
-		"usage: bun deploy/dokploy.ts status | apply | secrets | release <sha|latest> | login-approve <code> --account <name> | debug state|item <id> [--json] | retire [--stop] | jetstream <list|backup|restore|usage|marker> ...",
+		"usage: bun deploy/dokploy.ts status | apply | secrets | release <sha|latest> | login-approve <code> --account <name> | debug state|item <id>|events [--follow]|errors [--json] | retire [--stop] | jetstream <list|backup|restore|usage|marker> ...",
 	);
 	process.exit(2);
 }

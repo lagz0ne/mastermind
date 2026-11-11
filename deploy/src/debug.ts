@@ -1,31 +1,119 @@
 /**
- * `bun deploy/dokploy.ts debug state [--json]`: the operator's read-only view
- * of a running Mastermind (GET <url>/api/debug/state, Bearer operator key).
+ * `bun deploy/dokploy.ts debug state|item <id>|events [--follow] [--since n]|errors [--json]`:
+ * the operator's read-only view of a running Mastermind (GET <url>/api/debug/*,
+ * Bearer operator key).
  * The key is never printed.
  */
 
 export type DebugArgs =
 	| { what: "state"; json: boolean }
-	| { what: "item"; id: string; json: boolean };
+	| { what: "errors"; json: boolean }
+	| { what: "item"; id: string; json: boolean }
+	| { what: "events"; follow: boolean; since: number; json: boolean };
 
 export function parseDebugArgs(argv: string[]): DebugArgs | null {
 	const json = argv.includes("--json");
-	const rest = argv.filter((a) => a !== "--json");
-	if (rest.length === 1 && rest[0] === "state") return { what: "state", json };
-	if (rest.length === 2 && rest[0] === "item" && rest[1])
-		return { what: "item", id: rest[1], json };
+	const follow = argv.includes("--follow") || argv.includes("-f");
+	let since = 0;
+	const rest: string[] = [];
+	for (let i = 0; i < argv.length; i++) {
+		const a = argv[i] as string;
+		if (a === "--json" || a === "--follow" || a === "-f") continue;
+		if (a === "--since") {
+			since = Number(argv[++i]);
+			if (!Number.isInteger(since) || since < 0) return null;
+		} else rest.push(a);
+	}
+	const [what, id, ...more] = rest;
+	if (more.length) return null;
+	if ((what === "state" || what === "errors") && !id) return { what, json };
+	if (what === "item" && id) return { what, id, json };
+	if (what === "events" && !id) return { what, follow, since, json };
 	return null;
 }
 
 /** The path under /api/debug/ for `args`. */
 export function debugPath(args: DebugArgs): string {
-	return args.what === "item"
-		? `items/${encodeURIComponent(args.id)}`
-		: "state";
+	switch (args.what) {
+		case "item":
+			return `items/${encodeURIComponent(args.id)}`;
+		case "events":
+			return `events?since=${args.since}${args.follow ? "&follow=1" : ""}`;
+		default:
+			return "state";
+	}
+}
+
+/** Read an SSE answer; call `onEvent` per event until the stream ends. */
+export async function followDebug(
+	url: string,
+	key: string,
+	path: string,
+	onEvent: (event: string, data: unknown) => void,
+	fetcher: typeof fetch = fetch,
+): Promise<void> {
+	const res = await fetcher(`${url.replace(/\/$/, "")}/api/debug/${path}`, {
+		headers: { authorization: `Bearer ${key}`, accept: "text/event-stream" },
+	});
+	if (!res.ok || !res.body) {
+		const body = (await res.json().catch(() => ({}))) as { error?: string };
+		throw new Error(debugError(res.status, body.error ?? ""));
+	}
+	const decoder = new TextDecoder();
+	let buf = "";
+	for await (const chunk of res.body) {
+		buf += decoder.decode(chunk, { stream: true });
+		let i = buf.indexOf("\n\n");
+		while (i >= 0) {
+			const block = buf.slice(0, i);
+			buf = buf.slice(i + 2);
+			let event = "message";
+			let data = "";
+			for (const line of block.split("\n")) {
+				if (line.startsWith("event: ")) event = line.slice(7);
+				else if (line.startsWith("data: ")) data += line.slice(6);
+			}
+			if (data) onEvent(event, JSON.parse(data));
+			i = buf.indexOf("\n\n");
+		}
+	}
+}
+
+/** One event of `debug events` as one line for a human. */
+export function formatEvent(event: string, d: Any): string {
+	switch (event) {
+		case "work":
+			return `work    #${d.seq} ${d.at}  ${d.op} ${d.item}  by ${d.actor}  -> ${d.status ?? "-"}${d.assignee ? ` (${d.assignee})` : ""}  queue ${d.queue ?? "-"}${d.comment ? `  "${d.comment}"` : ""}`;
+		case "runner":
+			return d.gone
+				? `runner  ${d.runner}  gone`
+				: `runner  ${d.runner}  ${d.online ? "ONLINE" : "OFFLINE"}  queues ${list(d.queues)}  running ${list(d.running)}  state ${d.state ?? "-"}  reconnects ${d.reconnects ?? "-"}  seen ${d.lastSeenAt}${d.lastError ? `  last error: ${d.lastError}` : ""}`;
+		case "error":
+			return `error   ${d.at}  ${d.line}`;
+		default:
+			return `${event}  ${JSON.stringify(d)}`;
+	}
+}
+
+/** The events page (no --follow) as text. */
+export function formatEvents(p: Any): string {
+	return [
+		...((p.work ?? []) as Any[]).map((w) => formatEvent("work", w)),
+		...((p.runners ?? []) as Any[]).map((r) => formatEvent("runner", r)),
+		...((p.errors ?? []) as Any[]).map((e) => formatEvent("error", e)),
+		`(next: --since ${p.next})`,
+	].join("\n");
+}
+
+/** Every error line of the state snapshot. */
+export function formatErrors(s: Any): string {
+	const lines = (s.errors ?? []) as Any[];
+	if (!lines.length) return "(no error lines)";
+	return lines.map((l) => `${l.at}  ${l.line}`).join("\n");
 }
 
 export const DEBUG_USAGE =
-	"usage: bun deploy/dokploy.ts debug state|item <id> [--json]  (MASTERMIND_URL + MASTERMIND_OPERATOR_KEY from env, else the app env in Dokploy)";
+	"usage: bun deploy/dokploy.ts debug state | item <id> | events [--follow] [--since <seq>] | errors   [--json]  (MASTERMIND_URL + MASTERMIND_OPERATOR_KEY from env, else the app env in Dokploy)";
 
 export async function fetchDebug(
 	url: string,
