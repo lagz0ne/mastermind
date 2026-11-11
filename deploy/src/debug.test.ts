@@ -61,6 +61,12 @@ describe("debug cli", () => {
 					capacity: "unlimited",
 					running: [],
 					serviceAccount: "s1",
+					diagnostics: {
+						secrets: {
+							needed: ["GITHUB_TOKEN", "X"],
+							missing: ["GITHUB_TOKEN"],
+						},
+					},
 				},
 			],
 			routing: {
@@ -84,6 +90,8 @@ describe("debug cli", () => {
 		expect(text).toContain("NO");
 		expect(text).toContain("2m ago");
 		expect(text).toContain("unlimited");
+		expect(text).toContain("missing secrets");
+		expect(text).toContain("GITHUB_TOKEN");
 		expect(text).toContain("ERROR: timed out after 5000ms");
 		expect(text).toContain("unrouted (open, no queue): mm-1");
 		expect(text).toContain("main   duke");

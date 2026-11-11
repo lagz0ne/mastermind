@@ -62,6 +62,33 @@ mastermind-runner doctor --deep          # all steps, starts one short agent
 mastermind-runner doctor --deep --mode auto   # try a setting before you --save it with start
 ```
 
+## Secrets: what is needed, present, missing
+
+Secret values stay on the runner machine. Mastermind knows only the NAMES: each
+environment lists the secrets it needs (plus the provider login). The runner reads the
+names from `GET /api/runner/environments` (with its credential) at start and every 5 min,
+and keeps the last answer in `needs.json` for offline use. Needed = the secrets of every
+environment this runner can get: all of them, or only the bound ones when `routing.json`
+binds environments.
+
+```bash
+mastermind-runner secrets                  # NAME | NEEDED BY | PRESENT (never a value)
+mastermind-runner secrets set GITHUB_TOKEN # type the value at a hidden prompt
+printf %s "$TOKEN" | mastermind-runner secrets set GITHUB_TOKEN   # or pipe it
+mastermind-runner secrets unset GITHUB_TOKEN
+mastermind-runner secrets check            # exit 1 when a needed secret is missing
+```
+
+- The store is one file, `secrets` next to the config (`~/.config/mastermind/secrets`, or
+  `MASTERMIND_RUNNER_SECRETS`), mode 0600, written atomically. The runner refuses a store
+  that other users can read. A value is never taken from the command line.
+- Where a value comes from: a source in `routing.json` (`environments.<name>.env`) wins,
+  then the store, then the env var of the same name.
+- A dispatch that needs a missing secret is declined at once:
+  `missing secrets: A, B (on the runner: mastermind-runner secrets set A; ...)`.
+- `doctor` step f fails for each missing secret, with the fix line. `status` and the
+  operator debug view (`runners[].diagnostics.secrets`) show the needed and missing names.
+
 ## Routing: which Paseo runs a dispatch
 
 The user who runs the runner decides where work runs. Put `routing.json` next to the

@@ -236,6 +236,7 @@ export function formatState(s: Any): string {
 				"queues",
 				"cap",
 				"running",
+				"missing secrets",
 				"service account",
 			],
 			(v as Any[]).map((r) => [
@@ -246,6 +247,12 @@ export function formatState(s: Any): string {
 				list(r.queues),
 				r.capacity == null ? "-" : String(r.capacity),
 				list(r.running),
+				// Names only (mm-210.51); "-": the runner does not report secrets.
+				r.diagnostics?.secrets
+					? r.diagnostics.secrets.missing?.length
+						? list(r.diagnostics.secrets.missing)
+						: "none"
+					: "-",
 				r.serviceAccount ?? "-",
 			]),
 		),
