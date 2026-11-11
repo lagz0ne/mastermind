@@ -62,6 +62,12 @@ mastermind-runner doctor --deep          # all steps, starts one short agent
 mastermind-runner doctor --deep --mode auto   # try a setting before you --save it with start
 ```
 
+The running runner also answers the operator's remote doctor (`bun deploy/dokploy.ts debug doctor
+<account>/<runner> [--deep]`, see docs/deploy.md). Steps a-d run on request. Step e starts an agent and
+costs tokens, so remotely it runs only when you start the runner with `--allow-remote-probe`
+(`--save` keeps it). The last report, local or remote, goes to Mastermind as `lastDoctor` in the
+runner diagnostics.
+
 ## Secrets: what is needed, present, missing
 
 Secret values stay on the runner machine. Mastermind knows only the NAMES: each

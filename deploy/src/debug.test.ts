@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+	debugError,
 	debugPath,
 	fetchDebug,
 	followDebug,
@@ -216,6 +217,9 @@ describe("debug doctor cli", () => {
 			method: "POST",
 		});
 		expect(method).toBe("POST");
+		expect(debugError(404, "runner a/b does not answer")).toBe(
+			"HTTP 404: runner a/b does not answer",
+		);
 	});
 
 	test("formats a report and shows lastDoctor in debug state", () => {

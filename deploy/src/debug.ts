@@ -153,6 +153,7 @@ export function debugError(status: number, error: string): string {
 		case 401:
 			return "the app refused the operator key (MASTERMIND_OPERATOR_KEY).";
 		case 404:
+			if (error.startsWith("runner ")) return `HTTP 404: ${error}`;
 			return `HTTP 404: ${error || "not found"}. Is the operator key in the app env, and does the app run a commit with /api/debug?`;
 		case 429:
 			return "too many requests; wait a minute.";
