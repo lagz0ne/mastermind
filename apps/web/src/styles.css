@@ -44,13 +44,27 @@
 	--color-ring: var(--ring);
 }
 
+/* Swiss label: column heads and section labels (small caps, tracked). */
+@utility label-caps {
+	font-size: var(--type-xs);
+	line-height: var(--type-xs-leading);
+	font-weight: 600;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	color: var(--muted-foreground);
+}
+
 @layer base {
 	* {
 		@apply border-border outline-ring/50;
 	}
 	html,
 	body {
-		@apply bg-background text-foreground font-sans text-sm antialiased;
+		@apply bg-background text-foreground font-sans antialiased;
+	}
+	/* Body text 13px. Not on html: rem (spacing, control heights) stays 16px. */
+	body {
+		@apply text-sm;
 	}
 	/* Counts, times and ids line up in columns. */
 	time,
