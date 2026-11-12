@@ -165,6 +165,8 @@ describe("joinRunners", () => {
 		account,
 		name: `n-${id}`,
 		createdAt: "2026-11-10T07:00:00.000Z",
+		lastSeenAt: "2026-11-10T07:00:00.000Z",
+		state: "active" as const,
 	});
 
 	test("shows enrolled service accounts that never connected, hides revoked runners", () => {

@@ -17,6 +17,7 @@ type Phase =
 	| { kind: "starting" }
 	| CodeStart
 	| { kind: "expired" }
+	| { kind: "denied" }
 	| { kind: "ok"; account: string }
 	| { kind: "skip" };
 
@@ -92,6 +93,9 @@ export function LoginPage() {
 			if (r.kind === "ok") {
 				stop = true;
 				done(r.account);
+			} else if (r.kind === "denied") {
+				stop = true;
+				setPhase(r);
 			} else if (r.kind === "expired") {
 				const after = await usedOrExpired();
 				if (stop) return;
@@ -164,6 +168,16 @@ function CodePanel({
 			return (
 				<div className="mt-2 text-sm" role="status">
 					<p>This code expired or was used. Get a new one.</p>
+					<NewCode onClick={onNewCode} />
+				</div>
+			);
+		case "denied":
+			return (
+				<div className="mt-2 text-sm" role="alert">
+					<p>
+						This login was denied. The approver did not know this code. Ask them
+						again, then get a new code.
+					</p>
 					<NewCode onClick={onNewCode} />
 				</div>
 			);

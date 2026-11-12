@@ -9,6 +9,7 @@ import {
 	type AccountGroup,
 	ago,
 	approveLogin,
+	denyLogin,
 	enrolToken,
 	groupByAccount,
 	type LoginApproval,
@@ -53,7 +54,7 @@ function Secret({ label, value }: { label: string; value: string }) {
 				</Button>
 			</div>
 			<span className="text-muted-foreground text-xs">
-				Shown once. It works once and expires in 24 h.
+				Shown once. It works once and expires in 1 h.
 			</span>
 		</div>
 	);
@@ -62,6 +63,7 @@ function Secret({ label, value }: { label: string; value: string }) {
 /**
  * Approve a login: the person opens /login and reads out the code. My own
  * account name logs in another device of mine; a new name makes that account.
+ * Deny a code I do not know: that browser shows "denied".
  */
 function ApproveLoginPanel({
 	me,
@@ -73,6 +75,7 @@ function ApproveLoginPanel({
 	const [code, setCode] = useState("");
 	const [account, setAccount] = useState("");
 	const [result, setResult] = useState<LoginApproval | null>(null);
+	const [denied, setDenied] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [busy, setBusy] = useState(false);
 	const submit = (e: FormEvent) => {
@@ -91,6 +94,21 @@ function ApproveLoginPanel({
 			.catch((err) => setError(errorText(err)))
 			.finally(() => setBusy(false));
 	};
+	const deny = () => {
+		if (!code.trim()) return setError("the code is required");
+		setBusy(true);
+		setError(null);
+		denyLogin(code)
+			.then(() => setDenied(true))
+			.catch((err) => setError(errorText(err)))
+			.finally(() => setBusy(false));
+	};
+	if (denied)
+		return (
+			<span className="text-sm" role="status">
+				Denied. That browser shows "denied" and its code no longer works.
+			</span>
+		);
 	if (result)
 		return (
 			<div className="flex flex-col gap-1 text-sm" role="status">
@@ -138,6 +156,16 @@ function ApproveLoginPanel({
 				/>
 				<Button size="sm" type="submit" disabled={busy}>
 					Approve
+				</Button>
+				<Button
+					size="sm"
+					type="button"
+					variant="outline"
+					disabled={busy}
+					onClick={deny}
+					title="You do not know this code: end that login"
+				>
+					Deny
 				</Button>
 				{error && <span className="text-signal text-xs">{error}</span>}
 			</div>
@@ -312,19 +340,18 @@ function RunnerRow({
 						old version
 					</span>
 				)}
-				{!off &&
-					ready.lines.map((l) => (
-						<span
-							key={l.text}
-							data-doop-id="runner-why"
-							className={cn(
-								"basis-full pl-3.5 font-normal text-[11px] leading-[15px]",
-								l.bad ? "text-signal" : "text-muted-foreground",
-							)}
-						>
-							{l.text}
-						</span>
-					))}
+				{ready.lines.map((l) => (
+					<span
+						key={l.text}
+						data-doop-id="runner-why"
+						className={cn(
+							"basis-full pl-3.5 font-normal text-[11px] leading-[15px]",
+							l.bad ? "text-signal" : "text-muted-foreground",
+						)}
+					>
+						{l.text}
+					</span>
+				))}
 			</span>
 			<span
 				data-doop-id="runner-readiness"

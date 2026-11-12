@@ -16,6 +16,7 @@ import type {
 	PeopleSetup,
 	RunnersReply,
 	RunnerView,
+	ServiceAccountRef,
 } from "@mastermind/core";
 import type { Server } from "bun";
 import type { Auth, ServiceAccountView } from "../auth/service.ts";
@@ -43,6 +44,14 @@ export type PeopleOptions = {
 const fail = (status: number, error: string) =>
 	Response.json({ error }, { status });
 
+const ref = (sa: ServiceAccountView): ServiceAccountRef => ({
+	id: sa.id,
+	name: sa.name,
+	createdAt: sa.createdAt,
+	lastSeenAt: sa.lastSeenAt,
+	state: sa.state,
+});
+
 /** Registry joined with service accounts. Without `sas` (auth off): registry only. */
 export function joinRunners(
 	entries: RunnerEntry[],
@@ -58,9 +67,7 @@ export function joinRunners(
 		if (sa) used.add(sa.id);
 		rows.push({
 			account: e.account,
-			serviceAccount: sa
-				? { id: sa.id, name: sa.name, createdAt: sa.createdAt }
-				: null,
+			serviceAccount: sa ? ref(sa) : null,
 			runner: e.runner,
 			online: e.online,
 			lastSeenAt: e.lastSeenAt,
@@ -77,7 +84,7 @@ export function joinRunners(
 		if (used.has(sa.id)) continue;
 		rows.push({
 			account: sa.account,
-			serviceAccount: { id: sa.id, name: sa.name, createdAt: sa.createdAt },
+			serviceAccount: ref(sa),
 			runner: null,
 			online: false,
 			lastSeenAt: null,

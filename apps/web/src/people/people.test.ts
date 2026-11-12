@@ -126,6 +126,40 @@ test("outdated: a connected runner on another commit than the server", () => {
 	expect(outdated(runner("a", "r", { version: "old" }), undefined)).toBe(false);
 });
 
+describe("readinessOf: service account lifecycle (mm-210.66)", () => {
+	const sa = (state: "active" | "stale" | "disabled") => ({
+		id: "sa-r",
+		name: "r",
+		createdAt: "",
+		state,
+	});
+	test("disabled: the credential is refused, with the fix", () => {
+		const d = readinessOf(
+			runner("a", null, { serviceAccount: sa("disabled") }),
+		);
+		expect(d).toMatchObject({ state: "disabled", bad: true });
+		expect(d.lines[0]?.text).toContain("add the runner again");
+	});
+	test("stale while offline; an online runner is judged by readiness", () => {
+		expect(
+			readinessOf(
+				runner("a", "r", { online: false, serviceAccount: sa("stale") }),
+			).state,
+		).toBe("stale");
+		expect(
+			readinessOf(runner("a", null, { serviceAccount: sa("stale") })).state,
+		).toBe("stale");
+		expect(
+			readinessOf(
+				runner("a", "r", { online: true, serviceAccount: sa("stale") }),
+			).state,
+		).toBe("not ready");
+		expect(
+			readinessOf(runner("a", null, { serviceAccount: sa("active") })).state,
+		).toBe("enrolled");
+	});
+});
+
 describe("readinessOf (mm-210.59)", () => {
 	test("enrolled, offline, no readiness reported", () => {
 		expect(readinessOf(runner("a", null)).state).toBe("enrolled");

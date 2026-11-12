@@ -9,7 +9,8 @@
 //                                    pin the app image to the CI tag of <sha>, deploy it, show the
 //                                    Dokploy queue and status, fail with the log tail, wait for health
 //   bun deploy/dokploy.ts login-approve <code> --account <name>
-//                                    approve a login code shown on <public url>/login (the operator)
+//   bun deploy/dokploy.ts login-approve <code> --deny
+//                                    approve or deny a login code shown on <public url>/login (the operator)
 //   bun deploy/dokploy.ts debug state|item <id>|events [--follow] [--since <seq>]|errors|doctor <account>/<runner> [--deep] [--json]
 //                                    the operator's read-only snapshot of production (runners,
 //                                    routing, items, NATS, last errors). MASTERMIND_URL and
@@ -49,7 +50,9 @@ import { mergeEnv, parseEnv, serializeEnv } from "./src/env.ts";
 import {
 	type Approval,
 	approveError,
+	DENIED,
 	describeApproval,
+	LOGIN_APPROVE_USAGE,
 	parseApproveArgs,
 } from "./src/login-approve.ts";
 import {
@@ -590,10 +593,8 @@ async function secrets() {
  */
 async function loginApprove(argv: string[]) {
 	const args = parseApproveArgs(argv);
-	if (!args)
-		throw new Error(
-			"usage: bun deploy/dokploy.ts login-approve <code> --account <name>",
-		);
+	if (!args) throw new Error(LOGIN_APPROVE_USAGE);
+	const deny = "deny" in args;
 	const { applicationId } = await findProject();
 	if (!applicationId) throw new Error(`no app '${cfg.app}' in Dokploy`);
 	const app = await api<App>("application.one", { applicationId });
@@ -602,20 +603,23 @@ async function loginApprove(argv: string[]) {
 		throw new Error(
 			"MASTERMIND_OPERATOR_KEY is not in the app env: run 'bun deploy/dokploy.ts apply' first",
 		);
-	const res = await fetch(`${cfg.publicUrl}/api/auth/login/approve`, {
-		method: "POST",
-		headers: {
-			authorization: `Bearer ${operatorKey}`,
-			"content-type": "application/json",
+	const res = await fetch(
+		`${cfg.publicUrl}/api/auth/login/${deny ? "deny" : "approve"}`,
+		{
+			method: "POST",
+			headers: {
+				authorization: `Bearer ${operatorKey}`,
+				"content-type": "application/json",
+			},
+			body: JSON.stringify(deny ? { code: args.code } : args),
+			signal: AbortSignal.timeout(15_000),
 		},
-		body: JSON.stringify(args),
-		signal: AbortSignal.timeout(15_000),
-	});
+	);
 	const body = (await res.json().catch(() => ({}))) as Partial<Approval> & {
 		error?: string;
 	};
 	if (!res.ok) throw new Error(approveError(res.status, body.error ?? ""));
-	log(describeApproval(body as Approval));
+	log(deny ? DENIED : describeApproval(body as Approval));
 }
 
 /**
@@ -763,7 +767,7 @@ const commands: Record<string, () => Promise<void>> = {
 const command = commands[process.argv[2] ?? ""];
 if (!command) {
 	console.error(
-		"usage: bun deploy/dokploy.ts status | apply | secrets | release <sha|latest> | login-approve <code> --account <name> | debug state|item <id>|events [--follow]|errors|doctor <account>/<runner> [--deep] [--json] | retire [--stop] | jetstream <list|backup|restore|usage|marker> ...",
+		"usage: bun deploy/dokploy.ts status | apply | secrets | release <sha|latest> | login-approve <code> --account <name>|--deny | debug state|item <id>|events [--follow]|errors|doctor <account>/<runner> [--deep] [--json] | retire [--stop] | jetstream <list|backup|restore|usage|marker> ...",
 	);
 	process.exit(2);
 }

@@ -31,6 +31,17 @@ describe("parseApproveArgs", () => {
 			);
 	});
 
+	test("--deny takes a code and no account", () => {
+		expect(parseApproveArgs(["abcd", "efgh", "--deny"])).toEqual({
+			code: "abcdefgh",
+			deny: true,
+		});
+		expect(parseApproveArgs(["--deny"])).toBeNull();
+		expect(
+			parseApproveArgs(["ABCD-EFGH", "--deny", "--account", "duke"]),
+		).toBeNull();
+	});
+
 	test("missing parts", () => {
 		expect(parseApproveArgs(["ABCD-EFGH"])).toBeNull();
 		expect(parseApproveArgs(["--account", "duke"])).toBeNull();

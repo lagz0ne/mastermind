@@ -358,3 +358,132 @@ describe("login by code", () => {
 		});
 	});
 });
+
+describe("deny, enrol token age, service account lifecycle (mm-210.66)", () => {
+	const DAY = 24 * 60 * 60 * 1000;
+	function fakeClock() {
+		const clock = { t: Date.UTC(2026, 10, 12, 8, 0, 0) };
+		const stores = {
+			accounts: new MemoryKv<Account>(),
+			serviceAccounts: new MemoryKv<ServiceAccount>(),
+			tokens: new MemoryKv<TokenRecord>(),
+			sessions: new MemoryKv<Session>(),
+		} satisfies AuthStores;
+		const refused: string[] = [];
+		const auth = new Auth(stores, {
+			now: () => new Date(clock.t),
+			onRefuse: (sa, reason) => refused.push(`${sa.name}: ${reason}`),
+		});
+		return { clock, stores, auth, refused };
+	}
+
+	test("deny ends a pending login at once; it cannot be approved after", async () => {
+		const { auth } = fakeClock();
+		const s = await auth.startLogin("stranger");
+		await auth.denyLogin(s.code, { kind: "account", account: "duke" });
+		expect(await auth.pollLogin(s.cookie)).toEqual({ status: "denied" });
+		// Shown once; the code is gone.
+		expect(await auth.pollLogin(s.cookie)).toEqual({ status: "expired" });
+		await expect(
+			auth.approveLogin(s.code, "duke", { kind: "operator" }),
+		).rejects.toThrow("no such code");
+	});
+
+	test("a denied code cannot be approved, an approved one cannot be denied", async () => {
+		const { auth } = fakeClock();
+		const a = await auth.startLogin("x");
+		await auth.denyLogin(a.code, { kind: "operator" });
+		await expect(
+			auth.approveLogin(a.code, "duke", { kind: "operator" }),
+		).rejects.toThrow("no such code");
+		await expect(auth.denyLogin(a.code, { kind: "operator" })).rejects.toThrow(
+			"no such code",
+		);
+
+		const b = await auth.startLogin("y");
+		await auth.approveLogin(b.code, "duke", { kind: "operator" });
+		await expect(auth.denyLogin(b.code, { kind: "operator" })).rejects.toThrow(
+			"no such code",
+		);
+		expect((await auth.pollLogin(b.cookie)).status).toBe("approved");
+		await expect(
+			auth.denyLogin("NOPE-NOPE", { kind: "operator" }),
+		).rejects.toThrow("no such code");
+	});
+
+	test("an enrol token works for 1 h, not after", async () => {
+		const { auth, clock } = fakeClock();
+		const fresh = await auth.enrolToken("duke", "a");
+		clock.t += 59 * 60 * 1000;
+		expect(await auth.enrol(fresh)).not.toBeNull();
+		const old = await auth.enrolToken("duke", "b");
+		clock.t += 60 * 60 * 1000;
+		expect(await auth.enrol(old)).toBeNull();
+	});
+
+	test("an enrol token made before the 1 h limit (no createdAt) is refused", async () => {
+		const { auth, stores } = fakeClock();
+		await stores.tokens.create(`enrol.${sha256("mme_legacy")}`, {
+			kind: "enrol",
+			account: "duke",
+			name: "a",
+		});
+		expect(await auth.enrol("mme_legacy")).toBeNull();
+	});
+
+	test("active -> stale (7 d) -> disabled (14 d); use keeps it active", async () => {
+		const { auth, clock, refused } = fakeClock();
+		const res = await auth.enrol(await auth.enrolToken("duke", "laptop"));
+		const credential = res?.credential as string;
+		expect(res?.serviceAccount).toMatchObject({
+			state: "active",
+			lastSeenAt: new Date(clock.t).toISOString(),
+		});
+
+		// A connect after 6 days counts as seen.
+		clock.t += 6 * DAY;
+		const seenAt = new Date(clock.t).toISOString();
+		expect(await auth.authorize(credential)).toMatchObject({
+			state: "active",
+			lastSeenAt: seenAt,
+		});
+
+		clock.t += 7 * DAY;
+		expect((await auth.serviceAccounts("duke"))[0]).toMatchObject({
+			state: "stale",
+			lastSeenAt: seenAt,
+		});
+
+		clock.t += 7 * DAY;
+		expect((await auth.serviceAccounts("duke"))[0]?.state).toBe("disabled");
+		expect(await auth.authorize(credential)).toBeNull();
+		expect(refused).toEqual([
+			`laptop: disabled: not seen since ${seenAt} (14 days); onboard the runner again`,
+		]);
+		// Refused, so not seen: it stays disabled.
+		expect((await auth.serviceAccounts("duke"))[0]?.state).toBe("disabled");
+	});
+
+	test("a stale service account that connects is active again", async () => {
+		const { auth, clock } = fakeClock();
+		const res = await auth.enrol(await auth.enrolToken("duke", "laptop"));
+		clock.t += 10 * DAY;
+		expect((await auth.serviceAccounts("duke"))[0]?.state).toBe("stale");
+		expect(await auth.authorize(res?.credential as string)).toMatchObject({
+			state: "active",
+		});
+		expect((await auth.serviceAccounts("duke"))[0]?.state).toBe("active");
+	});
+
+	test("a record without lastSeenAt counts from createdAt", async () => {
+		const { auth, clock, stores } = fakeClock();
+		const res = await auth.enrol(await auth.enrolToken("duke", "laptop"));
+		const [key] = await stores.serviceAccounts.list();
+		// Enrol stores no lastSeenAt (like records made before mm-210.66).
+		expect(
+			(await stores.serviceAccounts.get(key as string))?.value.lastSeenAt,
+		).toBeUndefined();
+		clock.t += 14 * 24 * 60 * 60 * 1000;
+		expect(await auth.authorize(res?.credential as string)).toBeNull();
+	});
+});

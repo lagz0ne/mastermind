@@ -1,30 +1,40 @@
 /**
  * `bun deploy/dokploy.ts login-approve <code> --account <name>`: the operator
  * approves a login code shown on <public url>/login.
+ * `bun deploy/dokploy.ts login-approve <code> --deny`: the operator does not
+ * know the code; that browser shows "denied".
  */
 
-export type ApproveArgs = { code: string; account: string };
+export type ApproveArgs =
+	| { code: string; account: string }
+	| { code: string; deny: true };
+
+export const LOGIN_APPROVE_USAGE =
+	"usage: bun deploy/dokploy.ts login-approve <code> --account <name> | login-approve <code> --deny";
 
 /** The account id rule of the app (it is in NATS subjects). */
 const ACCOUNT_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
 export const ACCOUNT_ID_RULE = "account id: a-z, 0-9 and -, at most 32";
 
 /**
- * Parse `<code> --account <name>`; the code may be typed as two words. The
+ * Parse `<code> --account <name>` or `<code> --deny` (not both); the code may be typed as two words. The
  * name may be in any case (`Lagz0ne`): the app lowers it for the id and keeps
  * the case as the display name. A name that breaks the id rule throws the rule.
  */
 export function parseApproveArgs(argv: string[]): ApproveArgs | null {
 	const rest: string[] = [];
 	let account = "";
+	let deny = false;
 	for (let i = 0; i < argv.length; i++) {
 		const a = argv[i] as string;
-		if (a === "--account") account = argv[++i] ?? "";
+		if (a === "--deny") deny = true;
+		else if (a === "--account") account = argv[++i] ?? "";
 		else if (a.startsWith("--account=")) account = a.slice(10);
 		else rest.push(a);
 	}
 	const code = rest.join("").trim();
 	account = account.trim();
+	if (deny) return code && !account ? { code, deny: true } : null;
 	if (!code || !account) return null;
 	if (!ACCOUNT_ID.test(account.toLowerCase()))
 		throw new Error(
@@ -49,7 +59,11 @@ export function describeApproval(a: Approval): string {
 	].join("\n");
 }
 
-/** A failed approval, by HTTP status. */
+/** What the operator reads after a deny. */
+export const DENIED =
+	'login-approve: denied. That browser shows "denied"; the code no longer works.';
+
+/** A failed approval or deny, by HTTP status. */
 export function approveError(status: number, error: string): string {
 	switch (status) {
 		case 404:

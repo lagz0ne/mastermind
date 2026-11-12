@@ -38,6 +38,9 @@ describe("login by code", () => {
 		expect(await pollCode(reply(200, { status: "expired" }))).toEqual({
 			kind: "expired",
 		});
+		expect(await pollCode(reply(200, { status: "denied" }))).toEqual({
+			kind: "denied",
+		});
 		expect(await pollCode(reply(503, { error: "auth is starting" }))).toEqual({
 			kind: "error",
 			message: "auth is starting",

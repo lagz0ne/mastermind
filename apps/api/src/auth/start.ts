@@ -149,6 +149,8 @@ export async function startAuth(cfg: AuthConfig): Promise<AuthService> {
 				});
 				log(`auth: revoked ${user}, ${n} connection(s) closed`);
 			},
+			onRefuse: (sa, reason) =>
+				log(`auth: refused ${serviceAccountUser(sa)}: ${reason}`),
 		});
 		auth = ready;
 

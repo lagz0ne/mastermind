@@ -280,6 +280,47 @@ describe("login by code (routes)", () => {
 		expect(await done.json()).toEqual({ status: "approved", account: "bob" });
 	});
 
+	test("deny: the operator or an account (with CSRF) ends a login; the poll says denied", async () => {
+		const { routes } = withOperator(OPERATOR_KEY);
+		const start = await routes["/api/auth/login/start"].POST(post({}));
+		const { code } = (await start.json()) as { code: string };
+		const pending = cookieOf(start, LOGIN_COOKIE);
+		const deny = routes["/api/auth/login/deny"].POST;
+		expect(
+			(await deny(post({ code }, { authorization: "Bearer nope" }))).status,
+		).toBe(401);
+		expect(
+			(await deny(post({}, { authorization: `Bearer ${OPERATOR_KEY}` })))
+				.status,
+		).toBe(400);
+		const ok = await deny(
+			post({ code }, { authorization: `Bearer ${OPERATOR_KEY}` }),
+		);
+		expect(ok.status).toBe(200);
+		const r = await poll(routes, pending);
+		expect(await r.json()).toEqual({ status: "denied" });
+		expect(cookieOf(r, LOGIN_COOKIE)).toBe(`${LOGIN_COOKIE}=`);
+		expect(cookieOf(r, SESSION_COOKIE)).toBe("");
+		// Used up: a second deny or an approve finds no code.
+		expect(
+			(await deny(post({ code }, { authorization: `Bearer ${OPERATOR_KEY}` })))
+				.status,
+		).toBe(404);
+	});
+
+	test("deny as an account needs the CSRF token", async () => {
+		const { routes, cookie, csrf } = await login();
+		const start = await routes["/api/auth/login/start"].POST(post({}));
+		const { code } = (await start.json()) as { code: string };
+		const deny = routes["/api/auth/login/deny"].POST;
+		expect((await deny(post({ code }, { cookie }))).status).toBe(403);
+		expect(
+			(await deny(post({ code }, { cookie, [CSRF_HEADER]: csrf }))).status,
+		).toBe(200);
+		const r = await poll(routes, cookieOf(start, LOGIN_COOKIE));
+		expect(await r.json()).toEqual({ status: "denied" });
+	});
+
 	test("a wrong code says nothing about other codes; approve is rate limited", async () => {
 		const { routes } = withOperator(OPERATOR_KEY);
 		const statuses: number[] = [];

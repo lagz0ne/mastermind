@@ -49,13 +49,42 @@ export type ServiceAccount = {
 	name: string;
 	createdAt: string;
 	secretHash: string;
+	/**
+	 * When its credential was last accepted (a NATS connect or an HTTP check).
+	 * Absent on records made before this field: `createdAt` counts.
+	 */
+	lastSeenAt?: string;
 };
 
+/**
+ * Lifecycle of a service account by its last use (GitLab: stale after 7 days;
+ * GitHub: a runner offline for 14 days is removed). `disabled`: the credential
+ * is refused; onboard the runner again for a new one.
+ */
+export type ServiceAccountState = "active" | "stale" | "disabled";
+
 /** A service account as the owner sees it (no hash). */
-export type ServiceAccountView = Omit<ServiceAccount, "secretHash">;
+export type ServiceAccountView = Omit<
+	ServiceAccount,
+	"secretHash" | "lastSeenAt"
+> & {
+	lastSeenAt: string;
+	state: ServiceAccountState;
+};
+
+/** Not seen for this long: stale. */
+export const SERVICE_ACCOUNT_STALE_MS = 7 * 24 * 60 * 60 * 1000;
+/** Not seen for this long: disabled (its credential is refused). */
+export const SERVICE_ACCOUNT_DISABLED_MS = 14 * 24 * 60 * 60 * 1000;
+/**
+ * `lastSeenAt` is written at most this often per service account. A NATS user
+ * JWT lives 24 h, so a connected runner is checked again at least once a day.
+ */
+const SEEN_WRITE_MS = 60 * 60 * 1000;
 
 export type TokenRecord =
-	| { kind: "enrol"; account: string; name: string }
+	/** `createdAt` is absent on tokens made before the 1 h limit: refused. */
+	| { kind: "enrol"; account: string; name: string; createdAt?: string }
 	/**
 	 * A login started in a browser (login by code). Key: hash of the code.
 	 * `browser`: hash of the secret in that browser's cookie; only that
@@ -67,6 +96,8 @@ export type TokenRecord =
 			createdAt: string;
 			userAgent: string;
 			approved: Approval | null;
+			/** Set once, by an approver who does not know this login. */
+			denied?: { by: string | null } | null;
 	  };
 
 export type Approval = {
@@ -92,10 +123,13 @@ export type ApproveResult = {
 export type PollResult =
 	| { status: "pending"; expiresAt: string }
 	| { status: "expired" }
+	| { status: "denied" }
 	| { status: "approved"; account: string; sessionId: string };
 
 /** A pending login lives this long. */
 export const LOGIN_CODE_TTL_MS = 10 * 60 * 1000;
+/** An enrol token lives this long (GitHub runner registration tokens: 1 h). */
+export const ENROL_TOKEN_TTL_MS = 60 * 60 * 1000;
 
 export type Session = { account: string; createdAt: string };
 
@@ -141,6 +175,8 @@ const isConflict = (err: unknown) =>
 export type AuthOptions = {
 	/** Called after a service account is deleted: disconnect its clients. */
 	onRevoke?: (sa: ServiceAccountView) => Promise<void>;
+	/** Called when a known service account's credential is refused, with why. */
+	onRefuse?: (sa: ServiceAccountView, reason: string) => void;
 	now?: () => Date;
 };
 
@@ -223,6 +259,7 @@ export class Auth {
 		if (
 			e?.value.kind !== "pending" ||
 			e.value.approved ||
+			e.value.denied ||
 			this.expired(e.value)
 		)
 			throw noSuchCode();
@@ -250,6 +287,39 @@ export class Auth {
 	}
 
 	/**
+	 * Deny the login of `code`: the approver does not know it. The browser
+	 * that started it sees `denied` at its next poll. Any approver may deny
+	 * (it needs the code, like approve); an approved code cannot be denied.
+	 */
+	async denyLogin(codeInput: string, approver: Approver): Promise<void> {
+		const code = normalizeCode(codeInput);
+		if (!code) throw noSuchCode();
+		const e = await this.stores.tokens.get(pendingKey(code));
+		if (
+			e?.value.kind !== "pending" ||
+			e.value.approved ||
+			e.value.denied ||
+			this.expired(e.value)
+		)
+			throw noSuchCode();
+		try {
+			await this.stores.tokens.update(
+				pendingKey(code),
+				{
+					...e.value,
+					denied: {
+						by: approver.kind === "operator" ? null : approver.account,
+					},
+				},
+				e.revision,
+			);
+		} catch (err) {
+			if (isConflict(err)) throw noSuchCode();
+			throw err;
+		}
+	}
+
+	/**
 	 * The browser that started a login asks with its cookie. Once approved,
 	 * the pending login is consumed (one winner) and a session is made.
 	 */
@@ -265,6 +335,11 @@ export class Auth {
 			this.expired(e.value)
 		)
 			return { status: "expired" };
+		if (e.value.denied) {
+			// Shown once; the code is gone after that.
+			await this.stores.tokens.delete(key, e.revision).catch(() => {});
+			return { status: "denied" };
+		}
 		const { approved } = e.value;
 		if (!approved)
 			return {
@@ -346,6 +421,7 @@ export class Auth {
 			kind: "enrol",
 			account,
 			name,
+			createdAt: this.now().toISOString(),
 		});
 		return token;
 	}
@@ -360,7 +436,9 @@ export class Auth {
 	} | null> {
 		if (!token.startsWith("mme_")) return null;
 		const rec = await this.stores.tokens.consume(tokenKey("enrol", token));
-		if (rec?.kind !== "enrol") return null;
+		if (rec?.kind !== "enrol" || !rec.createdAt) return null;
+		if (this.now().getTime() - Date.parse(rec.createdAt) >= ENROL_TOKEN_TTL_MS)
+			return null;
 		const secret = randomSecret();
 		const sa: ServiceAccount = {
 			id: randomId(),
@@ -371,18 +449,39 @@ export class Auth {
 		};
 		await this.stores.serviceAccounts.create(saKey(sa.account, sa.id), sa);
 		return {
-			serviceAccount: view(sa),
+			serviceAccount: this.view(sa),
 			credential: formatCredential({ account: sa.account, id: sa.id, secret }),
 		};
 	}
 
-	/** Check a service account credential (the NATS auth callout calls this). */
+	/**
+	 * Check a service account credential (the NATS auth callout and the
+	 * runner's HTTP calls). A valid credential of a disabled service account
+	 * is refused (`onRefuse` says why); an accepted one counts as seen.
+	 */
 	async authorize(credential: string): Promise<ServiceAccountView | null> {
 		const c = parseCredential(credential);
 		if (!c) return null;
-		const e = await this.stores.serviceAccounts.get(saKey(c.account, c.id));
+		const key = saKey(c.account, c.id);
+		const e = await this.stores.serviceAccounts.get(key);
 		if (!e || !sameSecret(e.value.secretHash, sha256(c.secret))) return null;
-		return view(e.value);
+		const v = this.view(e.value);
+		if (v.state === "disabled") {
+			this.opts.onRefuse?.(
+				v,
+				`disabled: not seen since ${v.lastSeenAt} (${SERVICE_ACCOUNT_DISABLED_MS / 86_400_000} days); onboard the runner again`,
+			);
+			return null;
+		}
+		const now = this.now();
+		if (now.getTime() - Date.parse(v.lastSeenAt) >= SEEN_WRITE_MS) {
+			// Best effort: a lost write only makes the account look older.
+			await this.stores.serviceAccounts
+				.update(key, { ...e.value, lastSeenAt: now.toISOString() }, e.revision)
+				.catch(() => {});
+			return this.view({ ...e.value, lastSeenAt: now.toISOString() });
+		}
+		return v;
 	}
 
 	/** Service accounts of `account`; of every account when omitted. */
@@ -393,7 +492,7 @@ export class Auth {
 		const entries = await Promise.all(
 			keys.map((k) => this.stores.serviceAccounts.get(k)),
 		);
-		return entries.flatMap((e) => (e ? [view(e.value)] : []));
+		return entries.flatMap((e) => (e ? [this.view(e.value)] : []));
 	}
 
 	/** The name to show for an account: its display name, else its id. */
@@ -418,12 +517,28 @@ export class Auth {
 		const e = await this.stores.serviceAccounts.get(key);
 		if (!e) return false;
 		await this.stores.serviceAccounts.delete(key);
-		await this.opts.onRevoke?.(view(e.value));
+		await this.opts.onRevoke?.(this.view(e.value));
 		return true;
+	}
+
+	private view(sa: ServiceAccount): ServiceAccountView {
+		const { secretHash: _, lastSeenAt, ...rest } = sa;
+		const seen = lastSeenAt ?? sa.createdAt;
+		return {
+			...rest,
+			lastSeenAt: seen,
+			state: serviceAccountState(seen, this.now()),
+		};
 	}
 }
 
-function view(sa: ServiceAccount): ServiceAccountView {
-	const { secretHash: _, ...rest } = sa;
-	return rest;
+/** The state of a service account last seen at `lastSeenAt`. */
+export function serviceAccountState(
+	lastSeenAt: string,
+	now: Date,
+): ServiceAccountState {
+	const age = now.getTime() - Date.parse(lastSeenAt);
+	if (age >= SERVICE_ACCOUNT_DISABLED_MS) return "disabled";
+	if (age >= SERVICE_ACCOUNT_STALE_MS) return "stale";
+	return "active";
 }

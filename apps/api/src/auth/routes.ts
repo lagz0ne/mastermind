@@ -14,7 +14,9 @@ import {
  *
  *   POST   /api/auth/login/start           -> {code, expiresAt} + pending-login cookie
  *   POST   /api/auth/login/approve         {code, account}; operator (Bearer key) or a session
- *   GET    /api/auth/login/poll            pending-login cookie -> {status}; session cookie once approved
+ *   POST   /api/auth/login/deny            {code}; operator (Bearer key) or a session
+ *   GET    /api/auth/login/poll            pending-login cookie -> {status: pending|expired|denied|approved};
+ *                                          session cookie once approved
  *   POST   /api/auth/logout
  *   GET    /api/auth/me                    -> {account, displayName, csrf}
  *   POST   /api/auth/tokens                {kind: "enrol", name} -> single-use enrol token
@@ -39,7 +41,7 @@ export type AuthRoutesOptions = {
 	csrfSecret: string;
 	/** Public NATS WebSocket URL, returned to a runner when it enrols. */
 	natsUrl?: string;
-	/** Bearer key of the operator for /api/auth/login/approve. Unset: no operator. */
+	/** Bearer key of the operator for /api/auth/login/approve and deny. Unset: no operator. */
 	operatorKey?: string;
 	onError?: (error: unknown) => void;
 };
@@ -143,31 +145,48 @@ export function authRoutes(
 			return fn(req, account, auth);
 		});
 
-	/** Approve as the operator (Bearer key) or as the session's account (with CSRF). */
-	const approve = handle(async (req, auth) => {
-		if (!approveLimit.take(`ip:${clientIp(req)}`)) return limited();
-		let approver: Approver;
-		const bearer = /^Bearer\s+(\S+)$/i.exec(
-			req.headers.get("authorization") ?? "",
-		)?.[1];
-		if (bearer) {
-			if (!operatorHash || !sameSecret(operatorHash, sha256(bearer)))
-				return fail(401, "bad operator key");
-			approver = { kind: "operator" };
-		} else {
-			const account = await auth.session(sessionOf(req));
-			if (!account) return fail(401, "not logged in");
-			const t = req.headers.get(CSRF_HEADER);
-			if (!t || !Bun.CSRF.verify(t, { secret: opts.csrfSecret }))
-				return fail(403, "bad csrf token");
-			approver = { kind: "account", account };
-		}
-		const who = approver.kind === "operator" ? "operator" : approver.account;
-		if (!approveLimit.take(`by:${who}`)) return limited();
-		const b = await body(req);
+	/**
+	 * Approve or deny as the operator (Bearer key) or as the session's account
+	 * (with CSRF). Both share one rate limit: each guesses a code.
+	 */
+	const asApprover = (
+		fn: (
+			b: Record<string, unknown> | null,
+			approver: Approver,
+			auth: Auth,
+		) => Promise<Response>,
+	): Handler =>
+		handle(async (req, auth) => {
+			if (!approveLimit.take(`ip:${clientIp(req)}`)) return limited();
+			let approver: Approver;
+			const bearer = /^Bearer\s+(\S+)$/i.exec(
+				req.headers.get("authorization") ?? "",
+			)?.[1];
+			if (bearer) {
+				if (!operatorHash || !sameSecret(operatorHash, sha256(bearer)))
+					return fail(401, "bad operator key");
+				approver = { kind: "operator" };
+			} else {
+				const account = await auth.session(sessionOf(req));
+				if (!account) return fail(401, "not logged in");
+				const t = req.headers.get(CSRF_HEADER);
+				if (!t || !Bun.CSRF.verify(t, { secret: opts.csrfSecret }))
+					return fail(403, "bad csrf token");
+				approver = { kind: "account", account };
+			}
+			const who = approver.kind === "operator" ? "operator" : approver.account;
+			if (!approveLimit.take(`by:${who}`)) return limited();
+			return fn(await body(req), approver, auth);
+		});
+	const approve = asApprover(async (b, approver, auth) => {
 		if (typeof b?.code !== "string" || typeof b.account !== "string")
 			return fail(400, "code and account required");
 		return json(await auth.approveLogin(b.code, b.account, approver));
+	});
+	const deny = asApprover(async (b, approver, auth) => {
+		if (typeof b?.code !== "string") return fail(400, "code required");
+		await auth.denyLogin(b.code, approver);
+		return json({ ok: true });
 	});
 
 	return {
@@ -185,6 +204,7 @@ export function authRoutes(
 			}),
 		},
 		"/api/auth/login/approve": { POST: approve },
+		"/api/auth/login/deny": { POST: deny },
 		"/api/auth/login/poll": {
 			GET: handle(async (req, auth) => {
 				const cookie = cookieOf(req, LOGIN_COOKIE);
@@ -203,8 +223,8 @@ export function authRoutes(
 					"set-cookie": loginCookie("", secure, 0),
 					"cache-control": "no-store",
 				});
-				if (r.status === "expired")
-					return Response.json({ status: "expired" }, { headers });
+				if (r.status === "expired" || r.status === "denied")
+					return Response.json({ status: r.status }, { headers });
 				headers.append(
 					"set-cookie",
 					sessionCookie(r.sessionId, secure, maxAge),
@@ -277,7 +297,11 @@ export function authRoutes(
 					req.headers.get("authorization") ?? "",
 				)?.[1];
 				const sa = credential ? await auth.authorize(credential) : null;
-				if (!sa) return fail(401, "credential is invalid or revoked");
+				if (!sa)
+					return fail(
+						401,
+						"credential is invalid, revoked, or disabled (not seen for 14 days)",
+					);
 				return json(
 					{
 						account: sa.account,

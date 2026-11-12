@@ -142,6 +142,8 @@ export async function debugState(src: DebugSources) {
 					account: s.account,
 					name: s.name,
 					createdAt: s.createdAt,
+					lastSeenAt: s.lastSeenAt,
+					state: s.state,
 				})),
 			t,
 		),

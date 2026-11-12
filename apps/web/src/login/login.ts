@@ -3,7 +3,8 @@ import { loadMe } from "../session/session.ts";
 /**
  * Login by code: the page asks for a code, shows it, and polls. An approver
  * (the operator, or a logged-in account) approves the code; then the poll
- * sets the session cookie. Only this browser holds the pending-login cookie.
+ * sets the session cookie. An approver who does not know the code denies it;
+ * then the poll says `denied`. Only this browser holds the pending-login cookie.
  */
 export type CodeStart =
 	| { kind: "code"; code: string; expiresAt: string }
@@ -12,6 +13,7 @@ export type CodeStart =
 export type CodePoll =
 	| { kind: "pending"; code?: string; expiresAt?: string }
 	| { kind: "expired" }
+	| { kind: "denied" }
 	| { kind: "ok"; account: string }
 	| { kind: "error"; message: string };
 
@@ -59,6 +61,7 @@ export async function pollCode(
 			return typeof b.code === "string" && typeof b.expiresAt === "string"
 				? { kind: "pending", code: b.code, expiresAt: b.expiresAt }
 				: { kind: "pending" };
+		if (b.status === "denied") return { kind: "denied" };
 		return { kind: "expired" };
 	} catch (error) {
 		return { kind: "error", message: String(error) };
@@ -72,9 +75,9 @@ export async function pollCode(
  */
 export async function resumeOrStart(
 	fetcher: typeof fetch = fetch,
-): Promise<CodeStart | { kind: "ok"; account: string }> {
+): Promise<CodeStart | { kind: "ok"; account: string } | { kind: "denied" }> {
 	const r = await pollCode(fetcher);
-	if (r.kind === "ok") return r;
+	if (r.kind === "ok" || r.kind === "denied") return r;
 	if (r.kind === "pending" && r.code && r.expiresAt)
 		return { kind: "code", code: r.code, expiresAt: r.expiresAt };
 	return startCode(fetcher);

@@ -197,7 +197,9 @@ export function runnerCommand(
 /**
  * The state cell and the lines under a runner's name (mm-210.59): offline,
  * enrolled (never connected), or its readiness and the failed checks. A
- * connected runner that reports no readiness gets no work: say so.
+ * connected runner that reports no readiness gets no work: say so. Its
+ * service account not seen for 7 days is stale; after 14 days disabled
+ * (mm-210.66).
  */
 export function readinessOf(r: RunnerView): {
 	state: string;
@@ -205,6 +207,29 @@ export function readinessOf(r: RunnerView): {
 	bad: boolean;
 	lines: { text: string; bad: boolean }[];
 } {
+	const sa = r.serviceAccount;
+	if (sa?.state === "disabled")
+		return {
+			state: "disabled",
+			bad: true,
+			lines: [
+				{
+					text: "not seen for 14 days: its credential is refused — fix: revoke it, then add the runner again",
+					bad: true,
+				},
+			],
+		};
+	if (sa?.state === "stale" && !r.online)
+		return {
+			state: "stale",
+			bad: true,
+			lines: [
+				{
+					text: "not seen for 7 days: disabled after 14 — fix: start the runner",
+					bad: true,
+				},
+			],
+		};
 	if (!r.runner) return { state: "enrolled", bad: false, lines: [] };
 	if (!r.online) return { state: "offline", bad: true, lines: [] };
 	const x = r.readiness;
@@ -255,6 +280,14 @@ export function approveLogin(
 		code,
 		account,
 	});
+}
+
+/**
+ * POST /api/auth/login/deny: refuse the code of a login I do not know. That
+ * browser shows "denied" at its next poll.
+ */
+export async function denyLogin(code: string): Promise<void> {
+	await send("POST", "/api/auth/login/deny", { code });
 }
 
 /** POST /api/auth/tokens {kind: enrol}: a single-use enrol token for a new runner. */

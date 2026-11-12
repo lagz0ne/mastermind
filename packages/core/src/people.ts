@@ -16,8 +16,18 @@ export type AccountView = {
 	invitedBy: string | null;
 };
 
-/** A service account as listed on /people (never the secret). */
-export type ServiceAccountRef = { id: string; name: string; createdAt: string };
+/**
+ * A service account as listed on /people (never the secret). `state` by its
+ * last use: stale after 7 days, disabled (credential refused) after 14.
+ * Absent from servers older than mm-210.66.
+ */
+export type ServiceAccountRef = {
+	id: string;
+	name: string;
+	createdAt: string;
+	lastSeenAt?: string;
+	state?: "active" | "stale" | "disabled";
+};
 
 /**
  * One row of the runner list: a runner the dispatcher heard from, or an
