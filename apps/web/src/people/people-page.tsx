@@ -168,7 +168,7 @@ function AddRunnerPanel({ onDone }: { onDone: () => void }) {
 		return (
 			<div className="flex flex-col gap-2" data-doop-id="runner-command">
 				<Secret
-					label="Run this in the work directory on the machine of the runner (Linux or macOS). It installs the runner, enrols it and starts it."
+					label="Run this in the work directory on the machine of the runner (Linux or macOS). It installs the runner, checks the machine, enrols it, asks for missing secrets, runs a deep doctor, and starts it when it is ready. It stops at the first failed check and prints the fix; run it again after the fix."
 					value={command}
 				/>
 				<ul className="list-inside list-disc text-muted-foreground text-xs">
@@ -177,7 +177,8 @@ function AddRunnerPanel({ onDone }: { onDone: () => void }) {
 						a provider that is logged in (for example <code>claude</code>).
 					</li>
 					<li>
-						Test the machine: <code>{RUNNER_BIN} check</code>
+						The runner gets no work before onboard passes. Again after a fix:{" "}
+						<code>{RUNNER_BIN} onboard</code>
 					</li>
 					<li>
 						Start again later: <code>{RUNNER_BIN} start</code>

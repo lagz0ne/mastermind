@@ -13,6 +13,7 @@ import { dirname, join } from "node:path";
 import type {
 	RunnerDiagnostics,
 	RunnerInFlight,
+	RunnerReadiness,
 	RunnerState,
 } from "@mastermind/core";
 import type { RunnerSettings } from "./config.ts";
@@ -213,6 +214,8 @@ export class Diagnostics {
 	secrets: SecretsDiagnostics | null = null;
 	/** The last doctor report (local or remote), redacted; null: none yet. */
 	lastDoctor: DoctorReport | null = null;
+	/** Worker readiness (readiness.ts); null: not evaluated (older callers). */
+	readiness: RunnerReadiness | null = null;
 	readonly #errors: string[] = [];
 	readonly #listeners = new Set<() => void>();
 
@@ -280,6 +283,18 @@ export class Diagnostics {
 			lastErrors: [...this.#errors],
 			...(this.secrets ? { secrets: this.secrets } : {}),
 			...(this.lastDoctor ? { lastDoctor: this.lastDoctor } : {}),
+			...(this.readiness
+				? {
+						readiness: {
+							...this.readiness,
+							failedChecks: this.readiness.failedChecks.map((c) => ({
+								...c,
+								problem: redactLine(c.problem),
+								...(c.fix ? { fix: redactLine(c.fix) } : {}),
+							})),
+						},
+					}
+				: {}),
 		};
 	}
 }

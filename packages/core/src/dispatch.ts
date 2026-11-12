@@ -203,8 +203,12 @@ export type OfferResult = { dispatch: Dispatch | null; reason?: string };
 
 /** Ask for the next bead on a queue. */
 export type NextRequest = { runner: RunnerInfo };
-/** `dispatch` is null when the queue has nothing the runner can take. */
-export type NextReply = { dispatch: Dispatch | null };
+/**
+ * `dispatch` is null when the queue has nothing the runner can take.
+ * `notReady`: Mastermind does not give this runner work yet (readiness gate,
+ * mm-210.59); each line says why.
+ */
+export type NextReply = { dispatch: Dispatch | null; notReady?: string[] };
 
 /** Keep the lease alive while the agent works. */
 export type HeartbeatRequest = { actor: string };
@@ -288,4 +292,82 @@ export type RunnerDiagnostics = {
 	};
 	/** The last 20 problem lines of the runner log, without secrets. */
 	lastErrors: string[];
+	/** Worker readiness (mm-210.59); absent: a runner older than that. */
+	readiness?: RunnerReadiness;
 };
+
+/**
+ * Worker readiness (mm-210.59). `onboarding`: `onboard` has not finished on
+ * this machine. `checking`: the first checks run. `ready`: the runner-level
+ * checks pass. `degraded`: a later check fails. Only `ready` gets work.
+ */
+export const READINESS_STATES = [
+	"onboarding",
+	"checking",
+	"ready",
+	"degraded",
+] as const;
+export type ReadinessState = (typeof READINESS_STATES)[number];
+
+/** One failed check: runner-wide, or for one environment only. */
+export type FailedCheck = {
+	/** Short id, for example `engine`, `paseo`, `secrets`. */
+	check: string;
+	/** Set: only this environment is not ready. */
+	environment?: string;
+	problem: string;
+	/** One line that fixes it. */
+	fix?: string;
+};
+
+/** What the runner says about its readiness, in its status. */
+export type RunnerReadiness = {
+	state: ReadinessState;
+	/** Environments it may get work for (empty unless `ready`). */
+	readyEnvironments: string[];
+	failedChecks: FailedCheck[];
+	/** When the checks last ran (ISO); null: not yet. */
+	checkedAt: string | null;
+};
+
+/** The dispatcher trusts a runner status for this long (ms). */
+export const READINESS_FRESH_MS = 120_000;
+
+/**
+ * Why a runner may not get work (empty: it may). `status`: the runner's last
+ * status; `receivedAt`: when Mastermind got it (ms). `environment`: the
+ * item's environment; null: the item has none (state `ready` is enough).
+ */
+export function notReadyReasons(
+	status: { readiness?: RunnerReadiness } | null,
+	receivedAt: number | null,
+	now: number,
+	environment: string | null = null,
+): string[] {
+	if (!status || receivedAt === null)
+		return [
+			"no status from the runner yet (start it; a runner from before mm-210.59 must be updated and run: mastermind-runner onboard)",
+		];
+	const age = now - receivedAt;
+	if (age > READINESS_FRESH_MS)
+		return [
+			`its last status is ${Math.round(age / 1000)} s old (fresh: ${READINESS_FRESH_MS / 1000} s)`,
+		];
+	const r = status.readiness;
+	if (!r)
+		return [
+			"it does not report readiness (update it, then run: mastermind-runner onboard)",
+		];
+	if (r.state !== "ready") {
+		const own = r.failedChecks.filter((c) => !c.environment);
+		return [
+			`state ${r.state}${own.length ? `: ${own.map((c) => c.problem).join("; ")}` : ""}`,
+		];
+	}
+	if (environment === null || r.readyEnvironments.includes(environment))
+		return [];
+	const env = r.failedChecks.filter((c) => c.environment === environment);
+	return [
+		`environment ${environment} is not ready on it${env.length ? `: ${env.map((c) => c.problem).join("; ")}` : ""}`,
+	];
+}

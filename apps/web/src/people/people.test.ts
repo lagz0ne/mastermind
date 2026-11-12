@@ -104,9 +104,9 @@ describe("ago", () => {
 });
 
 describe("runnerCommand", () => {
-	test("install from this site, enrol with the token, start", () => {
+	test("install from this site, onboard with the token, start", () => {
 		expect(runnerCommand("https://mm.example", "mme_abc-_1", "build")).toBe(
-			"curl -fsSL https://mm.example/install.sh | sh && ~/.local/bin/mastermind-runner enroll mme_abc-_1 --url https://mm.example --queue build --workdir . && ~/.local/bin/mastermind-runner start",
+			"curl -fsSL https://mm.example/install.sh | sh && ~/.local/bin/mastermind-runner onboard mme_abc-_1 --url https://mm.example --queue build --workdir . --start",
 		);
 	});
 

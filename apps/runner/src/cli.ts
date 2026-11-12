@@ -55,6 +55,7 @@ import {
 } from "./config.ts";
 import {
 	Diagnostics,
+	problems,
 	readDoctor,
 	runChecks,
 	startReporter,
@@ -65,6 +66,14 @@ import { type DoctorBox, formatReport, runDoctor } from "./doctor.ts";
 import { EnrolError, enrol } from "./enroll.ts";
 import { PaseoLauncher } from "./launcher.ts";
 import { serveOffers } from "./offer.ts";
+import { fail, type OnboardStep, pass, runOnboard } from "./onboard.ts";
+import {
+	type BoxCheck,
+	evaluate,
+	RECHECK_MS,
+	readinessLine,
+	sameReadiness,
+} from "./readiness.ts";
 import { serveDoctor } from "./remote-doctor.ts";
 import {
 	decisionLine,
@@ -75,9 +84,9 @@ import {
 	routingPath,
 } from "./routing.ts";
 import { Runner } from "./runner.ts";
-import { secretsCommand } from "./secrets/command.ts";
+import { readSecretFromStdin, secretsCommand } from "./secrets/command.ts";
 import { type SecretsState, secretsState } from "./secrets/state.ts";
-import { secretsPath } from "./secrets/store.ts";
+import { SecretStore, secretsPath } from "./secrets/store.ts";
 
 /**
  * The Mastermind commit this runner was built from. The api build (apps/api/build.ts)
@@ -116,6 +125,7 @@ const OPTIONS = {
 	save: { type: "boolean" },
 	force: { type: "boolean" },
 	deep: { type: "boolean" },
+	start: { type: "boolean" },
 	json: { type: "boolean" },
 	version: { type: "boolean", short: "v" },
 	help: { type: "boolean", short: "h" },
@@ -130,7 +140,13 @@ export class UsageError extends Error {
 }
 
 const USAGE = `usage:
+  mastermind-runner onboard [<token>] --url <mastermind url> [settings] [--no-box] [--start]
+      checks this machine (box engine, Paseo, providers, box image), enrols,
+      asks for missing secrets, runs doctor --deep, then marks the runner READY;
+      stops at the first failure with the fix; run it again after the fix.
+      --start: start the runner when it is READY
   mastermind-runner enroll <token> --url <mastermind url> [settings]
+      enrol only: the runner stays NOT READY (no work) until onboard passes
   mastermind-runner start [settings] [--save] [--box-image <ref>] [--no-box]
       every task runs in a throwaway box (Docker or Podman API: DOCKER_HOST);
       --no-box: agents run on this machine, at your own risk (the ticket says so)
@@ -362,6 +378,8 @@ export async function main(argv: string[], io: Io): Promise<number> {
 	const path = configPath(io.env);
 	try {
 		switch (cmd) {
+			case "onboard":
+				return await cmdOnboard(path, rest[0], f, io);
 			case "enroll":
 			case "enrol":
 				return await cmdEnroll(path, rest[0], f, io);
@@ -397,9 +415,6 @@ export async function main(argv: string[], io: Io): Promise<number> {
 		throw error;
 	}
 }
-
-/** How often the running runner refreshes the needed secret names. */
-const SECRETS_EVERY_MS = 5 * 60_000;
 
 /** A status.json older than this: the runner is probably not running. */
 const STALE_MS = 60_000;
@@ -606,6 +621,182 @@ async function cmdEnroll(
 	return EXIT.ok;
 }
 
+/** The steps of `onboard` (onboard.ts), wired to this machine. */
+async function cmdOnboard(
+	path: string,
+	token: string | undefined,
+	f: Flags,
+	io: Io,
+): Promise<number> {
+	let cfg = await loadConfig(path).catch(() => null);
+	if (cfg?.state === "revoked") cfg = null;
+	let settings = applyFlags(
+		cfg?.runner ?? defaultSettings("not-enrolled"),
+		f,
+		io.cwd,
+	);
+	const noBox = f["no-box"] === true;
+	const driver = noBox ? null : new DockerDriver({ env: io.env });
+	const steps: OnboardStep[] = [];
+	if (driver)
+		steps.push({
+			name: "box engine",
+			run: async () => {
+				try {
+					return pass(`${driver.name} (${await driver.ping()})`);
+				} catch (error) {
+					return fail(
+						`${error instanceof Error ? error.message : error}`,
+						"install and start Docker or Podman (DOCKER_HOST), or onboard with --no-box at your own risk",
+					);
+				}
+			},
+		});
+	steps.push({
+		name: "Paseo and providers",
+		run: async () => {
+			const c = await runChecks(settings, { paseoHost: f["paseo-host"] });
+			const p = problems(c, settings).find((x) => x.problem !== "no queues");
+			if (p) return fail(p.problem, p.fix);
+			return pass(
+				`daemon answers; providers ${Object.keys(c.providers).join(", ") || "-"} available`,
+			);
+		},
+	});
+	if (driver)
+		steps.push({
+			name: "default box image",
+			run: async () => {
+				const image = boxImage(f, io);
+				try {
+					return pass(await driver.ensureImage({ image }));
+				} catch (error) {
+					return fail(
+						`cannot pull ${image}: ${error instanceof Error ? error.message : error}`,
+						"check the network and the registry; or set another image: --box-image <ref>",
+					);
+				}
+			},
+		});
+	steps.push({
+		name: "enroll",
+		run: async () => {
+			if (cfg?.state === "active" && !f.force) {
+				settings = applyFlags(cfg.runner, f, io.cwd);
+				cfg = { ...cfg, runner: settings };
+				await saveConfig(path, cfg);
+				return pass(
+					`already enrolled as ${cfg.account}/${settings.id} (the token is not used; --force enrols again)`,
+				);
+			}
+			if (!token)
+				return fail(
+					"not enrolled and no enrol token",
+					"get a token on /people (Add runner), then: mastermind-runner onboard <token> --url <mastermind url>",
+				);
+			const url = f.url ?? io.env.MASTERMIND_URL;
+			if (!url)
+				return fail("no Mastermind URL", "pass --url or set MASTERMIND_URL");
+			const fresh = await enrol({
+				mastermindUrl: url,
+				token,
+				natsUrl: f["nats-url"] ?? io.env.MASTERMIND_NATS_URL,
+			});
+			settings = applyFlags(fresh.runner, f, io.cwd);
+			cfg = { ...fresh, runner: settings };
+			await saveConfig(path, cfg);
+			return pass(
+				`account ${cfg.account}, service account ${cfg.serviceAccount.name}, runner ${settings.id}; config ${path}`,
+			);
+		},
+	});
+	steps.push({
+		name: "queues",
+		run: async () =>
+			settings.queues.length
+				? pass(settings.queues.join(", "))
+				: fail("no queues", "run onboard again with --queue <q>"),
+	});
+	let routing: Routing | null = null;
+	let source = "";
+	steps.push({
+		name: "secrets",
+		run: async () => {
+			({ routing, source } = await routingFor(path, settings, f, io));
+			const r = routing;
+			let state = await secretsFor(cfg, r, io);
+			if (!state.needs)
+				return fail(
+					state.problem ?? "the needed secrets are unknown",
+					"check the connection to Mastermind, then run onboard again",
+				);
+			const store = new SecretStore(secretsPath(io.env));
+			for (const name of state.diagnostics.missing) {
+				const value = await (io.readSecret ?? readSecretFromStdin)(
+					`secret ${name} is needed; value (hidden): `,
+				);
+				if (!value)
+					return fail(
+						`no value for ${name}`,
+						`mastermind-runner secrets set ${name}, then run onboard again`,
+					);
+				await store.set(name, value);
+			}
+			state = await secretsFor(cfg, r, io);
+			if (state.diagnostics.missing.length)
+				return fail(
+					`missing secrets: ${state.diagnostics.missing.join(", ")}`,
+					state.diagnostics.missing
+						.map((m) => `mastermind-runner secrets set ${m}`)
+						.join("; "),
+				);
+			return pass(
+				state.diagnostics.needed.length
+					? `${state.diagnostics.needed.join(", ")} present`
+					: "none needed",
+			);
+		},
+	});
+	steps.push({
+		name: "doctor --deep",
+		run: async () => {
+			const report = await runDoctor({
+				...doctorInput(
+					path,
+					cfg,
+					settings,
+					routing as unknown as Routing,
+					source,
+					io,
+					driver ? { driver, image: boxImage(f, io) } : { noBox: true },
+				),
+				deep: true,
+			});
+			await writeDoctor(path, report).catch(() => {});
+			const bad = report.steps.find((s) => s.status === "fail");
+			if (!bad) return pass(`${report.steps.length} steps pass`);
+			for (const l of formatReport(report)) io.out(`  ${l}`);
+			return fail(
+				`${bad.id}. ${bad.name}: ${bad.problem ?? "failed"}`,
+				bad.fix ?? "see the doctor report above",
+			);
+		},
+	});
+	steps.push({
+		name: "ready",
+		run: async () => {
+			if (!cfg) return fail("not enrolled", "run onboard with a token");
+			cfg = { ...cfg, runner: settings, onboardedAt: stamp() };
+			await saveConfig(path, cfg);
+			return pass(`runner ${cfg.account}/${settings.id} is READY`);
+		},
+	});
+	if (!(await runOnboard(steps, io.out))) return EXIT.error;
+	if (f.start) return cmdStart(path, f, io);
+	io.out("start it: mastermind-runner start");
+	return EXIT.ok;
+}
+
 async function cmdCheck(path: string, f: Flags, io: Io): Promise<number> {
 	const cfg = await requireConfig(path);
 	const s = applyFlags(cfg.runner, f, io.cwd);
@@ -675,22 +866,60 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 		diag.log(line);
 	};
 	// Box mode (default): the engine must answer before any work is taken.
-	// Box steps go to the ticket through the runner (made below).
+	// No engine: the runner still starts and reports it (readiness, mm-210.59),
+	// and tries again on every re-check. Box steps go to the ticket through
+	// the runner (made below).
 	let runner: Runner | undefined;
-	const box = f["no-box"]
-		? null
-		: await startBoxMode({
-				runnerId: settings.id,
-				env: io.env,
-				image: f["box-image"],
-				outDir: join(dirname(path), "results"),
-				log,
-				onStep: (beadId, line) => runner?.progress(beadId, line),
-			});
-	if (!box)
+	const noBox = f["no-box"] === true;
+	let box: Awaited<ReturnType<typeof startBoxMode>> | null = null;
+	let boxCheck: BoxCheck | undefined = noBox ? null : undefined;
+	const checkBox = async () => {
+		if (noBox) return;
+		try {
+			if (box) await box.driver.ping();
+			else
+				box = await startBoxMode({
+					runnerId: settings.id,
+					env: io.env,
+					image: f["box-image"],
+					outDir: join(dirname(path), "results"),
+					log,
+					onStep: (beadId, line) => runner?.progress(beadId, line),
+				});
+			boxCheck = { ok: true };
+		} catch (error) {
+			boxCheck = {
+				ok: false,
+				problem: `box engine: ${error instanceof Error ? error.message : error}`,
+				fix: "start Docker or Podman (DOCKER_HOST), or run with --no-box at your own risk",
+			};
+		}
+	};
+	if (noBox)
 		log(
 			"WARNING: --no-box: agents run on this machine without a box (owner's risk); every task reports it",
 		);
+	// Readiness: the runner asks for work only when it is ready (readiness.ts).
+	let secrets: SecretsState | undefined;
+	let publishNow = async () => {};
+	const reevaluate = () => {
+		const r = evaluate({
+			onboarded: !!cfg.onboardedAt,
+			checks: diag.checks,
+			box: boxCheck,
+			secrets,
+			settings,
+			routing,
+			previous: diag.readiness,
+		});
+		if (sameReadiness(diag.readiness, r)) {
+			diag.readiness = r;
+			return;
+		}
+		diag.readiness = r;
+		log(readinessLine(r));
+		void publishNow().then(() => runner?.readinessChanged());
+	};
 	let conn: Awaited<ReturnType<typeof connectRunner>> | null = null;
 	const statusSubject = subjects.runnerStatus(cfg.account, settings.id);
 	const reporter = startReporter({
@@ -702,9 +931,15 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 		check: async () => {
 			// A local `doctor` run writes doctor.json; send it as lastDoctor.
 			diag.doctor(await readDoctor(path));
-			return runChecks(settings, { paseoHost: f["paseo-host"] });
+			const c = await runChecks(settings, { paseoHost: f["paseo-host"] });
+			diag.checks = c;
+			reevaluate();
+			return c;
 		},
 	});
+	publishNow = () => reporter.send();
+	await checkBox();
+	reevaluate();
 	const stopping = new AbortController();
 	const onSignal = () => stopping.abort();
 	const mastermindUrl = io.env.MASTERMIND_URL ?? cfg.mastermindUrl;
@@ -749,10 +984,41 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 		diag.natsServer = nc.getServer();
 		diag.set("connected");
 		const info = runnerInfo(cfg, settings, routing);
+		// `next` names only the environments that are ready here.
+		const nextInfo = (): RunnerInfo => ({
+			...info,
+			environments: diag.readiness?.readyEnvironments ?? [],
+		});
+		let notReadySaid = "";
 		runner = new Runner({
-			client: natsClient(nc, info),
-			launcher: box?.launcher ?? new PaseoLauncher({ host: f["paseo-host"] }),
-			...(box ? { check: box.check } : { noBox: true }),
+			client: natsClient(nc, nextInfo, {
+				onNotReady: (reasons) => {
+					const line = reasons.join("; ");
+					if (line !== notReadySaid)
+						log(`error: Mastermind gives no work: not ready: ${line}`);
+					notReadySaid = line;
+				},
+			}),
+			launcher: noBox
+				? new PaseoLauncher({ host: f["paseo-host"] })
+				: {
+						run: (spec, signal) =>
+							box
+								? box.launcher.run(spec, signal)
+								: Promise.reject(new Error("the box engine is not ready")),
+					},
+			...(noBox
+				? { noBox: true }
+				: {
+						check: (d, s, decision) =>
+							box
+								? box.check(d, s, decision)
+								: Promise.resolve({
+										ok: false as const,
+										reason: "the box engine is not ready",
+									}),
+					}),
+			readiness: () => diag.readiness,
 			settings,
 			routing,
 			setupMemory: new FileSetupMemory(join(dirname(path), "setup-state.json")),
@@ -778,9 +1044,12 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 						routing,
 						source,
 						io,
-						box
-							? { driver: box.driver, image: boxImage(f, io) }
-							: { noBox: true },
+						noBox
+							? { noBox: true }
+							: {
+									driver: box?.driver ?? new DockerDriver({ env: io.env }),
+									image: boxImage(f, io),
+								},
 					),
 					deep,
 				}),
@@ -791,10 +1060,13 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 			log,
 		});
 		// Needed secret names: at start and every few minutes (names only).
+		// The same re-check looks at the box engine again (readiness).
 		let lastMissing = "";
 		const learnSecrets = async () => {
+			await checkBox();
 			try {
 				const x = await secretsFor(cfg, routing, io);
+				secrets = x;
 				diag.secrets = x.diagnostics;
 				const missing = x.diagnostics.missing.join(", ");
 				if (missing && missing !== lastMissing)
@@ -804,16 +1076,19 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 				lastMissing = missing;
 				diag.changed();
 			} catch (error) {
-				log(
-					`error: secrets: ${error instanceof Error ? error.message : error}`,
-				);
+				const problem = `secrets: ${error instanceof Error ? error.message : error}`;
+				log(`error: ${problem}`);
+				secrets = {
+					rows: [],
+					needs: null,
+					problem,
+					diagnostics: { needed: [], missing: [], needsAt: null, problem },
+				};
 			}
+			reevaluate();
 		};
 		void learnSecrets();
-		const secretsTimer = setInterval(
-			() => void learnSecrets(),
-			SECRETS_EVERY_MS,
-		);
+		const secretsTimer = setInterval(() => void learnSecrets(), RECHECK_MS);
 		stopping.signal.addEventListener("abort", () =>
 			clearInterval(secretsTimer),
 		);

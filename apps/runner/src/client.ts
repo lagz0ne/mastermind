@@ -58,12 +58,22 @@ export interface MastermindClient {
 export const NEXT_TIMEOUT_MS = 30_000;
 export const VERB_TIMEOUT_MS = 10_000;
 
+/**
+ * `runner`: what `next` says about the runner; a function is read on every
+ * `next` (the ready environments change, mm-210.59).
+ */
 export function natsClient(
 	nc: NatsConnection,
-	runner: RunnerInfo,
-	opts: { nextTimeoutMs?: number; verbTimeoutMs?: number } = {},
+	runner: RunnerInfo | (() => RunnerInfo),
+	opts: {
+		nextTimeoutMs?: number;
+		verbTimeoutMs?: number;
+		/** Mastermind answered `next` with notReady (its readiness gate). */
+		onNotReady?: (reasons: string[]) => void;
+	} = {},
 ): MastermindClient {
-	const account = runner.account;
+	const info = typeof runner === "function" ? runner : () => runner;
+	const account = info().account;
 	const timeout = opts.verbTimeoutMs ?? VERB_TIMEOUT_MS;
 	const verb = <TReq, TRes>(
 		beadId: string,
@@ -78,9 +88,10 @@ export function natsClient(
 			const reply = await request<NextRequest, NextReply>(
 				nc,
 				subjects.next(account, queue),
-				{ runner },
+				{ runner: info() },
 				{ timeout: opts.nextTimeoutMs ?? NEXT_TIMEOUT_MS },
 			);
+			if (reply?.notReady?.length) opts.onNotReady?.(reply.notReady);
 			return reply?.dispatch ?? null;
 		},
 		async heartbeat(beadId, actor) {

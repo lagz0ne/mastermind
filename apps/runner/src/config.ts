@@ -64,6 +64,11 @@ export type RunnerConfig = {
 	/** `revoked` once Mastermind refused the credential. */
 	state: "active" | "revoked";
 	enrolledAt: string;
+	/**
+	 * When `onboard` finished its checks here (mm-210.59). Absent: the runner
+	 * is enrolled but not onboarded, and asks for no work.
+	 */
+	onboardedAt?: string;
 	runner: RunnerSettings;
 };
 

@@ -20,6 +20,7 @@ import type {
 	DirectOffer,
 	Dispatch,
 	RunnerInFlight,
+	RunnerReadiness,
 	WorkOutput,
 } from "@mastermind/core";
 import { NO_BOX_REPORT } from "./box/run.ts";
@@ -33,6 +34,7 @@ import {
 } from "./client.ts";
 import type { RunnerSettings } from "./config.ts";
 import type { AgentLauncher, AgentResult } from "./launcher.ts";
+import { gateReason } from "./readiness.ts";
 import {
 	type Decision,
 	decisionLine,
@@ -68,6 +70,12 @@ export type RunnerOptions = {
 	onChange?: () => void;
 	/** Agents run on this machine, not in a box (--no-box): say so on every task. */
 	noBox?: boolean;
+	/**
+	 * Worker readiness (mm-210.59, readiness.ts). Set: the runner asks `next`
+	 * only while it is `ready`, and declines offers for environments that are
+	 * not ready. Call {@link Runner.readinessChanged} when it changes.
+	 */
+	readiness?: () => RunnerReadiness | null;
 };
 
 /** A FIFO counting semaphore. */
@@ -285,6 +293,14 @@ export class Runner {
 			available: this.#o.providerStatus?.(),
 		});
 		const id = offer.bead.id;
+		const notReady = this.#o.readiness
+			? gateReason(this.#o.readiness(), offer.env.name)
+			: null;
+		if (notReady) {
+			this.lastDecision = `${id}: offer declined: ${notReady}`;
+			this.#changed();
+			return { accept: false, reason: notReady };
+		}
 		if (!decision.ok) {
 			this.lastDecision = `${id}: offer declined: ${decision.reason}`;
 			this.#changed();
@@ -320,6 +336,17 @@ export class Runner {
 	dropOffer(): void {
 		this.#accepted = Math.max(0, this.#accepted - 1);
 		this.#slots.giveBack();
+	}
+
+	/** Readiness changed: pollers that wait for it look again now. */
+	readinessChanged(): void {
+		for (const w of this.#wake.values()) w.abort();
+	}
+
+	/** May the pollers ask `next`? Without a readiness source: always. */
+	#ready(): boolean {
+		if (!this.#o.readiness) return true;
+		return this.#o.readiness()?.state === "ready";
 	}
 
 	/** Start polling every queue. */
@@ -365,6 +392,11 @@ export class Runner {
 		const { client } = this.#o;
 		let failures = 0;
 		while (!this.#stopped) {
+			// Not ready: ask for nothing; readinessChanged() wakes the wait.
+			if (!this.#ready()) {
+				await this.#idle(queue, 60_000);
+				continue;
+			}
 			await this.#slots.acquire();
 			if (this.#stopped) break;
 			let dispatch: Dispatch | null;

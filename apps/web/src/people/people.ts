@@ -178,9 +178,10 @@ export const RUNNER_BIN = "~/.local/bin/mastermind-runner";
 
 /**
  * The ONE command a machine runs to install the runner (a compiled binary of
- * this server's commit, sha256-checked), enrol it with the single-use token and
- * start it. Needs no clone and no bun; the agents need a running Paseo daemon
- * and a provider that is logged in.
+ * this server's commit, sha256-checked) and onboard it: local checks, enrol
+ * with the single-use token, missing secrets, doctor --deep, READY, then start
+ * (mm-210.59). Needs no clone and no bun; the agents need a running Paseo
+ * daemon and a provider that is logged in.
  */
 export function runnerCommand(
 	origin: string,
@@ -189,8 +190,7 @@ export function runnerCommand(
 ): string {
 	return [
 		`curl -fsSL ${sh(`${origin}/install.sh`)} | sh`,
-		`${RUNNER_BIN} enroll ${sh(token)} --url ${sh(origin)} --queue ${sh(queue)} --workdir .`,
-		`${RUNNER_BIN} start`,
+		`${RUNNER_BIN} onboard ${sh(token)} --url ${sh(origin)} --queue ${sh(queue)} --workdir . --start`,
 	].join(" && ");
 }
 

@@ -14,8 +14,7 @@ the same commit as the server. `/people` → **Add runner** shows the one comman
 
 ```bash
 curl -fsSL <mastermind url>/install.sh | sh \
-  && ~/.local/bin/mastermind-runner enroll <mme_token> --url <mastermind url> --queue <q> --workdir . \
-  && ~/.local/bin/mastermind-runner start
+  && ~/.local/bin/mastermind-runner onboard <mme_token> --url <mastermind url> --queue <q> --workdir . --start
 ```
 
 `install.sh` downloads `<url>/download/mastermind-runner?os=&arch=`, checks it against
@@ -25,12 +24,59 @@ its commit (`mastermind-runner --version`); `/people` marks a runner on another 
 than the server as `old version`: run the install line again. The image build compiles
 the targets in `RUNNER_TARGETS` (build arg, default `all`; ~45 MiB gzipped each).
 
+## Onboarding: no work before the checks pass
+
+A worker gets work only after its checks pass (mm-210.59). The client owns
+onboarding: `onboard` runs these steps in order and stops at the first FAIL
+with the line that fixes it. Run it again after the fix; an enrolled runner
+skips the enrol step (the token is spent once).
+
+| Step | Needs a credential | Checks |
+|---|---|---|
+| box engine | no | Docker or Podman answers (`DOCKER_HOST`); skipped with `--no-box` |
+| Paseo and providers | no | `paseo ls` answers; each provider is available (logged in); the workdir exists |
+| default box image | no | the image pulls (`--box-image`, `MASTERMIND_BOX_IMAGE`) |
+| enroll | spends the token | the service account; settings are saved |
+| queues | | at least one `--queue` |
+| secrets | yes | the secret NAMES of its environments; a missing value is asked for (hidden prompt or stdin, never argv) |
+| doctor --deep | yes | a real box and one real probe agent |
+| ready | | writes `onboardedAt` in the config |
+
+`enroll` alone is for scripts: the runner stays NOT READY until `onboard` passes.
+`--start` starts the runner when it is READY.
+
+The running runner has a readiness state and asks for work (`next`, offers)
+only in `ready`:
+
+```mermaid
+stateDiagram-v2
+  [*] --> onboarding: enrolled, onboard not finished
+  onboarding --> checking: onboard passed, start
+  checking --> ready: checks pass
+  ready --> degraded: a re-check fails (engine gone, Paseo down)
+  degraded --> ready: checks pass again
+```
+
+- Runner-wide checks: Paseo daemon, providers, workdir, queues, box engine.
+- Per environment: every secret the environment needs is present. A worker
+  that is `ready` gets work only for the environments in `readyEnvironments`;
+  items with no environment need `ready` only.
+- Re-check: on start and every 5 min (Paseo every 15 s). Removing a needed
+  secret drops that environment within 5 min.
+- The status (`mm.u.<account>.r.<runner>.status`) carries
+  `readiness: {state, readyEnvironments, failedChecks, checkedAt}`. Mastermind
+  enforces it too: `next` and offers go only to a runner whose last status is
+  `ready`, less than 2 min old, and lists the item's environment. Otherwise
+  `next` answers `{dispatch: null, notReady: [reasons]}` (the runner logs it).
+  `MM_READINESS_GATE=off` on the server turns the server side off.
+
 ## From source
 
 ```bash
 # 1. In Mastermind, the account mints an enrol token (POST /api/auth/tokens {kind: "enrol", name}).
-# 2. Spend it once; settings given here are saved with the credential (mode 0600).
-bun src/cli.ts enroll <mme_token> --url <mastermind url> --queue <q> --workdir <dir> \
+# 2. Onboard: checks, spend the token once, secrets, doctor --deep, READY. Settings given
+#    here are saved with the credential (mode 0600).
+bun src/cli.ts onboard <mme_token> --url <mastermind url> --queue <q> --workdir <dir> \
   [--provider claude] [--mode bypassPermissions] [--capacity 1|unlimited] [--capability git]...
 # 3. Run.
 bun src/cli.ts start          # flags here override the saved settings; --save keeps them

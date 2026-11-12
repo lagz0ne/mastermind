@@ -185,6 +185,29 @@ describe("enroll, status, check", () => {
 		expect(cfg?.mastermindUrl).toBe(server.url.href.replace(/\/$/, ""));
 	});
 
+	test("enroll alone leaves the runner not onboarded (mm-210.59)", async () => {
+		const cfg = await loadConfig(io().io.env.MASTERMIND_RUNNER_CONFIG);
+		expect(cfg?.onboardedAt).toBeUndefined();
+	});
+
+	test("onboard on a machine with no Docker stops at the engine check", async () => {
+		const t = io({
+			MASTERMIND_URL: `${server.url}`,
+			MASTERMIND_RUNNER_CONFIG: join(dir, "nodocker", "runner.json"),
+			DOCKER_HOST: `unix://${join(dir, "no-such.sock")}`,
+		});
+		expect(await main(["onboard", "mme_nodocker", "--queue", "q"], t.io)).toBe(
+			EXIT.error,
+		);
+		expect(t.out[0]).toStartWith("✗ 1/");
+		expect(t.out[0]).toContain("box engine");
+		expect(t.out[1]).toStartWith("  fix: ");
+		expect(t.out.join("\n")).toContain("NOT READY");
+		// Stopped before enroll: the token is unspent, no config was written.
+		expect(used.has("mme_nodocker")).toBe(false);
+		expect(existsSync(t.io.env.MASTERMIND_RUNNER_CONFIG)).toBe(false);
+	});
+
 	test("a second enroll needs --force; a used token fails", async () => {
 		const t = io({ MASTERMIND_URL: `${server.url}` });
 		expect(await main(["enroll", "mme_two"], t.io)).toBe(EXIT.usage);
