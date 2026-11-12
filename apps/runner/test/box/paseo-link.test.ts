@@ -428,7 +428,29 @@ describe("startBoxMode with the Paseo link", () => {
 		await box.destroy();
 	});
 
-	test("off: --no-paseo-link, MASTERMIND_PASEO_LINK=0, or Paseo not answering", async () => {
+	test("box control is on by default: no host, but the relay and runAgent", async () => {
+		const { startBoxMode } = await import("../../src/box/launcher.ts");
+		const p = fakePaseo();
+		const m = await startBoxMode({
+			...base([]),
+			env: { MASTERMIND_PASEO_LINK: "0" },
+			paseoLink: { dir, paseo: p.call, open, ready: async () => true },
+		});
+		expect(m.launcher.opts.runAgent).toBeDefined();
+		const box = await m.driver.create({
+			image: "i",
+			name: "b",
+			labels: { [BOX_LABEL.item]: "x" },
+		});
+		const link = (box as unknown as { paseoLink?: PaseoLink }).paseoLink;
+		expect(link).toBeDefined();
+		await link?.start();
+		expect(link?.registration).toBeNull();
+		expect(p.calls).toEqual([]);
+		await box.destroy();
+	});
+
+	test("off: no link with exec control and --no-paseo-link, MASTERMIND_PASEO_LINK=0, or Paseo not answering", async () => {
 		const { startBoxMode } = await import("../../src/box/launcher.ts");
 		const p = fakePaseo();
 		const spec = { image: "i", name: "b", labels: { [BOX_LABEL.item]: "x" } };
@@ -438,15 +460,16 @@ describe("startBoxMode with the Paseo link", () => {
 					paseoLink?: PaseoLink;
 				}
 			).paseoLink !== undefined;
+		const exec = { boxControl: "exec" as const };
 
-		expect(
-			await linked(await startBoxMode({ ...base([]), paseoLink: false })),
-		).toBe(false);
+		const off = await startBoxMode({ ...base([]), ...exec, paseoLink: false });
+		expect(await linked(off)).toBe(false);
+		expect(off.launcher.opts.runAgent).toBeUndefined();
 		expect(
 			await linked(
 				await startBoxMode({
 					...base([]),
-					env: { MASTERMIND_PASEO_LINK: "0" },
+					env: { MASTERMIND_PASEO_LINK: "0", MASTERMIND_BOX_CONTROL: "exec" },
 					paseoLink: { dir, paseo: p.call, open },
 				}),
 			),
@@ -458,6 +481,7 @@ describe("startBoxMode with the Paseo link", () => {
 		const log: string[] = [];
 		const down = await startBoxMode({
 			...base(log),
+			...exec,
 			paseoLink: {
 				dir,
 				open,

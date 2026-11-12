@@ -353,6 +353,21 @@ While a task runs, the box's Paseo daemon is a connected host of this machine's 
   `MASTERMIND_PASEO_LINK=0`. If this machine's Paseo does not answer at start,
   the runner logs it and runs without the link. The task does not depend on the link.
 
+### Box control: one Paseo connection
+
+The runner drives the agent in the box through ONE Paseo SDK connection to the box daemon,
+over the same socket relay (no password, no port). It creates the agent at `/workspace`
+with the result schema, waits for it to finish, and reads its answer (up to 2 retries when
+the answer does not match the schema). A stop cancels the agent. The runner passes no
+environment to the agent: the model credential stays in the proxy box.
+
+- Default on with Docker or Podman, also with `--no-paseo-link` (then without the host in
+  your Paseo). `MASTERMIND_BOX_CONTROL=exec`: the agent runs through `docker exec paseo run`.
+- No connection to the box daemon: the ticket says so and the agent runs through exec.
+- Docker stays for the box lifecycle, the git clone and push with the credential, and big files.
+- Measured on rootless Podman, one agent step with Paseo's mock agent: 6.1 s over the
+  connection, 8.3-10.3 s through `docker exec paseo run`.
+
 ## Routing: which Paseo runs a dispatch
 
 The user who runs the runner decides where work runs. Put `routing.json` next to the

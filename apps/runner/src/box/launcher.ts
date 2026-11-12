@@ -136,7 +136,7 @@ export type BoxModeInput = {
 	/**
 	 * How the runner drives the agent in a box: `exec` (`docker exec paseo
 	 * run`) or `paseo` (one SDK connection over the relay, mm-210.73).
-	 * Default: MASTERMIND_BOX_CONTROL, else `exec`.
+	 * Default: MASTERMIND_BOX_CONTROL, else `paseo`.
 	 */
 	boxControl?: "exec" | "paseo";
 };
@@ -161,7 +161,7 @@ async function withPaseoLink(
 	const open =
 		want?.open ?? (own ? dockerExecStream(dockerEndpoint(i.env)) : null);
 	const control =
-		(i.boxControl ?? i.env.MASTERMIND_BOX_CONTROL?.trim()) === "paseo";
+		(i.boxControl ?? i.env.MASTERMIND_BOX_CONTROL?.trim()) !== "exec";
 	let register = i.paseoLink !== false && i.env.MASTERMIND_PASEO_LINK !== "0";
 	if (!want || !open || (!register && !control))
 		return { driver, control: false };
@@ -187,7 +187,7 @@ async function withPaseoLink(
 	}
 	if (control)
 		i.log(
-			"box control: the agent runs through one Paseo connection to the box daemon (MASTERMIND_BOX_CONTROL=paseo)",
+			"box control: the agent runs through one Paseo connection to the box daemon (MASTERMIND_BOX_CONTROL=exec: through docker exec)",
 		);
 	if (!register && !control) return { driver, control: false };
 	return {
