@@ -64,6 +64,7 @@ import {
 import { type DoctorBox, formatReport, runDoctor } from "./doctor.ts";
 import { EnrolError, enrol } from "./enroll.ts";
 import { PaseoLauncher } from "./launcher.ts";
+import { serveOffers } from "./offer.ts";
 import { serveDoctor } from "./remote-doctor.ts";
 import {
 	decisionLine,
@@ -747,8 +748,9 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 		conn = nc;
 		diag.natsServer = nc.getServer();
 		diag.set("connected");
+		const info = runnerInfo(cfg, settings, routing);
 		runner = new Runner({
-			client: natsClient(nc, runnerInfo(cfg, settings, routing)),
+			client: natsClient(nc, info),
 			launcher: box?.launcher ?? new PaseoLauncher({ host: f["paseo-host"] }),
 			...(box ? { check: box.check } : { noBox: true }),
 			settings,
@@ -760,6 +762,8 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 		});
 		diag.loop = runner;
 		runner.start();
+		// Direct offers: work sent to this runner or its account (mm-210.32).
+		serveOffers(nc, { runner: info, taker: runner, log });
 		// The operator's remote doctor (debug doctor <account>/<runner>).
 		serveDoctor(nc, {
 			account: cfg.account,

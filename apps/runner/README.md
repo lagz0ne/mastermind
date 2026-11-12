@@ -199,6 +199,18 @@ and two rules (work, and enrichment when `--assistant-provider` is set); `--prov
 the bound environments (`RunnerInfo.environments`), so it can skip a runner that cannot
 take one.
 
+## Direct offers: work sent to this runner
+
+Besides the queues, Mastermind can send one item to one address: `<account>/<runner>`
+(this runner) or `<account>` (each online runner of the account in turn). A routing rule
+with `to`, or "send to" on the item, does that. The runner gets an OFFER on
+`mm.u.<account>.r.<runner>.offer` and answers at once: accept, or decline with the reason.
+It uses the same decision as for queue work: a free slot (a poll that only waits does not
+count) and its routing (the item's `queue` is `to:<address>`, so a rule that matches only
+queue `q` declines it). On accept Mastermind claims the item and sends the dispatch back;
+then it runs like queue work. A decline, or no answer in 5 s, shows on the item with the
+reason, and the next runner gets the offer.
+
 ## Running agents
 
 `paseo run --output-schema` starts the agent (labels `mastermind.execution`,

@@ -10,8 +10,13 @@
  *   agent says failed -> release with its reason
  *
  * Agents never talk to Mastermind; the runner reports for them.
+ *
+ * Direct offers (mm-210.32, offer.ts): {@link Runner.consider} answers an
+ * offer with the same capacity and routing decision; an accept holds a slot
+ * until {@link Runner.takeOffer} starts the dispatch or {@link Runner.dropOffer}
+ * gives the slot back.
  */
-import type { Dispatch, RunnerInFlight } from "@mastermind/core";
+import type { DirectOffer, Dispatch, RunnerInFlight } from "@mastermind/core";
 import { NO_BOX_REPORT } from "./box/run.ts";
 import { type CheckResult, checkDispatch, type SetupMemory } from "./check.ts";
 import {
@@ -71,6 +76,26 @@ class Slots {
 	get free() {
 		return this.#free;
 	}
+	/** Slots taken ahead (see borrow); the next releases pay them back. */
+	#debt = 0;
+	/** Take a slot now if one is free; never waits. */
+	tryAcquire(): boolean {
+		if (this.#free <= 0) return false;
+		this.#free--;
+		return true;
+	}
+	/**
+	 * Take a slot that a poller holds only while it waits on `next`: the next
+	 * release pays it back instead of freeing a slot.
+	 */
+	borrow(): void {
+		this.#debt++;
+	}
+	/** Give back a slot from tryAcquire or borrow. */
+	giveBack(): void {
+		if (this.#debt > 0) this.#debt--;
+		else this.release();
+	}
 	/** Resolves with a slot; on abort it resolves without one (check the signal). */
 	acquire(signal?: AbortSignal): Promise<void> {
 		if (this.#free > 0) {
@@ -93,6 +118,10 @@ class Slots {
 		});
 	}
 	release(): void {
+		if (this.#debt > 0) {
+			this.#debt--;
+			return;
+		}
 		const next = this.#waiters.shift();
 		if (next) next();
 		else this.#free++;
@@ -174,6 +203,8 @@ export class Runner {
 	readonly #stop = new AbortController();
 	readonly #wake = new Map<string, AbortController>();
 	#pollers: Promise<void>[] = [];
+	/** Offers accepted, waiting for Mastermind's dispatch. */
+	#accepted = 0;
 	#unsubscribe: (() => void)[] = [];
 	/** For diagnostics: when the last `next` answered, and how. */
 	lastNextAt: string | null = null;
@@ -232,6 +263,58 @@ export class Runner {
 		this.lastNextAt = new Date().toISOString();
 		this.lastNextResult = r;
 		this.#changed();
+	}
+
+	/**
+	 * Answer a direct offer: a free slot and this runner's routing decision.
+	 * An accept holds the slot: then call takeOffer or dropOffer.
+	 */
+	consider(
+		offer: DirectOffer,
+	): { accept: true } | { accept: false; reason: string } {
+		if (this.#stopped)
+			return { accept: false, reason: "the runner is stopping" };
+		const { settings } = this.#o;
+		const decision = route(offer, this.#routing, settings.providers, {
+			agentProvider: settings.agent.provider,
+			available: this.#o.providerStatus?.(),
+		});
+		const id = offer.bead.id;
+		if (!decision.ok) {
+			this.lastDecision = `${id}: offer declined: ${decision.reason}`;
+			this.#changed();
+			return { accept: false, reason: decision.reason };
+		}
+		// Real work only: a poller holds a slot while it waits on `next`.
+		const busy = this.#running.size + this.#accepted;
+		if (settings.capacity !== null && busy >= settings.capacity) {
+			const reason = `at capacity (${busy} of ${settings.capacity} busy)`;
+			this.lastDecision = `${id}: offer declined: ${reason}`;
+			this.#changed();
+			return { accept: false, reason };
+		}
+		// No free slot: the pollers hold them; take one ahead. A poll that
+		// answers with work at this moment can go one over capacity, briefly.
+		if (!this.#slots.tryAcquire()) this.#slots.borrow();
+		this.#accepted++;
+		return { accept: true };
+	}
+
+	/** Mastermind claimed an accepted offer: run it on the slot consider() took. */
+	takeOffer(dispatch: Dispatch): void {
+		this.#accepted = Math.max(0, this.#accepted - 1);
+		if (this.#stopped) {
+			this.#slots.giveBack();
+			void this.#safe(dispatch, "release", "runner stopped");
+			return;
+		}
+		this.#begin(dispatch);
+	}
+
+	/** An accepted offer did not become a dispatch: give its slot back. */
+	dropOffer(): void {
+		this.#accepted = Math.max(0, this.#accepted - 1);
+		this.#slots.giveBack();
 	}
 
 	/** Start polling every queue. */
