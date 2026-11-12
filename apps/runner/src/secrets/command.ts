@@ -9,6 +9,8 @@
  * A value is never taken from the command line (it would stay in the shell
  * history and in `ps`).
  */
+import { createInterface } from "node:readline/promises";
+import { Writable } from "node:stream";
 import type { SecretsState } from "./state.ts";
 import { isSecretName, SecretStore } from "./store.ts";
 
@@ -48,21 +50,37 @@ export function formatSecrets(s: SecretsState): string[] {
 	return out;
 }
 
-/** Read stdin to the end (piped), or one line typed with echo off (a tty). */
+/**
+ * Read stdin to the end (piped), or one line typed with echo off (a tty).
+ *
+ * On a tty this uses node:readline, the SAME reader as the onboard menus
+ * (onboard-prompt.ts). A second kind of reader on stdin in one process (Bun's
+ * `for await (const line of console)`) fails with "ReadableStream is locked"
+ * after readline has read a line. The output is a sink, so readline's echo of
+ * the typed characters goes nowhere.
+ */
 export async function readSecretFromStdin(prompt: string): Promise<string> {
 	if (!process.stdin.isTTY) {
 		const text = await Bun.stdin.text();
 		return text.replace(/\r?\n$/, "");
 	}
+	const sink = new Writable({
+		write(_chunk, _encoding, done) {
+			done();
+		},
+	});
+	// Raw mode first, then the prompt: a value pasted the moment the prompt
+	// shows must not be echoed by the terminal itself.
+	const rl = createInterface({
+		input: process.stdin,
+		output: sink,
+		terminal: true,
+	});
 	process.stderr.write(prompt);
-	const stty = (arg: string) =>
-		Bun.spawnSync(["stty", arg], { stdin: "inherit" });
-	stty("-echo");
 	try {
-		for await (const line of console) return line;
-		return "";
+		return await rl.question("");
 	} finally {
-		stty("echo");
+		rl.close();
 		process.stderr.write("\n");
 	}
 }
