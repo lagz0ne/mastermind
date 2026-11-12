@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
+import { generateKeyPairSync } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -509,6 +510,203 @@ describe("runInBox", () => {
 		expect(res.output).toBeUndefined();
 		expect(cmdLines(d).some((l) => l.includes("git bundle"))).toBe(false);
 		expect(host.calls).toEqual([]);
+	});
+});
+
+describe("runInBox: GitHub App token per task (mm-210.69)", () => {
+	const PEM = generateKeyPairSync("rsa", { modulusLength: 2048 })
+		.privateKey.export({ type: "pkcs1", format: "pem" })
+		.toString();
+	const HOUR = 60 * 60_000;
+	const T0 = Date.parse("2026-11-12T10:00:00Z");
+	/** Fake GitHub: installation lookup, token minting (ghs_1, ghs_2, ...), pulls. */
+	function fakeGitHub(o: { installed?: boolean } = {}) {
+		const calls: {
+			method: string;
+			url: string;
+			auth: string;
+			body: unknown;
+		}[] = [];
+		let minted = 0;
+		const fetch = (async (url: string, init: RequestInit = {}) => {
+			const method = init.method ?? "GET";
+			const auth = String(
+				(init.headers as Record<string, string>)?.authorization ??
+					(init.headers as Record<string, string>)?.Authorization ??
+					"",
+			);
+			calls.push({
+				method,
+				url,
+				auth,
+				body: init.body ? JSON.parse(String(init.body)) : undefined,
+			});
+			if (url.endsWith("/repos/acme/web/installation"))
+				return o.installed === false
+					? Response.json({ message: "Not Found" }, { status: 404 })
+					: Response.json({ id: 77 });
+			if (url.endsWith("/app/installations/77/access_tokens"))
+				return Response.json(
+					{
+						token: `ghs_${++minted}`,
+						expires_at: new Date(T0 + HOUR).toISOString(),
+					},
+					{ status: 201 },
+				);
+			return method === "POST"
+				? Response.json({ html_url: "https://github.com/acme/web/pull/3" })
+				: Response.json([]);
+		}) as unknown as typeof globalThis.fetch;
+		return { calls, fetch, mints: () => minted };
+	}
+	const appTask = () => {
+		const base = task();
+		return task({
+			env: { ...base.env, output: { kind: "pr" } },
+			secrets: {
+				...base.secrets,
+				GITHUB_APP_ID: "123",
+				GITHUB_APP_PRIVATE_KEY: PEM,
+				GITHUB_APP_SLUG: "mm-runner",
+			},
+		});
+	};
+	const prDriver = () => {
+		const d = new FakeDriver();
+		d.handler = (cmd) =>
+			cmd[0] === "git" && cmd[1] === "rev-list"
+				? { code: 0, stdout: "1\n", stderr: "" }
+				: undefined;
+		return d;
+	};
+
+	test("one token for the one repo; access check, clone, push and PR API use it; the app key never reaches the box or a log", async () => {
+		const d = prDriver();
+		const gh = fakeGitHub();
+		const host = fakeHost();
+		const steps: string[] = [];
+		const prepared: Record<string, string>[] = [];
+		const res = await runInBox(
+			appTask(),
+			{
+				...opts(d),
+				fetch: gh.fetch,
+				hostRun: host.run,
+				now: () => T0,
+				log: (l) => steps.push(l),
+				onStep: (l) => steps.push(l),
+				prepare: async (t) => {
+					prepared.push(t.secrets);
+					return null;
+				},
+			},
+			never,
+		);
+		expect(res.status).toBe("done");
+		expect(gh.mints()).toBe(1);
+		const mint = gh.calls.find((c) => c.url.endsWith("/access_tokens"));
+		expect(mint?.body).toEqual({
+			repositories: ["web"],
+			permissions: { contents: "write", pull_requests: "write" },
+		});
+		expect(mint?.auth).toMatch(/^Bearer ey/); // the app JWT, not the key
+		// the access check (prepare) gets the token, not the app key
+		expect(prepared[0]?.GIT_TOKEN).toBe("ghs_1");
+		expect(prepared[0]?.GITHUB_APP_PRIVATE_KEY).toBeUndefined();
+		// the clone: the token only in the env of that one command
+		const clone = d.execs.find((e) => e.cmd.join(" ").includes("git fetch"));
+		expect(clone?.opts.env?.MM_GIT_TOKEN).toBe("ghs_1");
+		// the push on this machine and the PR API
+		expect(host.calls.find((c) => c.cmd[1] === "push")?.env.MM_GIT_TOKEN).toBe(
+			"ghs_1",
+		);
+		const pr = gh.calls.filter((c) => c.url.includes("/pulls"));
+		expect(pr.map((c) => c.auth)).toEqual(["Bearer ghs_1", "Bearer ghs_1"]);
+		expect(res.output?.prUrl).toBe("https://github.com/acme/web/pull/3");
+		// never in the box (env, files, argv) nor in a log or ticket line
+		expect(d.created[0]?.env).toEqual({
+			...BOX_ENV,
+			CLAUDE_CODE_OAUTH_TOKEN: SECRET,
+		});
+		expect(d.copiedIn[0]?.names).toEqual([
+			"CLAUDE_CODE_OAUTH_TOKEN",
+			"deploy.key",
+		]);
+		const everything = JSON.stringify([
+			d.created,
+			d.copiedIn,
+			d.execs.map((e) => e.cmd),
+			host.lines(),
+			steps,
+		]);
+		for (const v of ["PRIVATE KEY", PEM.slice(40, 80), "ghs_1"])
+			expect(everything).not.toContain(v);
+		expect(steps).toContain(
+			"GitHub App token for acme/web (contents, pull requests write) until 11:00 UTC",
+		);
+	});
+
+	test("a long task: under 10 min left, a new token is minted for the push", async () => {
+		const d = prDriver();
+		const gh = fakeGitHub();
+		const host = fakeHost();
+		let clock = T0;
+		d.handler = (cmd) => {
+			if (cmd[1] === "run") clock = T0 + HOUR - 5 * 60_000;
+			return cmd[0] === "git" && cmd[1] === "rev-list"
+				? { code: 0, stdout: "1\n", stderr: "" }
+				: undefined;
+		};
+		const res = await runInBox(
+			appTask(),
+			{ ...opts(d), fetch: gh.fetch, hostRun: host.run, now: () => clock },
+			never,
+		);
+		expect(res.status).toBe("done");
+		expect(gh.mints()).toBe(2);
+		const clone = d.execs.find((e) => e.cmd.join(" ").includes("git fetch"));
+		expect(clone?.opts.env?.MM_GIT_TOKEN).toBe("ghs_1");
+		expect(host.calls.find((c) => c.cmd[1] === "push")?.env.MM_GIT_TOKEN).toBe(
+			"ghs_2",
+		);
+		const pr = gh.calls.filter((c) => c.url.includes("/pulls"));
+		expect(pr.map((c) => c.auth)).toEqual(["Bearer ghs_2", "Bearer ghs_2"]);
+	});
+
+	test("the app is not installed on the repo: no box, the reason names the fix", async () => {
+		const d = prDriver();
+		const gh = fakeGitHub({ installed: false });
+		const err = await runInBox(
+			appTask(),
+			{ ...opts(d), fetch: gh.fetch, hostRun: fakeHost().run },
+			never,
+		).catch((e) => e);
+		expect(err).toBeInstanceOf(BoxStepError);
+		expect(err.message).toContain(
+			"the GitHub App is not installed on acme/web",
+		);
+		expect(d.created).toEqual([]);
+	});
+
+	test("no app secrets: no token is minted; the GIT_TOKEN way is unchanged", async () => {
+		const d = prDriver();
+		const gh = fakeGitHub();
+		const host = fakeHost();
+		const base = task();
+		const t = task({
+			env: { ...base.env, output: { kind: "pr" } },
+			secrets: { ...base.secrets, GIT_TOKEN: "github_pat_x" },
+		});
+		await runInBox(
+			t,
+			{ ...opts(d), fetch: gh.fetch, hostRun: host.run },
+			never,
+		);
+		expect(gh.mints()).toBe(0);
+		expect(gh.calls.some((c) => c.url.includes("installation"))).toBe(false);
+		expect(host.calls.find((c) => c.cmd[1] === "push")?.env.MM_GIT_TOKEN).toBe(
+			"github_pat_x",
+		);
 	});
 });
 

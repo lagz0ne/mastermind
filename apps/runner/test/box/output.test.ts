@@ -2,6 +2,7 @@
 // runner's push reaches it through url.insteadOf); the GitHub REST API is a
 // fake fetch.
 import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { generateKeyPairSync } from "node:crypto";
 import {
 	mkdirSync,
 	mkdtempSync,
@@ -14,6 +15,7 @@ import { join } from "node:path";
 import { type HostRun, hostRun } from "../../src/box/devcontainer.ts";
 import type { ExecResult } from "../../src/box/driver.ts";
 import {
+	appToken,
 	CLONE_CRED_DIR,
 	cloneCredential,
 	deliverOutput,
@@ -458,5 +460,55 @@ describe("helpers", () => {
 		expect(outputBranch("mm-210.53")).toBe("mm/mm-210.53");
 		expect(outputBranch("a b/c")).toBe("mm/a-b-c");
 		expect(redact("x abcd y abcd", { A: "abcd", B: "" })).toBe("x *** y ***");
+	});
+});
+
+describe("appToken (mm-210.69)", () => {
+	test("null without both app secrets or for a repo not on github.com: no API call", async () => {
+		let calls = 0;
+		const fetch = (async () => {
+			calls++;
+			return Response.json({});
+		}) as unknown as typeof globalThis.fetch;
+		const repo = "https://github.com/acme/web.git";
+		expect(await appToken({ GIT_TOKEN: "t" }, repo, { fetch })).toBeNull();
+		expect(await appToken({ GITHUB_APP_ID: "1" }, repo, { fetch })).toBeNull();
+		expect(
+			await appToken(
+				{ GITHUB_APP_ID: "1", GITHUB_APP_PRIVATE_KEY: "k" },
+				"https://gitlab.com/acme/web.git",
+				{ fetch },
+			),
+		).toBeNull();
+		expect(calls).toBe(0);
+	});
+
+	test("the token replaces GIT_TOKEN; the app secrets are dropped; the rest is kept", async () => {
+		const pem = generateKeyPairSync("rsa", { modulusLength: 2048 })
+			.privateKey.export({ type: "pkcs1", format: "pem" })
+			.toString();
+		const fetch = (async (url: string) =>
+			url.endsWith("/installation")
+				? Response.json({ id: 5 })
+				: Response.json({
+						token: "ghs_new",
+						expires_at: "2026-11-12T11:00:00Z",
+					})) as unknown as typeof globalThis.fetch;
+		const got = await appToken(
+			{
+				GITHUB_APP_ID: "1",
+				GITHUB_APP_PRIVATE_KEY: pem,
+				GITHUB_APP_SLUG: "s",
+				GIT_TOKEN: "old",
+				GIT_SSH_KEY: "key",
+			},
+			"git@github.com:acme/web.git",
+			{ fetch },
+		);
+		expect(got).toEqual({
+			secrets: { GIT_TOKEN: "ghs_new", GIT_SSH_KEY: "key" },
+			expiresAt: Date.parse("2026-11-12T11:00:00Z"),
+			repo: "acme/web",
+		});
 	});
 });

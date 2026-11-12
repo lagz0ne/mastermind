@@ -51,6 +51,9 @@ import {
 import type { BoxFiles } from "./files.ts";
 import { QUIET_PASEO_ENV } from "./image.ts";
 import {
+	APP_TOKEN_MIN_LEFT_MS,
+	type AppToken,
+	appToken,
 	CLONE_CRED_DIR,
 	cloneCredential,
 	deliverOutput,
@@ -109,6 +112,8 @@ export type BoxRunOptions = {
 	githubApi?: string;
 	/** Git on this machine, for the push after the agent; default: spawn. */
 	hostRun?: HostRun;
+	/** Clock (epoch ms) for the GitHub App token's expiry; default Date.now. */
+	now?: () => number;
 	/** The item's files (inputs in, outputs out); null or absent: none. */
 	files?: () => BoxFiles | null;
 	/**
@@ -220,10 +225,43 @@ export async function runInBox(
 	try {
 		if (all.aborted) throw stopped();
 		const t0 = Date.now();
+		// GitHub App (mm-210.69): one token for this one repo, as GIT_TOKEN for
+		// the access check, the clone, the push and the PR API. The app key
+		// stays in this process.
+		const now = opts.now ?? Date.now;
+		const mint = async (): Promise<AppToken | null> => {
+			if (!env.repo) return null;
+			const f = opts.fetch ?? fetch;
+			try {
+				return await appToken(task.secrets, env.repo, {
+					now: now(),
+					fetch: ((u: string, init: RequestInit = {}) =>
+						f(u, {
+							...init,
+							signal: AbortSignal.any([all, AbortSignal.timeout(30_000)]),
+						})) as typeof fetch,
+				});
+			} catch (error) {
+				if (all.aborted) throw stopped();
+				throw new BoxStepError(
+					error instanceof Error ? error.message : String(error),
+				);
+			}
+		};
+		let app = await mint();
+		const taskSecrets = () => app?.secrets ?? task.secrets;
+		if (app)
+			step(
+				`GitHub App token for ${app.repo} (contents, pull requests write) until ${new Date(app.expiresAt).toISOString().slice(11, 16)} UTC`,
+			);
 		let prep: PreparedBox | null = null;
 		if (opts.prepare)
 			try {
-				prep = await opts.prepare(task, step, all);
+				prep = await opts.prepare(
+					{ ...task, secrets: taskSecrets() },
+					step,
+					all,
+				);
 			} catch (error) {
 				if (all.aborted) throw stopped();
 				throw new BoxStepError(
@@ -232,10 +270,9 @@ export async function runInBox(
 			}
 		if (all.aborted) throw stopped();
 		// The git credential stays on this machine; the rest goes into the box.
-		const { git: gitSecrets, box: secrets } = splitGitSecrets({
-			...task.secrets,
-			...prep?.secrets,
-		});
+		const split = splitGitSecrets({ ...taskSecrets(), ...prep?.secrets });
+		let gitSecrets = split.git;
+		const secrets = split.box;
 		const image = prep
 			? prep.image
 			: await driver.ensureImage({
@@ -498,6 +535,15 @@ export async function runInBox(
 		// Code leaves through the git host: branch mm/<item>, pull request.
 		if (base && result.status === "done") {
 			try {
+				// A long task: the app token needs 10 min left for the push.
+				if (app && app.expiresAt - now() < APP_TOKEN_MIN_LEFT_MS) {
+					app = await mint();
+					gitSecrets = splitGitSecrets({
+						...taskSecrets(),
+						...prep?.secrets,
+					}).git;
+					step("GitHub App token minted again for the push");
+				}
 				const out = await deliverOutput({
 					exec: (cmd) => run(cmd),
 					takeOut: async (path) => {

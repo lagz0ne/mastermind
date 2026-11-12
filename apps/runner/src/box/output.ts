@@ -21,6 +21,11 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { EnvironmentOutput } from "@mastermind/core";
+import {
+	GITHUB_APP_ID,
+	GITHUB_APP_PRIVATE_KEY,
+	installationToken,
+} from "../github.ts";
 import { gitEnv, type HostRun, hostRun } from "./devcontainer.ts";
 import type { ExecResult } from "./driver.ts";
 
@@ -143,6 +148,55 @@ export function splitGitSecrets(secrets: Record<string, string>): {
 	for (const [k, v] of Object.entries(secrets))
 		(GIT_CREDENTIAL_SECRETS.includes(k) ? git : box)[k] = v;
 	return { git, box };
+}
+
+/** Mint the app token again when it has less than this left (before the push). */
+export const APP_TOKEN_MIN_LEFT_MS = 10 * 60_000;
+
+export type AppToken = {
+	/** The secrets with GIT_TOKEN = the installation token; no app secrets. */
+	secrets: Record<string, string>;
+	/** When the token ends (epoch ms). */
+	expiresAt: number;
+	/** `owner/name` it is for. */
+	repo: string;
+};
+
+/**
+ * The GitHub App way (mm-210.69): when `secrets` have GITHUB_APP_ID and
+ * GITHUB_APP_PRIVATE_KEY and `repo` is on github.com, mint an installation
+ * token for that ONE repo (contents + pull requests write, 1 h) and use it as
+ * GIT_TOKEN for the access check, the clone, the push and the PR API. The app
+ * key stays in this process: the returned secrets do not hold it. Null: no
+ * app (or not GitHub), the GIT_TOKEN / GITHUB_TOKEN / GIT_SSH_KEY way is
+ * unchanged. Throws GitHubError with the fix (never a secret value).
+ */
+export async function appToken(
+	secrets: Record<string, string>,
+	repo: string,
+	o: { fetch?: typeof fetch; now?: number } = {},
+): Promise<AppToken | null> {
+	const appId = secrets[GITHUB_APP_ID];
+	const pem = secrets[GITHUB_APP_PRIVATE_KEY];
+	const gh = githubRepo(repo);
+	if (!appId || !pem || !gh) return null;
+	const now = o.now ?? Date.now();
+	const t = await installationToken({
+		appId,
+		pem,
+		repo,
+		now,
+		...(o.fetch ? { fetch: o.fetch } : {}),
+	});
+	const out: Record<string, string> = {};
+	for (const [k, v] of Object.entries(secrets))
+		if (!GITHUB_APP_SECRETS.includes(k)) out[k] = v;
+	out.GIT_TOKEN = t.token;
+	return {
+		secrets: out,
+		expiresAt: Date.parse(t.expiresAt) || now + 60 * 60_000,
+		repo: `${gh.owner}/${gh.repo}`,
+	};
 }
 
 /**
