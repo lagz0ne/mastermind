@@ -46,3 +46,15 @@ describe("default box image", () => {
 		expect(BOX_IMAGE_REPO).toBe("ghcr.io/lagz0ne/mastermind");
 	});
 });
+
+describe("the runner uses it", () => {
+	test("launcher default and quiet daemon env in every box", async () => {
+		const { DEFAULT_BOX_IMAGE: fromLauncher } = await import(
+			"../../src/box/launcher.ts"
+		);
+		const { BOX_ENV } = await import("../../src/box/run.ts");
+		expect(fromLauncher).toBe(DEFAULT_BOX_IMAGE);
+		expect(BOX_ENV).toMatchObject(QUIET_PASEO_ENV);
+		expect(BOX_ENV.PASEO_LISTEN).toBe("127.0.0.1:6767");
+	});
+});

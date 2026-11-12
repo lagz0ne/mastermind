@@ -29,6 +29,7 @@ import {
 	BoxError,
 	type ExecResult,
 } from "./driver.ts";
+import { QUIET_PASEO_ENV } from "./image.ts";
 import {
 	deliverOutput,
 	gitCredentialScript,
@@ -96,10 +97,13 @@ export class BoxStepError extends LaunchError {
 	override name = "BoxStepError";
 }
 
-/** The Paseo daemon in the box listens only inside the box, without its web UI. */
+/**
+ * The Paseo daemon in the box listens only inside the box, without its web UI
+ * and without speech (no local speech model download), in any image.
+ */
 export const BOX_ENV: Record<string, string> = {
+	...QUIET_PASEO_ENV,
 	PASEO_LISTEN: "127.0.0.1:6767",
-	PASEO_WEB_UI_ENABLED: "false",
 };
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;

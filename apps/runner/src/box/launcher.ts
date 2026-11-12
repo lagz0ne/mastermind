@@ -20,6 +20,7 @@ import { missingReason, resolveSecrets } from "../secrets/needs.ts";
 import { SecretStore, secretsPath } from "../secrets/store.ts";
 import { DockerDriver } from "./docker.ts";
 import type { BoxDriver } from "./driver.ts";
+import { DEFAULT_BOX_IMAGE } from "./image.ts";
 import { type BoxRunOptions, runInBox, sweepBoxes, WORKSPACE } from "./run.ts";
 
 export type BoxCheckDeps = {
@@ -96,8 +97,8 @@ export class BoxLauncher implements AgentLauncher {
 	}
 }
 
-/** Base image when neither the environment nor the runner names one. */
-export const DEFAULT_BOX_IMAGE = "ghcr.io/getpaseo/paseo:0.15.4";
+/** Image when neither the environment nor the runner names one (image.ts). */
+export { DEFAULT_BOX_IMAGE };
 
 export type BoxModeInput = {
 	runnerId: string;

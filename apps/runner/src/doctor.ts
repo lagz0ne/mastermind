@@ -25,6 +25,7 @@ import { type ConnectOptions, connect, subjects } from "@mastermind/bus";
 import type { Dispatch } from "@mastermind/core";
 import type { Box, BoxDriver } from "./box/driver.ts";
 import { BOX_LABEL } from "./box/driver.ts";
+import { DEFAULT_BOX_IMAGE } from "./box/image.ts";
 import { BOX_ENV } from "./box/run.ts";
 import {
 	type CredentialState,
@@ -794,7 +795,7 @@ export async function runDoctor(
 						const logs = await b.logs(10).catch(() => "");
 						st.fail(
 							`the agent host in the box does not answer within ${timeout / 1000} s: ${paseoError(r)}${logs ? ` | box log: ${logs.replace(/\s+/g, " ").trim().slice(-300)}` : ""}`,
-							"the image must start the Paseo daemon (default image: ghcr.io/getpaseo/paseo); check --box-image / MASTERMIND_BOX_IMAGE",
+							`the image must start the Paseo daemon (default image: ${DEFAULT_BOX_IMAGE}); check --box-image / MASTERMIND_BOX_IMAGE`,
 						);
 						break;
 					}
