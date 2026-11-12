@@ -35,19 +35,11 @@ import {
 	parseCode,
 	serveManifest,
 } from "./github.ts";
-import {
-	ANTHROPIC_KEYS_URL,
-	boxModelSecret,
-	checkModelSecret,
-	type ModelCheck,
-	modelCheckText,
-	modelCredentialFix,
-} from "./model-check.ts";
 import { fail, pass, type StepResult } from "./onboard.ts";
 
-export { ANTHROPIC_KEYS_URL };
 export const CLAUDE_OAUTH = "CLAUDE_CODE_OAUTH_TOKEN";
 export const ANTHROPIC_KEY = "ANTHROPIC_API_KEY";
+export const ANTHROPIC_KEYS_URL = "https://console.anthropic.com/settings/keys";
 /** Git credential names the box output reads (box/output.ts), besides the app. */
 const GIT_NAMES = ["GIT_TOKEN", GITHUB_TOKEN, "GH_TOKEN", "GIT_SSH_KEY"];
 
@@ -123,18 +115,9 @@ const GIT_MENU: Choice[] = [
 export async function claudeCredential(
 	i: CredentialInput & { choice?: string },
 ): Promise<StepResult> {
-	const f = i.fetch ?? fetch;
-	const stored = boxModelSecret(await i.store.load());
-	if (stored && !i.choice) {
-		// A stored credential is checked too (mm-210.80): the box uses it as is.
-		const c = await checkModelSecret(stored.secret, stored.value, f);
-		if (c.result === "refused")
-			return fail(
-				`Anthropic refuses the stored ${stored.secret}: ${modelCheckText(c)}`,
-				`${modelCredentialFix(stored.secret)} (or: onboard --claude ${stored.secret === CLAUDE_OAUTH ? "setup-token" : "api-key"})`,
-			);
-		return pass(`${stored.secret} stored on this machine${checked(c)}`);
-	}
+	const stored = await i.store.load();
+	const have = [CLAUDE_OAUTH, ANTHROPIC_KEY].find((n) => stored[n]);
+	if (have && !i.choice) return pass(`${have} stored on this machine`);
 	const choice = await pick(
 		i.prompt,
 		i.choice,
@@ -162,14 +145,8 @@ export async function claudeCredential(
 				"this is not a token from claude setup-token (it starts with sk-ant-oat)",
 				`an API key is --claude api-key; else run claude setup-token again`,
 			);
-		const c = await checkModelSecret(CLAUDE_OAUTH, v, f);
-		if (c.result === "refused")
-			return fail(
-				`Anthropic refuses this token: ${modelCheckText(c)}`,
-				modelCredentialFix(CLAUDE_OAUTH),
-			);
 		await i.store.set(CLAUDE_OAUTH, v);
-		return pass(`${CLAUDE_OAUTH} stored on this machine${checked(c)}`);
+		return pass(`${CLAUDE_OAUTH} stored on this machine`);
 	}
 	p.out(
 		`  Make a key: ${ANTHROPIC_KEYS_URL} (one key per runner: you can revoke it alone)`,
@@ -180,20 +157,33 @@ export async function claudeCredential(
 			"no API key",
 			`make one at ${ANTHROPIC_KEYS_URL}, then onboard again (or: mastermind-runner secrets set ${ANTHROPIC_KEY})`,
 		);
-	const c = await checkModelSecret(ANTHROPIC_KEY, v, f);
-	if (c.result === "refused")
+	const check = await checkAnthropicKey(v, i.fetch ?? fetch);
+	if (check === "refused")
 		return fail(
-			`Anthropic refuses this API key: ${modelCheckText(c)}`,
+			"Anthropic refuses this API key",
 			`check the key at ${ANTHROPIC_KEYS_URL}, then onboard again`,
 		);
 	await i.store.set(ANTHROPIC_KEY, v);
-	return pass(`${ANTHROPIC_KEY} stored on this machine${checked(c)}`);
+	return pass(
+		`${ANTHROPIC_KEY} stored on this machine${check === "unchecked" ? " (not checked: no answer from api.anthropic.com)" : ""}`,
+	);
 }
 
-/** The result of the Anthropic check, after 'stored on this machine'. Never the value. */
-function checked(c: ModelCheck): string {
-	if (c.result === "accepted") return ", accepted by Anthropic";
-	return ` (not checked with Anthropic: ${c.result === "unchecked" ? c.why : modelCheckText(c)})`;
+/** GET /v1/models with the key: ok, refused (401/403), or unchecked (network). */
+export async function checkAnthropicKey(
+	key: string,
+	f: Fetch,
+): Promise<"ok" | "refused" | "unchecked"> {
+	try {
+		const res = await f("https://api.anthropic.com/v1/models?limit=1", {
+			headers: { "x-api-key": key, "anthropic-version": "2023-06-01" },
+			signal: AbortSignal.timeout(10_000),
+		});
+		if (res.status === 401 || res.status === 403) return "refused";
+		return res.ok ? "ok" : "unchecked";
+	} catch {
+		return "unchecked";
+	}
 }
 
 export type GitInput = CredentialInput & {
