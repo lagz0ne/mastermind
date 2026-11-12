@@ -121,6 +121,29 @@ describe("debug state", () => {
 		expect(s.accounts).toEqual({ error: "timed out after 20ms" });
 		expect(s.serviceAccounts).toEqual([]);
 	});
+
+	test("dispatcher section: waiters and decisions; off while it starts", async () => {
+		const view = {
+			waiters: { main: [{ actor: "duke/laptop", since: now.toISOString() }] },
+			decisions: [
+				{
+					at: now.toISOString(),
+					kind: "decline" as const,
+					queue: "main",
+					beadId: "a",
+					actor: "duke/laptop",
+					reason: "back-off",
+					count: 2,
+				},
+			],
+		};
+		expect(
+			(await debugState({ ...sources, dispatcher: () => view })).dispatcher,
+		).toEqual(view);
+		expect((await debugState(sources)).dispatcher).toEqual({
+			error: "the dispatcher is off or starting",
+		});
+	});
 });
 
 describe("log ring", () => {

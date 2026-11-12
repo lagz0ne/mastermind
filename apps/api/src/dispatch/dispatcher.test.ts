@@ -4,6 +4,7 @@ import type { NextRequest, ReadyNotice, RunnerInfo } from "@mastermind/core";
 import {
 	checkActor,
 	checkRunner,
+	DECISIONS_KEPT,
 	Dispatcher,
 	type DispatchSeen,
 	ENV_TRIAGE_LABEL,
@@ -619,5 +620,88 @@ describe("named environments", () => {
 		await expect(d.next("alice", "build", bad)).rejects.toThrow(
 			"runner is missing or malformed",
 		);
+	});
+});
+
+describe("debug view (mm-bcm)", () => {
+	const take = (d: Dispatcher, id = "a", queue = "build") =>
+		d.next("alice", queue, runner(id)).then((r) => r.dispatch?.bead.id);
+
+	test("waiters per queue with since; empty again after the wait", async () => {
+		const { d } = setup({ waitMs: 30 });
+		const waiting = take(d, "a", "idle");
+		await Bun.sleep(1);
+		expect(d.debug().waiters).toEqual({
+			idle: [{ actor: "alice/a", since: "2026-11-10T08:00:00.000Z" }],
+		});
+		expect(await waiting).toBeUndefined();
+		expect(d.debug().waiters).toEqual({});
+	});
+
+	test("offers, back-off declines (counted, not repeated), lost races, failed:start", async () => {
+		const { d, work } = setup();
+		work.add({ id: "mm-1" }, "build");
+		expect(await take(d)).toBe("mm-1");
+		await d.release("alice", "mm-1", { actor: "alice/a", reason: "no" });
+		await take(d);
+		await take(d);
+		const { decisions } = d.debug();
+		expect(decisions.map((x) => [x.kind, x.beadId, x.actor, x.count])).toEqual([
+			["offer", "mm-1", "alice/a", 1],
+			["decline", "mm-1", "alice/a", 2],
+		]);
+		expect(decisions[0]?.reason).toStartWith("claimed (on next)");
+		expect(decisions[1]?.reason).toBe(
+			"back-off after release 1 until 2026-11-10T08:01:00.000Z",
+		);
+
+		work.add({ id: "mm-2", priority: 0 }, "build");
+		const claim = work.claim;
+		work.claim = async (id, actor) => {
+			if (id === "mm-2") await claim(id, "bob/other");
+			return claim(id, actor);
+		};
+		await take(d, "b");
+		expect(d.debug().decisions.at(-2)).toMatchObject({
+			kind: "decline",
+			beadId: "mm-2",
+			actor: "alice/b",
+			reason: "lost the claim race (claimed by another)",
+		});
+
+		work.add({ id: "mm-3", labels: [FAILED_START_LABEL] }, "build");
+		await take(d, "c");
+		expect(d.debug().decisions.find((x) => x.beadId === "mm-3")).toMatchObject({
+			kind: "decline",
+			reason: `held back: label ${FAILED_START_LABEL} (reopen to try again)`,
+		});
+		expect(d.debug().decisions.find((x) => x.beadId === "mm-3")?.actor).toBe(
+			undefined,
+		);
+	});
+
+	test("an environment the runner has not bound is a decline with the reason", async () => {
+		const { d, work } = setup();
+		work.add({ id: "mm-1", labels: ["env:web"] }, "build");
+		await d.next("alice", "build", runner("a", { environments: ["api"] }));
+		expect(d.debug().decisions).toMatchObject([
+			{
+				kind: "decline",
+				beadId: "mm-1",
+				actor: "alice/a",
+				reason: "environment not bound by the runner (bound: api)",
+			},
+		]);
+	});
+
+	test("keeps the last DECISIONS_KEPT decisions", async () => {
+		const { d, work } = setup();
+		for (let i = 0; i <= DECISIONS_KEPT; i++) {
+			work.add({ id: `mm-${i}` }, "build");
+			await take(d, `r${i}`);
+		}
+		const { decisions } = d.debug();
+		expect(decisions).toHaveLength(DECISIONS_KEPT);
+		expect(decisions[0]?.beadId).toBe("mm-1");
 	});
 });

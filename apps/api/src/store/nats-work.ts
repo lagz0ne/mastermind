@@ -8,7 +8,7 @@ import { NatsWork, type NatsWorkOptions } from "@mastermind/work";
 import type { NatsConnection } from "@nats-io/nats-core";
 import type { BeadsStore } from "../beads/routes.ts";
 import type { BoardSource } from "../board/routes.ts";
-import type { DispatchSeen } from "../dispatch/dispatcher.ts";
+import type { Dispatcher, DispatchSeen } from "../dispatch/dispatcher.ts";
 import { type DispatchService, startDispatch } from "../dispatch/nats.ts";
 import type { DispatchNats } from "../dispatch/start.ts";
 import type { Work } from "../dispatch/work.ts";
@@ -89,6 +89,8 @@ export type RunningNatsWork = {
 	probe(): Promise<Probe>;
 	/** Health `nats`: the dispatcher's probe, down until it serves. */
 	dispatchProbe(): Promise<"up" | "down">;
+	/** The dispatcher; null until it serves. */
+	dispatcher(): Dispatcher | null;
 	stop(): Promise<void>;
 };
 
@@ -161,6 +163,7 @@ export function startNatsWork(config: NatsWorkConfig): RunningNatsWork {
 		routing: late<RoutingBeads>(() => store),
 		probe: async () => (store ? store.probe() : "down"),
 		dispatchProbe: async () => (dispatch ? dispatch.probe() : "down"),
+		dispatcher: () => dispatch?.dispatcher ?? null,
 		async stop() {
 			stopped = true;
 			await dispatch?.stop();

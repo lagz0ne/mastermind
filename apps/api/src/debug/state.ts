@@ -7,6 +7,7 @@
  */
 import { type Bead, columnOf, leaseState, queueOf } from "@mastermind/core";
 import type { Account, ServiceAccountView } from "../auth/service.ts";
+import type { DispatcherDebug } from "../dispatch/dispatcher.ts";
 import type { RunnerEntry } from "../people/registry.ts";
 import type { ConnectionView } from "./connections.ts";
 import type { LogLine } from "./log-ring.ts";
@@ -26,6 +27,8 @@ export type DebugSources = {
 	/** Every item on the board (open, claimed, recently closed). */
 	items?: (() => Promise<Bead[]>) | null;
 	errors?: () => LogLine[];
+	/** Waiters and recent decisions of this replica's dispatcher; null while it starts. */
+	dispatcher?: () => DispatcherDebug | null;
 	now?: () => Date;
 	/** Per section. Default 5 s. */
 	timeoutMs?: number;
@@ -112,7 +115,7 @@ export async function debugState(src: DebugSources) {
 	const now = (src.now ?? (() => new Date()))();
 	const t = src.timeoutMs ?? 5_000;
 	const auth = () => src.auth?.() ?? off("auth");
-	const [accounts, serviceAccounts, routing, environments, items] =
+	const [accounts, serviceAccounts, routing, environments, items, dispatcher] =
 		await Promise.all([
 			section(
 				async () =>
@@ -142,6 +145,7 @@ export async function debugState(src: DebugSources) {
 					now,
 				);
 			}, t),
+			section(() => src.dispatcher?.() ?? off("the dispatcher"), t),
 		]);
 	return {
 		version: src.version,
@@ -155,6 +159,7 @@ export async function debugState(src: DebugSources) {
 		routing,
 		environments,
 		items,
+		dispatcher,
 		errors: src.errors?.() ?? [],
 	};
 }

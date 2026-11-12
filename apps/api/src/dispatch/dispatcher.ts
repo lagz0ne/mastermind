@@ -14,6 +14,9 @@
  * - sweep: beads whose lease died go back to their queue.
  * - onEvent: a journal event routes a bead with no queue and wakes the waiters
  *   of a queue that has ready work.
+ * - debug(): the waiters per queue and a ring of recent decisions (offers and
+ *   declines with the reason), for GET /api/debug/state. In memory, this
+ *   replica only.
  */
 
 import { BusError } from "@mastermind/bus";
@@ -61,6 +64,33 @@ export const RELEASE_BACKOFF_MS = [60_000, 300_000] as const;
 
 /** Failed starts of a bead (any runner) before it is held back. */
 export const MAX_FAILED_STARTS = 3;
+
+/** Recent decisions kept for the debug view. */
+export const DECISIONS_KEPT = 100;
+
+/**
+ * One decision of the dispatcher about a bead. `offer`: the bead was claimed
+ * for `actor`. `decline`: the bead was not given (to `actor`, if set) and why.
+ * The same decision again updates `at` and adds 1 to `count`.
+ */
+export type DispatchDecision = {
+	at: string;
+	kind: "offer" | "decline";
+	queue: string;
+	beadId: string;
+	actor?: string;
+	reason: string;
+	count: number;
+};
+
+/** What `debug()` shows: runners waiting on `next`, recent decisions (oldest first). */
+export type DispatcherDebug = {
+	waiters: Record<
+		string,
+		{ actor: string; since: string; environments?: string[] }[]
+	>;
+	decisions: DispatchDecision[];
+};
 
 /**
  * What the dispatcher saw of runners, for the live runner list on /people.
@@ -138,6 +168,8 @@ type Waiter = RunnerState & {
 	environments?: string[];
 	actor: string;
 	queue: string;
+	/** When the runner started to wait (ISO). */
+	since: string;
 	resolve: (reply: NextReply) => void;
 	timer: ReturnType<typeof setTimeout>;
 };
@@ -214,6 +246,8 @@ export class Dispatcher {
 	readonly #failed = new Map<string, number>();
 	/** Per-queue lock: one claim pass at a time per queue in this replica. */
 	readonly #locks = new Map<string, Promise<unknown>>();
+	/** Recent decisions, oldest first; at most {@link DECISIONS_KEPT}. */
+	readonly #decisions: DispatchDecision[] = [];
 	#stopped = false;
 
 	constructor(options: DispatcherOptions) {
@@ -232,6 +266,21 @@ export class Dispatcher {
 		return n;
 	}
 
+	/** The waiters per queue and the recent decisions, for the operator. */
+	debug(): DispatcherDebug {
+		const waiters: DispatcherDebug["waiters"] = {};
+		for (const [queue, list] of this.#waiting)
+			waiters[queue] = list.map((w) => ({
+				actor: w.actor,
+				since: w.since,
+				...(w.environments ? { environments: w.environments } : {}),
+			}));
+		return {
+			waiters,
+			decisions: this.#decisions.map((d) => ({ ...d })),
+		};
+	}
+
 	async next(
 		account: string,
 		queue: string,
@@ -245,11 +294,7 @@ export class Dispatcher {
 		const reply = await this.#lock(queue, async () => {
 			const ready = (
 				await this.#dispatchable(queue, await this.#work.ready(queue))
-			).filter(
-				(b) =>
-					this.#bound(runner.environments, b, queue) &&
-					!this.#cooling(actor, b.id),
-			);
+			).filter((b) => this.#eligible(actor, runner.environments, b, queue));
 			const dispatch = await this.#take(state, actor, queue, ready);
 			if (dispatch || this.#stopped || this.#waitMs <= 0) return { dispatch };
 			// Registered under the lock: a ready signal cannot slip in between.
@@ -259,6 +304,7 @@ export class Dispatcher {
 					...(runner.environments ? { environments: runner.environments } : {}),
 					actor,
 					queue,
+					since: this.#now().toISOString(),
 					resolve,
 					timer: setTimeout(() => {
 						this.#drop(waiter);
@@ -289,14 +335,12 @@ export class Dispatcher {
 				if (current.length === 0) break;
 				const waiter = selectWaiter(
 					bead,
-					current.filter(
-						(w) =>
-							this.#bound(w.environments, bead, queue) &&
-							!this.#cooling(w.actor, bead.id),
+					current.filter((w) =>
+						this.#eligible(w.actor, w.environments, bead, queue),
 					),
 				);
 				if (!waiter) continue;
-				const dispatch = await this.#claim(bead, waiter.actor, queue);
+				const dispatch = await this.#claim(bead, waiter.actor, queue, "woken");
 				if (!dispatch) continue;
 				this.#drop(waiter);
 				waiter.resolve({ dispatch });
@@ -402,12 +446,6 @@ export class Dispatcher {
 		}
 	}
 
-	/** Is `actor` in back-off for `beadId`? */
-	#cooling(actor: string, beadId: string): boolean {
-		const c = this.#cool.get(`${actor} ${beadId}`);
-		return c !== undefined && this.#now().getTime() < c.until;
-	}
-
 	/** Drop the back-off and failure count of a bead. */
 	#forget(beadId: string): void {
 		this.#failed.delete(beadId);
@@ -498,7 +536,7 @@ export class Dispatcher {
 		for (;;) {
 			const pick = selectBead(state, queue, left);
 			if (!pick) return null;
-			const dispatch = await this.#claim(pick, actor, queue);
+			const dispatch = await this.#claim(pick, actor, queue, "next");
 			if (dispatch) return dispatch;
 			left = left.filter((b) => b !== pick);
 		}
@@ -509,19 +547,32 @@ export class Dispatcher {
 		bead: Bead,
 		actor: string,
 		queue: string,
+		via: "next" | "woken",
 	): Promise<Dispatch | null> {
+		const lost = (reason: string) => {
+			this.#decide("decline", queue, bead.id, actor, reason);
+			return null;
+		};
 		let claimed: Bead;
 		try {
 			const res = await this.#work.claim(bead.id, actor);
 			// Same actor twice: the other request already got this bead.
-			if (res.alreadyClaimed) return null;
+			if (res.alreadyClaimed) return lost("another request of it got the bead");
 			claimed = res.bead;
 		} catch (error) {
-			if (error instanceof AlreadyClaimed || error instanceof NotFound)
-				return null;
+			if (error instanceof AlreadyClaimed)
+				return lost("lost the claim race (claimed by another)");
+			if (error instanceof NotFound) return lost("bead not found at claim");
 			throw error;
 		}
 		if (!claimed.lease) throw new Error(`claim of ${bead.id} has no lease`);
+		this.#decide(
+			"offer",
+			queue,
+			bead.id,
+			actor,
+			`claimed (${via === "next" ? "on next" : "waiter woken"}); lease until ${claimed.lease.expiresAt}`,
+		);
 		this.#served.set(actor, this.#now().toISOString());
 		this.#see({ kind: "holds", actor, beadId: bead.id });
 		// The claim reply has no labels; the ready list has them.
@@ -542,6 +593,68 @@ export class Dispatcher {
 			env,
 			prompt: withInstructions(promptOf(held, await this.#notes(bead.id)), env),
 		};
+	}
+
+	/** May `actor` take `bead` (bound environments, back-off)? Records why not. */
+	#eligible(
+		actor: string,
+		environments: string[] | undefined,
+		bead: Bead,
+		queue: string,
+	): boolean {
+		if (!this.#bound(environments, bead, queue)) {
+			this.#decide(
+				"decline",
+				queue,
+				bead.id,
+				actor,
+				`environment not bound by the runner (bound: ${environments?.join(", ") || "none"})`,
+			);
+			return false;
+		}
+		const c = this.#cool.get(`${actor} ${bead.id}`);
+		if (c && this.#now().getTime() < c.until) {
+			this.#decide(
+				"decline",
+				queue,
+				bead.id,
+				actor,
+				Number.isFinite(c.until)
+					? `back-off after release ${c.n} until ${new Date(c.until).toISOString()}`
+					: `back-off after release ${c.n}: never again for this runner`,
+			);
+			return false;
+		}
+		return true;
+	}
+
+	/** Add a decision; the same one again moves to the end with count + 1. */
+	#decide(
+		kind: DispatchDecision["kind"],
+		queue: string,
+		beadId: string,
+		actor: string | undefined,
+		reason: string,
+	): void {
+		const same = (d: DispatchDecision) =>
+			d.kind === kind &&
+			d.queue === queue &&
+			d.beadId === beadId &&
+			d.actor === actor &&
+			d.reason === reason;
+		const i = this.#decisions.findIndex(same);
+		const count = i >= 0 ? (this.#decisions[i]?.count ?? 0) + 1 : 1;
+		if (i >= 0) this.#decisions.splice(i, 1);
+		this.#decisions.push({
+			at: this.#now().toISOString(),
+			kind,
+			queue,
+			beadId,
+			...(actor !== undefined ? { actor } : {}),
+			reason,
+			count,
+		});
+		if (this.#decisions.length > DECISIONS_KEPT) this.#decisions.shift();
 	}
 
 	/** May a runner with these bound environments take `bead`? */
@@ -569,7 +682,16 @@ export class Dispatcher {
 	 */
 	async #dispatchable(queue: string, all: Bead[]): Promise<Bead[]> {
 		const ready = all.filter((b) => {
-			if (b.labels.includes(FAILED_START_LABEL)) return false;
+			if (b.labels.includes(FAILED_START_LABEL)) {
+				this.#decide(
+					"decline",
+					queue,
+					b.id,
+					undefined,
+					`held back: label ${FAILED_START_LABEL} (reopen to try again)`,
+				);
+				return false;
+			}
 			// Was held back and the label is gone: a human reopened it.
 			if ((this.#failed.get(b.id) ?? 0) >= MAX_FAILED_STARTS)
 				this.#forget(b.id);
@@ -581,6 +703,14 @@ export class Dispatcher {
 		for (const bead of ready) {
 			const r = resolve(bead, queue);
 			const marked = bead.labels.includes(ENV_TRIAGE_LABEL);
+			if (!r.ok)
+				this.#decide(
+					"decline",
+					queue,
+					bead.id,
+					undefined,
+					`environment does not resolve: ${r.reason}`,
+				);
 			try {
 				if (r.ok) {
 					if (!marked) {

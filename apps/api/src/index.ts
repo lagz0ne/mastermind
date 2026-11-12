@@ -164,6 +164,7 @@ const debug = debugRoutes({
 		environments: () => environments?.store() ?? null,
 		items: natsWork ? () => natsWork.board.board() : null,
 		errors: () => errorLines.lines(),
+		dispatcher: () => natsWork?.dispatcher()?.debug() ?? null,
 	},
 	items: natsWork ? natsWork.beads : null,
 	events: {
