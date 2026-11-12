@@ -1,5 +1,5 @@
 import { useNavigate } from "@tanstack/react-router";
-import { logout, useMe } from "./session.ts";
+import { logout, nameOf, useMe } from "./session.ts";
 
 /** Top bar: who is logged in, and log out. Nothing without a session. */
 export function AccountMenu() {
@@ -8,8 +8,8 @@ export function AccountMenu() {
 	if (!me) return null;
 	return (
 		<div className="flex items-center gap-3 text-xs">
-			<span className="font-medium" title="Logged in as">
-				{me.account}
+			<span className="font-medium" title={`Logged in as ${me.account}`}>
+				{nameOf(me)}
 			</span>
 			{me.auth === "off" ? (
 				<span className="text-[11px] text-signal">auth off</span>

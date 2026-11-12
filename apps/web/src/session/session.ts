@@ -1,13 +1,24 @@
 /**
- * The browser session: who is logged in (`GET /api/people/me`), the CSRF
- * token for writes (`GET /api/auth/me`), and log out. One small store that
+ * The browser session: who is logged in (`GET /api/people/me`), the display
+ * name and the CSRF token for writes (`GET /api/auth/me`), and log out. One small store that
  * the router guard fills and the account menu reads.
  */
 import type { Me, PeopleSetup } from "@mastermind/core";
 import { useSyncExternalStore } from "react";
 
+/**
+ * The logged-in account. `displayName` is the name as it was typed at login
+ * (e.g. Lagz0ne for the id lagz0ne); absent when it equals the id or is unknown.
+ */
+export type SessionMe = Me & { displayName?: string };
+
+/** The name to show for the session: the display name, else the id. */
+export function nameOf(me: SessionMe): string {
+	return me.displayName || me.account;
+}
+
 export type MeResult =
-	| { kind: "ok"; me: Me }
+	| { kind: "ok"; me: SessionMe }
 	/** No session: go to /login. */
 	| { kind: "anon" }
 	/** The server cannot say (auth unconfigured or starting, network down). */
@@ -27,9 +38,28 @@ export async function loadMe(fetcher: Fetch = fetch): Promise<MeResult> {
 		const res = await fetcher("/api/people/me", { credentials: "same-origin" });
 		if (res.status === 401) return { kind: "anon" };
 		if (!res.ok) return { kind: "error", message: await errorOf(res) };
-		return { kind: "ok", me: (await res.json()) as Me };
+		const me = (await res.json()) as Me;
+		const displayName =
+			me.auth === "on" ? await loadDisplayName(fetcher) : undefined;
+		return {
+			kind: "ok",
+			me:
+				displayName && displayName !== me.account ? { ...me, displayName } : me,
+		};
 	} catch (error) {
 		return { kind: "error", message: String(error) };
+	}
+}
+
+/** `GET /api/auth/me` displayName; undefined when the api cannot say. */
+async function loadDisplayName(fetcher: Fetch): Promise<string | undefined> {
+	try {
+		const res = await fetcher("/api/auth/me", { credentials: "same-origin" });
+		if (!res.ok) return undefined;
+		const body = (await res.json()) as { displayName?: unknown };
+		return typeof body.displayName === "string" ? body.displayName : undefined;
+	} catch {
+		return undefined;
 	}
 }
 
@@ -46,22 +76,22 @@ export async function loadSetup(
 
 // --- store ---------------------------------------------------------------
 
-let current: Me | null = null;
+let current: SessionMe | null = null;
 let csrf: string | null = null;
 const listeners = new Set<() => void>();
 
-export function setMe(me: Me | null): void {
+export function setMe(me: SessionMe | null): void {
 	if (me?.account !== current?.account) csrf = null;
 	current = me;
 	for (const l of listeners) l();
 }
 
-export function getMe(): Me | null {
+export function getMe(): SessionMe | null {
 	return current;
 }
 
 /** The logged-in account, or null. */
-export function useMe(): Me | null {
+export function useMe(): SessionMe | null {
 	return useSyncExternalStore(
 		(l) => {
 			listeners.add(l);

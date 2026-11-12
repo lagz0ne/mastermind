@@ -6,6 +6,7 @@ import {
 	isPublicPath,
 	loadMe,
 	logout,
+	nameOf,
 	send,
 	setMe,
 } from "./session.ts";
@@ -45,6 +46,48 @@ describe("loadMe", () => {
 	});
 });
 
+describe("display name", () => {
+	test("logged in as lagz0ne with displayName Lagz0ne, the top bar reads Lagz0ne", async () => {
+		const { fetcher } = fake({
+			"GET /api/people/me": [200, { account: "lagz0ne", auth: "on" }],
+			"GET /api/auth/me": [
+				200,
+				{ account: "lagz0ne", displayName: "Lagz0ne", csrf: "t" },
+			],
+		});
+		expect(await ensureSession("/board", fetcher)).toBe("ok");
+		expect(getMe()).toEqual({
+			account: "lagz0ne",
+			auth: "on",
+			displayName: "Lagz0ne",
+		});
+		expect(nameOf(getMe() as never)).toBe("Lagz0ne");
+	});
+
+	test("the id when there is no other name, auth/me fails, or auth is off", async () => {
+		const same = await loadMe(
+			fake({
+				"GET /api/people/me": [200, { account: "bob", auth: "on" }],
+				"GET /api/auth/me": [200, { account: "bob", displayName: "bob" }],
+			}).fetcher,
+		);
+		expect(same).toEqual({ kind: "ok", me: { account: "bob", auth: "on" } });
+		const failed = await loadMe(
+			fake({
+				"GET /api/people/me": [200, { account: "bob", auth: "on" }],
+				"GET /api/auth/me": [503, { error: "auth is starting" }],
+			}).fetcher,
+		);
+		expect(failed).toEqual({ kind: "ok", me: { account: "bob", auth: "on" } });
+		const off = fake({
+			"GET /api/people/me": [200, { account: "admin", auth: "off" }],
+		});
+		await loadMe(off.fetcher);
+		expect(off.calls.map((c) => c.url)).toEqual(["/api/people/me"]);
+		expect(nameOf({ account: "bob", auth: "on" })).toBe("bob");
+	});
+});
+
 describe("isPublicPath", () => {
 	test("only /login is public (its header shows the wordmark only)", () => {
 		expect(isPublicPath("/login")).toBe(true);
@@ -65,8 +108,9 @@ describe("ensureSession", () => {
 		});
 		expect(await ensureSession("/board", ok.fetcher)).toBe("ok");
 		expect(getMe()?.account).toBe("bob");
+		const checked = ok.calls.length;
 		await ensureSession("/people", ok.fetcher);
-		expect(ok.calls).toHaveLength(1);
+		expect(ok.calls).toHaveLength(checked);
 	});
 
 	test("an api error lets the page load (it shows the error)", async () => {
