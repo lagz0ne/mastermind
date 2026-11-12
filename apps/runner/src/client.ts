@@ -70,6 +70,8 @@ export function natsClient(
 		verbTimeoutMs?: number;
 		/** Mastermind answered `next` with notReady (its readiness gate). */
 		onNotReady?: (reasons: string[]) => void;
+		/** A newer process of this runner runs (mm-210.79): this one should stop. */
+		onSuperseded?: (line: string) => void;
 	} = {},
 ): MastermindClient {
 	const info = typeof runner === "function" ? runner : () => runner;
@@ -91,6 +93,7 @@ export function natsClient(
 				{ runner: info() },
 				{ timeout: opts.nextTimeoutMs ?? NEXT_TIMEOUT_MS },
 			);
+			if (reply?.superseded) opts.onSuperseded?.(reply.superseded);
 			if (reply?.notReady?.length) opts.onNotReady?.(reply.notReady);
 			return reply?.dispatch ?? null;
 		},

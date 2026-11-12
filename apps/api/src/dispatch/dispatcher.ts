@@ -30,6 +30,10 @@
  * - debug(): the waiters per queue and a ring of recent decisions (offers and
  *   declines with the reason), for GET /api/debug/state. In memory, this
  *   replica only.
+ * - sessions (mm-210.79): one live process per runner ({@link RunnerSessions}).
+ *   A `next`, status or offer answer of a process that a newer one replaced
+ *   gets `superseded`; its waiting `next` is answered at once, so a runner
+ *   never waits twice. A runner without session id is held `waitMs` first.
  * - readiness gate (mm-210.59): with `readiness`, a runner gets work (next,
  *   wake-up, offer) only while its last status is `ready`, fresh
  *   ({@link READINESS_FRESH_MS}) and lists the item's environment; items
@@ -87,6 +91,11 @@ import {
 } from "@mastermind/router";
 import { AlreadyClaimed, NotFound, WorkError } from "@mastermind/work";
 import { envOf } from "../beads/env.ts";
+import {
+	type DuplicateSession,
+	RunnerSessions,
+	type SessionClaim,
+} from "./sessions.ts";
 import type { Work } from "./work.ts";
 
 /** How long `next` waits for work before it answers `{dispatch: null}`. */
@@ -144,9 +153,16 @@ export type DispatchDecision = {
 export type DispatcherDebug = {
 	waiters: Record<
 		string,
-		{ actor: string; since: string; environments?: string[] }[]
+		{
+			actor: string;
+			since: string;
+			environments?: string[];
+			session?: string;
+		}[]
 	>;
 	decisions: DispatchDecision[];
+	/** Runners with a second process that is refused (mm-210.79). */
+	sessions?: DuplicateSession[];
 };
 
 /**
@@ -202,6 +218,8 @@ export type DispatcherOptions = {
 	 * queue). Absent or undefined: {@link MAX_ATTEMPTS}.
 	 */
 	maxAttempts?: (bead: Bead) => number | undefined;
+	/** One live session per runner. Default: a new {@link RunnerSessions}. */
+	sessions?: RunnerSessions;
 	now?: () => Date;
 	onError?: (error: unknown) => void;
 };
@@ -254,6 +272,8 @@ export function withInstructions(prompt: string, env: DispatchEnv): string {
 type Waiter = RunnerState & {
 	/** The runner's bound environments; absent: any. */
 	environments?: string[];
+	/** The process's session; absent: a runner older than mm-210.79. */
+	session?: string;
 	actor: string;
 	queue: string;
 	/** When the runner started to wait (ISO). */
@@ -277,7 +297,9 @@ export function checkRunner(account: string, req: NextRequest): RunnerInfo {
 		typeof r.serviceAccount !== "string" ||
 		!strings(r.providers) ||
 		!strings(r.capabilities) ||
-		(r.environments !== undefined && !strings(r.environments))
+		(r.environments !== undefined && !strings(r.environments)) ||
+		(r.session !== undefined && typeof r.session !== "string") ||
+		(r.startedAt !== undefined && typeof r.startedAt !== "string")
 	) {
 		throw new BusError("bad_request", "runner is missing or malformed");
 	}
@@ -346,6 +368,8 @@ export class Dispatcher {
 		{ address: string; until: number; note: string }
 	>();
 	#stopped = false;
+	/** One live process per runner (mm-210.79). */
+	readonly sessions: RunnerSessions;
 
 	constructor(options: DispatcherOptions) {
 		this.#work = options.work;
@@ -353,6 +377,31 @@ export class Dispatcher {
 		this.#waitMs = options.waitMs ?? DEFAULT_WAIT_MS;
 		this.#actor = options.actor ?? "mastermind";
 		this.#now = options.now ?? (() => new Date());
+		this.sessions =
+			options.sessions ??
+			new RunnerSessions({ now: () => this.#now().getTime() });
+	}
+
+	/**
+	 * A request of a runner process (next, status, offer answer): null when it
+	 * may go on, else the `superseded` line. A process that wins answers the
+	 * waiting `next` of the process it replaced.
+	 */
+	session(account: string, runner: string, claim: SessionClaim): string | null {
+		const actor = `${account}/${runner}`;
+		const v = this.sessions.check(actor, claim);
+		if (!v.ok) return v.reason;
+		if (typeof claim.session === "string" && claim.session)
+			for (const list of [...this.#waiting.values()])
+				for (const w of [...list]) {
+					if (w.actor !== actor || w.session === claim.session) continue;
+					const superseded = this.sessions.refusal(actor, w);
+					if (!superseded) continue;
+					this.#drop(w);
+					this.#decide("decline", w.queue, "*", actor, superseded);
+					w.resolve({ dispatch: null, superseded });
+				}
+		return null;
 	}
 
 	/** Number of `next` requests waiting, for tests and health. */
@@ -371,10 +420,12 @@ export class Dispatcher {
 				actor: w.actor,
 				since: w.since,
 				...(w.environments ? { environments: w.environments } : {}),
+				...(w.session ? { session: w.session } : {}),
 			}));
 		return {
 			waiters,
 			decisions: this.#decisions.map((d) => ({ ...d })),
+			sessions: this.sessions.duplicates(),
 		};
 	}
 
@@ -386,6 +437,13 @@ export class Dispatcher {
 		const runner = checkRunner(account, req);
 		const actor = `${account}/${runner.id}`;
 		this.#see({ kind: "next", runner, queue });
+		const superseded = this.session(account, runner.id, runner);
+		if (superseded) {
+			this.#decide("decline", queue, "*", actor, superseded);
+			// An old runner does not know the answer: do not let it spin.
+			if (!runner.session) await this.#hold();
+			return { dispatch: null, superseded };
+		}
 		const notReady = await this.#untilReady(actor);
 		if (notReady.length) {
 			this.#decide(
@@ -410,6 +468,7 @@ export class Dispatcher {
 				const waiter: Waiter = {
 					...state,
 					...(runner.environments ? { environments: runner.environments } : {}),
+					...(runner.session ? { session: runner.session } : {}),
 					actor,
 					queue,
 					since: this.#now().toISOString(),
@@ -753,6 +812,13 @@ export class Dispatcher {
 					lines.push(`${actor}: answered as another runner`);
 					continue;
 				}
+				const superseded = this.session(to.account, runner, ex.runner);
+				if (superseded) {
+					ex.reply({ dispatch: null, reason: superseded });
+					this.#decide("decline", queue, beadId, actor, `offer ${superseded}`);
+					lines.push(`${actor}: ${superseded}`);
+					continue;
+				}
 				let dispatch: Dispatch | null;
 				try {
 					dispatch = await this.#claim(bead, actor, queue, "offer");
@@ -965,6 +1031,13 @@ export class Dispatcher {
 			this.#now().getTime(),
 			env,
 		);
+	}
+
+	/** Wait `waitMs` (less on stop). */
+	async #hold(): Promise<void> {
+		const end = Date.now() + this.#waitMs;
+		while (!this.#stopped && Date.now() < end)
+			await Bun.sleep(Math.min(NOT_READY_POLL_MS, end - Date.now()));
 	}
 
 	/** Wait (up to `waitMs`) until the runner is ready; the reasons if it is not. */

@@ -9,6 +9,10 @@
  * their own diagnostics (`mm.u.<account>.r.<runner>.status`, every 15 s);
  * `listen` keeps the last one per runner.
  *
+ * One live process per runner (mm-210.79): a `next` or status of a process
+ * that a newer one replaced does not change the entry (no flip between two
+ * versions); the entry says `duplicateSession` instead.
+ *
  * With more than one api replica, each one sees only the requests it served;
  * v0 runs one replica.
  */
@@ -16,6 +20,7 @@ import { parseSubject, patterns, subscribe } from "@mastermind/bus";
 import type { RunnerDiagnostics, RunnerInfo } from "@mastermind/core";
 import type { NatsConnection } from "@nats-io/nats-core";
 import type { DispatchSeen } from "../dispatch/dispatcher.ts";
+import { RunnerSessions } from "../dispatch/sessions.ts";
 
 export type RunnerEntry = {
 	account: string;
@@ -35,6 +40,11 @@ export type RunnerEntry = {
 	diagnostics: RunnerDiagnostics | null;
 	/** When this server got that status (ISO); null before one. */
 	statusAt: string | null;
+	/**
+	 * A second process of this runner asks for work and is refused (one line,
+	 * mm-210.79); absent: none.
+	 */
+	duplicateSession?: string;
 };
 
 export type RegistryOptions = {
@@ -42,6 +52,8 @@ export type RegistryOptions = {
 	onlineMs?: number;
 	/** Not heard from for this: dropped. Default 24 h. */
 	forgetMs?: number;
+	/** One live process per runner. Default: a new {@link RunnerSessions}. */
+	sessions?: RunnerSessions;
 	now?: () => Date;
 };
 
@@ -64,23 +76,40 @@ function splitActor(actor: string): [string, string] | null {
 	return [actor.slice(0, i), actor.slice(i + 1)];
 }
 
+function duplicateOf(
+	sessions: RunnerSessions,
+	actor: string,
+): { duplicateSession?: string } {
+	const d = sessions.duplicate(actor);
+	return d ? { duplicateSession: d.line } : {};
+}
+
 export class RunnerRegistry {
 	readonly #entries = new Map<string, Entry>();
 	readonly #listeners = new Set<() => void>();
 	readonly #onlineMs: number;
 	readonly #forgetMs: number;
 	readonly #now: () => Date;
+	readonly #sessions: RunnerSessions;
 
 	constructor(options: RegistryOptions = {}) {
 		this.#onlineMs = options.onlineMs ?? 90_000;
 		this.#forgetMs = options.forgetMs ?? 24 * 60 * 60 * 1000;
 		this.#now = options.now ?? (() => new Date());
+		this.#sessions =
+			options.sessions ??
+			new RunnerSessions({ now: () => this.#now().getTime() });
 	}
 
 	/** Feed for the dispatcher's `observe` option. */
 	readonly observe = (seen: DispatchSeen): void => {
 		const now = this.#now().getTime();
 		if (seen.kind === "next") {
+			const actor = `${seen.runner.account}/${seen.runner.id}`;
+			if (!this.#sessions.check(actor, seen.runner).ok) {
+				this.#changed();
+				return;
+			}
 			const e = this.#entry(seen.runner.account, seen.runner.id, now);
 			e.info = seen.runner;
 			e.queues.add(seen.queue);
@@ -110,6 +139,10 @@ export class RunnerRegistry {
 			!d.runner
 		)
 			return;
+		if (!this.#sessions.check(`${account}/${d.runner}`, d).ok) {
+			this.#changed();
+			return;
+		}
 		const now = this.#now().getTime();
 		const e = this.#entry(account, d.runner, now);
 		e.diagnostics = d;
@@ -168,6 +201,7 @@ export class RunnerRegistry {
 				diagnostics: e.diagnostics,
 				statusAt:
 					e.statusAt === null ? null : new Date(e.statusAt).toISOString(),
+				...duplicateOf(this.#sessions, key),
 			});
 		}
 		return out.sort(

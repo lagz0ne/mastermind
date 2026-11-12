@@ -239,7 +239,9 @@ export async function startDispatch(
 			if (
 				s?.kind === "runnerStatus" &&
 				typeof d?.runner === "string" &&
-				d.runner
+				d.runner &&
+				// A process that a newer one replaced (mm-210.79): not its status.
+				dispatcher.session(s.account, d.runner, d) === null
 			) {
 				presence.seen(s.account, d.runner);
 				statuses.set(`${s.account}/${d.runner}`, {

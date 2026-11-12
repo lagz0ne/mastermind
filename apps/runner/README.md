@@ -57,6 +57,28 @@ updates. **It is off by default** because the runner runs on the user's own mach
 binary should come in only when the owner allows it, and an update stops taking work for a
 while. Turn it on for a machine that only runs the runner.
 
+## One process per runner
+
+`start` writes `runner.pid` next to `runner.json` (PID, runner id, session, version). A second
+`start` with the same config refuses and exits 2:
+
+```
+runner yo-buid already runs here (PID 4242, started 2026-11-12T08:50:00.000Z, version 1948c46); stop it first: mastermind-runner stop
+```
+
+`mastermind-runner stop` sends SIGTERM to that PID only (the runner gives its work back), and
+waits up to 60 s. A `runner.pid` whose process is gone (a crash, a reboot) is replaced at the
+next start. `update` and `onboard` say when a runner still runs with the old binary or settings.
+Prior art: PostgreSQL's `postmaster.pid`.
+
+Each start also makes a **session id**. The runner sends it with `next`, its status and offer
+answers. Mastermind keeps one live session per `<account>/<runner>`: the one that started last
+wins. An older process (on this machine, or a copied config on another one) gets `superseded`,
+logs the line and exits 4. A runner from before this change sends no session: Mastermind refuses
+it while a session is live. `/people` and `debug state` show `duplicate session` while the
+other process still asks. Prior art: the GitHub Actions runner refuses a second session for the
+same runner.
+
 ## Onboarding: no work before the checks pass
 
 A worker gets work only after its checks pass (mm-210.59). The client owns

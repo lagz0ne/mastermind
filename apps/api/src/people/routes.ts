@@ -78,6 +78,7 @@ export function joinRunners(
 			running: e.running,
 			version: e.version,
 			readiness: e.diagnostics?.readiness ?? null,
+			...(e.duplicateSession ? { duplicateSession: e.duplicateSession } : {}),
 		});
 	}
 	for (const sa of sas ?? []) {

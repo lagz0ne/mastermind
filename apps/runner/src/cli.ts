@@ -20,6 +20,7 @@
  *   mastermind-runner doctor [--deep] [--json] [settings]
  *   mastermind-runner secrets [list|set NAME|unset NAME|check] [--json]
  *   mastermind-runner update [--check]
+ *   mastermind-runner stop
  *   mastermind-runner --version
  *
  * Settings: --queue <q> (repeat), --capacity <n|unlimited>, --capability <c> (repeat),
@@ -89,6 +90,14 @@ import {
 } from "./env.ts";
 import { type EnvTestStep, envTest } from "./env-test.ts";
 import { PaseoLauncher } from "./launcher.ts";
+import {
+	acquireLock,
+	LockedError,
+	type LockInfo,
+	lockPath,
+	runningOther,
+	stopRunner,
+} from "./lock.ts";
 import { serveOffers } from "./offer.ts";
 import {
 	fail,
@@ -140,11 +149,14 @@ export const VERSION = process.env.MASTERMIND_RUNNER_VERSION || "dev";
 
 /** Exit codes. */
 /** restart: `start --auto-update` updated the binary; the caller starts it again. */
+/** usage is also: `start` while this runner already runs here (mm-210.79). */
+/** superseded: a newer process of this runner started (here or elsewhere). */
 export const EXIT = {
 	ok: 0,
 	error: 1,
 	usage: 2,
 	revoked: 3,
+	superseded: 4,
 	restart: 75,
 } as const;
 
@@ -242,6 +254,10 @@ const USAGE = `usage:
   mastermind-runner update [--check]
       downloads the runner of the server's version (sha256 checked) and
       replaces this executable; --check only reports
+  mastermind-runner stop
+      ends the runner that runs with this config (by its PID in runner.pid;
+      it gives its work back first); one runner per config: a second start
+      exits 2 with that PID
   mastermind-runner --version
 
 settings: --queue <q>... --capacity <n|unlimited> --capability <c>... --providers a,b
@@ -506,6 +522,8 @@ export async function main(argv: string[], io: Io): Promise<number> {
 				return await cmdEnv(path, rest, f, io);
 			case "update":
 				return await cmdUpdate(path, f, io);
+			case "stop":
+				return await cmdStop(path, io);
 			default:
 				throw new UsageError(`unknown command ${cmd}`);
 		}
@@ -529,6 +547,29 @@ export async function main(argv: string[], io: Io): Promise<number> {
 		}
 		throw error;
 	}
+}
+
+/** A runner process still runs with this config: what to do. */
+function stillRunsLine(l: LockInfo, what: string): string {
+	return `runner ${l.runner} still runs here (PID ${l.pid}, started ${l.startedAt}${l.version ? `, version ${l.version}` : ""}); it uses ${what} only after a restart: mastermind-runner stop, then mastermind-runner start`;
+}
+
+/** `stop`: end the runner of this config by its PID (lock.ts). */
+async function cmdStop(path: string, io: Io): Promise<number> {
+	const r = await stopRunner(lockPath(path));
+	if (r.kind === "not-running") {
+		io.out("no runner runs with this config");
+		return EXIT.ok;
+	}
+	const who = `runner ${r.holder.runner} (PID ${r.holder.pid})`;
+	if (r.kind === "stopped") {
+		io.out(`${who} stopped`);
+		return EXIT.ok;
+	}
+	io.err(
+		`${who} still runs after 60 s (it gives work back first); try again, or: kill ${r.holder.pid}`,
+	);
+	return EXIT.error;
 }
 
 /** A status.json older than this: the runner is probably not running. */
@@ -557,6 +598,10 @@ async function cmdUpdate(path: string, f: Flags, io: Io): Promise<number> {
 		...(io.runVersion ? { runVersion: io.runVersion } : {}),
 	});
 	io.out(updateLine(r));
+	if (r.state === "updated") {
+		const other = await runningOther(lockPath(path));
+		if (other) io.out(stillRunsLine(other, "the new version"));
+	}
 	return EXIT.ok;
 }
 
@@ -986,6 +1031,8 @@ async function cmdOnboard(
 	);
 	if (f.json) io.out(JSON.stringify({ ready: ok, steps: results }, null, 2));
 	if (!ok) return EXIT.error;
+	const other = await runningOther(lockPath(path));
+	if (other) say(stillRunsLine(other, "this onboarding"));
 	if (f.start) return cmdStart(path, f, io);
 	say("start it: mastermind-runner start");
 	return EXIT.ok;
@@ -1172,14 +1219,54 @@ async function cmdRoute(
 	return r.ok ? EXIT.ok : EXIT.error;
 }
 
+/**
+ * One process per config (lock.ts) with its own session id (mm-210.79): a
+ * second start refuses with the PID; Mastermind tells an older process that
+ * a newer one replaced it.
+ */
 async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 	const cfg = await requireConfig(path);
 	const settings = applyFlags(cfg.runner, f, io.cwd);
 	if (!settings.queues.length) throw new UsageError("no queues (--queue)");
+	const session: Session = {
+		session: crypto.randomUUID(),
+		startedAt: new Date().toISOString(),
+	};
+	let lock: Awaited<ReturnType<typeof acquireLock>>;
+	try {
+		lock = await acquireLock(lockPath(path), {
+			pid: process.pid,
+			runner: settings.id,
+			...session,
+			version: VERSION,
+		});
+	} catch (error) {
+		if (!(error instanceof LockedError)) throw error;
+		io.err(error.message);
+		return EXIT.usage;
+	}
+	try {
+		return await runStart(path, f, io, cfg, settings, session);
+	} finally {
+		await lock.release().catch(() => {});
+	}
+}
+
+type Session = { session: string; startedAt: string };
+
+async function runStart(
+	path: string,
+	f: Flags,
+	io: Io,
+	cfg: RunnerConfig,
+	settings: RunnerSettings,
+	session: Session,
+): Promise<number> {
 	const { routing, source } = await routingFor(path, settings, f, io);
 	if (f.save) await saveConfig(path, { ...cfg, runner: settings });
 	const natsUrl = io.env.MASTERMIND_NATS_URL ?? cfg.natsUrl;
 	const diag = new Diagnostics(settings, VERSION);
+	diag.session = session;
 	const log = (line: string) => {
 		io.err(`${stamp()} ${line}`);
 		diag.log(line);
@@ -1230,6 +1317,8 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 	/** Set while --auto-update drains before it restarts (update.ts). */
 	let updating: string | null = null;
 	let restart = false;
+	/** Mastermind's `superseded` line: a newer process of this runner runs. */
+	let superseded: string | null = null;
 	let publishNow = async () => {};
 	const reevaluate = () => {
 		const r = evaluate({
@@ -1314,7 +1403,7 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 		conn = nc;
 		diag.natsServer = nc.getServer();
 		diag.set("connected");
-		const info = runnerInfo(cfg, settings, routing);
+		const info = { ...runnerInfo(cfg, settings, routing), ...session };
 		// `next` names only the environments that are ready here.
 		const nextInfo = (): RunnerInfo => ({
 			...info,
@@ -1328,6 +1417,12 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 					if (line !== notReadySaid)
 						log(`error: Mastermind gives no work: not ready: ${line}`);
 					notReadySaid = line;
+				},
+				onSuperseded: (line) => {
+					if (superseded) return;
+					superseded = line;
+					log(`error: ${line}`);
+					stopping.abort();
 				},
 			}),
 			launcher: noBox
@@ -1482,6 +1577,7 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 		await reporter.stop();
 		if (why === "stop") {
 			await nc.drain().catch(() => {});
+			if (superseded) return EXIT.superseded;
 			return restart ? EXIT.restart : EXIT.ok;
 		}
 		// NATS refuses the credential also while the auth callout is down (a

@@ -56,6 +56,11 @@ export type RunnerView = {
 	 * reports none (not connected, or older than mm-210.59).
 	 */
 	readiness?: RunnerReadiness | null;
+	/**
+	 * A second process of this runner asks for work and is refused (one line,
+	 * mm-210.79); absent: none.
+	 */
+	duplicateSession?: string;
 };
 
 export type AccountsReply = { accounts: AccountView[] };

@@ -272,6 +272,9 @@ export function formatState(s: Any): string {
 			// The runner's own wording (mm-210.77).
 			const notice = runnerVersionNotice(r.version, s.version);
 			if (notice) out.push(`  ${r.account}/${r.runner}: ${notice}`);
+			// Two processes of one runner (mm-210.79).
+			if (r.duplicateSession)
+				out.push(`  ${r.account}/${r.runner}: ${r.duplicateSession}`);
 		}
 	if (!isErr(s.runners))
 		for (const r of s.runners as Any[])
@@ -346,14 +349,20 @@ export function formatState(s: Any): string {
 					w.actor,
 					ago(w.since, now),
 					list(w.environments),
+					w.session ? String(w.session).slice(0, 8) : "-",
 				]),
 			);
 			const decisions = ((v.decisions ?? []) as Any[]).slice(-20);
 			return [
 				"  waiting on next:",
 				waiters.length
-					? table(["queue", "runner", "since", "environments"], waiters)
+					? table(
+							["queue", "runner", "since", "environments", "session"],
+							waiters,
+						)
 					: "    (none)",
+				// Absent before mm-210.79.
+				...((v.sessions ?? []) as Any[]).map((d) => `  ${d.line}`),
 				`  last decisions (${decisions.length} of ${(v.decisions ?? []).length}, newest last):`,
 				decisions.length
 					? table(

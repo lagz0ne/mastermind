@@ -159,6 +159,53 @@ describe("registry", () => {
 	});
 });
 
+describe("registry: two processes of one runner (mm-210.79)", () => {
+	const oldP = {
+		version: "700dcda",
+		session: "aaaa-old",
+		startedAt: "2026-11-12T08:00:00Z",
+	};
+	const newP = {
+		version: "1948c46",
+		session: "bbbb-new",
+		startedAt: "2026-11-12T08:50:00Z",
+	};
+	const status = (s: { session?: string; startedAt?: string }, at: string) =>
+		({ runner: "yo-buid", version: "x", at, ...s }) as RunnerDiagnostics;
+
+	test("the older process does not flip the row; the row says duplicate session", () => {
+		const c = clock();
+		const r = new RunnerRegistry({ now: c.now });
+		const next = (extra: object) =>
+			r.observe({
+				kind: "next",
+				queue: "build",
+				runner: { ...info("yo-buid", "sa1", extra).runner },
+			});
+		next(newP);
+		r.status("alice", status(newP, "new"));
+		// The old runner (no session at all) and an old session keep asking.
+		next({ version: "700dcda" });
+		r.status("alice", status({}, "old"));
+		next(oldP);
+		const [row, ...rest] = r.list();
+		expect(rest).toEqual([]);
+		expect(row?.version).toBe("1948c46");
+		expect(row?.diagnostics?.at).toBe("new");
+		expect(row?.duplicateSession).toStartWith(
+			"duplicate session: another process of runner alice/yo-buid",
+		);
+		expect(joinRunners(r.list(), null)[0]?.duplicateSession).toBe(
+			row?.duplicateSession,
+		);
+		// The old one stopped: the flag goes after the live window.
+		c.advance(60_000);
+		next(newP);
+		c.advance(61_000);
+		expect(r.list()[0]?.duplicateSession).toBeUndefined();
+	});
+});
+
 describe("joinRunners", () => {
 	const sa = (id: string, account = "alice") => ({
 		id,

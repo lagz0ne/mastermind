@@ -190,6 +190,15 @@ export type RunnerInfo = {
 	 * takes any environment. Present: it is offered only these.
 	 */
 	environments?: string[];
+	/**
+	 * One id per runner process (mm-210.79), new at every start. Mastermind
+	 * keeps one live session per `<account>/<runner>`: the newer one wins, an
+	 * older one is told {@link NextReply.superseded}. Absent: a runner older
+	 * than that; it is refused while a session of the same runner is live.
+	 */
+	session?: string;
+	/** When this process started (ISO); compares two sessions. */
+	startedAt?: string;
 };
 
 /**
@@ -221,7 +230,15 @@ export type NextRequest = { runner: RunnerInfo };
  * `notReady`: Mastermind does not give this runner work yet (readiness gate,
  * mm-210.59); each line says why.
  */
-export type NextReply = { dispatch: Dispatch | null; notReady?: string[] };
+export type NextReply = {
+	dispatch: Dispatch | null;
+	notReady?: string[];
+	/**
+	 * A newer process of the same runner runs (mm-210.79): this one gets no
+	 * more work and should stop. The line says which session won.
+	 */
+	superseded?: string;
+};
 
 /** Keep the lease alive while the agent works. */
 export type HeartbeatRequest = { actor: string };
@@ -307,6 +324,9 @@ export type RunnerDiagnostics = {
 	lastErrors: string[];
 	/** Worker readiness (mm-210.59); absent: a runner older than that. */
 	readiness?: RunnerReadiness;
+	/** The process's session (see {@link RunnerInfo.session}); absent: older runner. */
+	session?: string;
+	startedAt?: string;
 };
 
 /**

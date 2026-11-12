@@ -218,6 +218,8 @@ export class Diagnostics {
 	readiness: RunnerReadiness | null = null;
 	/** The version notice (update.ts); null: same version as the server or unknown. */
 	update: string | null = null;
+	/** This process's session (mm-210.79); null: not started by `start`. */
+	session: { session: string; startedAt: string } | null = null;
 	readonly #errors: string[] = [];
 	readonly #listeners = new Set<() => void>();
 
@@ -284,6 +286,7 @@ export class Diagnostics {
 			lastDecision: this.loop?.lastDecision ?? null,
 			checks: this.checks,
 			lastErrors: [...this.#errors],
+			...(this.session ?? {}),
 			...(this.update ? { update: this.update } : {}),
 			...(this.secrets ? { secrets: this.secrets } : {}),
 			...(this.lastDoctor ? { lastDoctor: this.lastDoctor } : {}),

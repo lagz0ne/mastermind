@@ -480,4 +480,67 @@ describe.skipIf(!bin)("readiness gate over NATS (mm-210.59)", () => {
 		);
 		expect(after.dispatch?.bead.id).toBe("mm-r1");
 	});
+
+	test("two processes of one runner (mm-210.79): the newer wins; the older is superseded; one waiter", async () => {
+		const ready = (session: object) =>
+			JSON.stringify({
+				runner: "twin",
+				...session,
+				readiness: {
+					state: "ready",
+					readyEnvironments: [],
+					failedChecks: [],
+					checkedAt: new Date().toISOString(),
+				},
+			});
+		const oldP = {};
+		const newP = { session: "bbbb-new", startedAt: new Date().toISOString() };
+		const ask = (session: object) =>
+			request<NextRequest, NextReply>(
+				runner,
+				subjects.next("alice", "build"),
+				{ runner: { ...next("alice", "twin").runner, ...session } },
+				{ timeout: 5_000 },
+			);
+		const status = subjects.runnerStatus("alice", "twin");
+		// The old runner (no session) is alone and ready: it waits for work.
+		runner.publish(status, ready(oldP));
+		await runner.flush();
+		const older = ask(oldP);
+		await Bun.sleep(50);
+		expect(service.dispatcher.debug().waiters.build).toHaveLength(1);
+		// The new process says it is up: the old one's wait ends.
+		runner.publish(status, ready(newP));
+		await runner.flush();
+		expect((await older).superseded).toContain("sends no session id");
+		// The old one keeps publishing and asking: refused, never a second waiter.
+		runner.publish(
+			status,
+			JSON.stringify({
+				runner: "twin",
+				readiness: {
+					state: "degraded",
+					readyEnvironments: [],
+					failedChecks: [],
+					checkedAt: null,
+				},
+			}),
+		);
+		await runner.flush();
+		const newer = ask(newP);
+		await Bun.sleep(50);
+		expect(service.dispatcher.debug().waiters.build).toEqual([
+			expect.objectContaining({ actor: "alice/twin", session: "bbbb-new" }),
+		]);
+		// The old status did not replace the new one: the newer gets work.
+		work.add({ id: "mm-twin" }, "build");
+		await service.dispatcher.ready("build");
+		expect((await newer).dispatch?.bead.id).toBe("mm-twin");
+		// The old one asks again: refused (after the wait), never a waiter.
+		const again = ask(oldP);
+		await Bun.sleep(50);
+		expect(service.dispatcher.debug().waiters.build).toBeUndefined();
+		expect((await again).superseded).toStartWith("superseded:");
+		expect(service.dispatcher.debug().sessions?.[0]?.actor).toBe("alice/twin");
+	});
 });

@@ -834,3 +834,78 @@ describe("debug view (mm-bcm)", () => {
 		expect(decisions[0]?.beadId).toBe("mm-1");
 	});
 });
+
+describe("one live process per runner (mm-210.79)", () => {
+	const oldP = { session: "aaaa-old", startedAt: "2026-11-12T08:00:00Z" };
+	const newP = { session: "bbbb-new", startedAt: "2026-11-12T08:50:00Z" };
+
+	test("two clients of one runner: the newer wins, the older's wait ends with superseded; one waiter", async () => {
+		const { d, work } = setup({ waitMs: 5_000 });
+		const older = d.next("alice", "build", runner("laptop", oldP));
+		await Bun.sleep(5);
+		expect(d.debug().waiters.build).toHaveLength(1);
+		const newer = d.next("alice", "build", runner("laptop", newP));
+		const r = await older;
+		expect(r.dispatch).toBeNull();
+		expect(r.superseded).toStartWith(
+			"superseded: a newer process of runner alice/laptop",
+		);
+		await Bun.sleep(5);
+		const dbg = d.debug();
+		expect(dbg.waiters.build).toEqual([
+			expect.objectContaining({ actor: "alice/laptop", session: "bbbb-new" }),
+		]);
+		// The older asks again: refused at once, never a second waiter.
+		const again = await d.next("alice", "build", runner("laptop", oldP));
+		expect(again.superseded).toStartWith("superseded:");
+		expect(d.debug().waiters.build).toHaveLength(1);
+		expect(d.debug().sessions?.[0]?.actor).toBe("alice/laptop");
+		// Work goes to the newer one.
+		work.add({ id: "mm-1" }, "build");
+		await d.ready("build");
+		expect((await newer).dispatch?.bead.id).toBe("mm-1");
+		d.stop();
+	});
+
+	test("a runner without session id is refused (after the wait) while a session is live", async () => {
+		const { d, work } = setup({ waitMs: 30 });
+		work.add({ id: "mm-1" }, "build");
+		expect(d.session("alice", "laptop", newP)).toBeNull();
+		const t0 = Date.now();
+		const r = await d.next("alice", "build", runner("laptop"));
+		expect(Date.now() - t0).toBeGreaterThanOrEqual(25);
+		expect(r.dispatch).toBeNull();
+		expect(r.superseded).toContain("sends no session id");
+		expect(work.beads.get("mm-1")?.assignee).toBeFalsy();
+		const decline = d.debug().decisions.at(-1);
+		expect(decline?.kind).toBe("decline");
+		expect(decline?.reason).toStartWith("superseded:");
+		expect(
+			(await d.next("alice", "build", runner("laptop", newP))).dispatch?.bead
+				.id,
+		).toBe("mm-1");
+	});
+
+	test("a status of the newer process ends the older's wait", async () => {
+		const { d } = setup({ waitMs: 5_000 });
+		const older = d.next("alice", "build", runner("laptop", oldP));
+		await Bun.sleep(5);
+		expect(d.session("alice", "laptop", newP)).toBeNull();
+		expect((await older).superseded).toStartWith("superseded:");
+		expect(d.debug().waiters.build).toBeUndefined();
+		expect(d.session("alice", "laptop", oldP)).toStartWith("superseded:");
+	});
+
+	test("session and startedAt must be strings", async () => {
+		const { d } = setup();
+		expect(
+			await code(
+				d.next(
+					"alice",
+					"build",
+					runner("laptop", { session: 5 as unknown as string }),
+				),
+			),
+		).toBe("bad_request");
+	});
+});

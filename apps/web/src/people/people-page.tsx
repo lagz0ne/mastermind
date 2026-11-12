@@ -354,6 +354,15 @@ function RunnerRow({
 						old version: run mastermind-runner update
 					</span>
 				)}
+				{r.duplicateSession && (
+					<span
+						data-doop-id="runner-duplicate"
+						className="font-normal text-[11px] text-signal"
+						title={r.duplicateSession}
+					>
+						duplicate session: stop the other process
+					</span>
+				)}
 				{ready.lines.map((l) => (
 					<span
 						key={l.text}
