@@ -2,7 +2,9 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BOX_LABEL } from "../../src/box/driver.ts";
+import type { HostRun } from "../../src/box/devcontainer.ts";
+import { BOX_LABEL, type ExecResult } from "../../src/box/driver.ts";
+import { CLONE_CRED_DIR } from "../../src/box/output.ts";
 import {
 	BOX_ENV,
 	BoxStepError,
@@ -53,6 +55,25 @@ const opts = (driver: FakeDriver) => ({
 });
 const cmdLines = (d: FakeDriver) => d.execs.map((e) => e.cmd.join(" "));
 
+/** Git on the runner machine (the push), faked: records each command. */
+function fakeHost(
+	over: (cmd: string[]) => ExecResult | undefined = () => undefined,
+) {
+	const calls: { cmd: string[]; env: Record<string, string> }[] = [];
+	const run: HostRun = async (cmd, o = {}) => {
+		calls.push({ cmd, env: o.env ?? {} });
+		const ok = (stdout = ""): ExecResult => ({ code: 0, stdout, stderr: "" });
+		const r = over(cmd);
+		if (r) return r;
+		if (cmd[1] === "rev-parse")
+			return ok("f00d000000000000000000000000000000000001\n");
+		if (cmd[1] === "rev-list") return ok("2\n");
+		if (cmd[1] === "diff") return ok("a\nb\n");
+		return ok();
+	};
+	return { calls, run, lines: () => calls.map((c) => c.cmd.join(" ")) };
+}
+
 describe("runInBox", () => {
 	test("makes, fills, runs, takes out and deletes the box", async () => {
 		const d = new FakeDriver();
@@ -102,7 +123,11 @@ describe("runInBox", () => {
 		expect(d.execs[0]?.opts.user).toBe("root");
 		expect(at("mkdir -p /workspace")).toBe(2);
 		expect(d.execs[2]?.opts.user).toBe("root");
-		for (const e of d.execs.slice(3)) expect(e.opts.user).toBe("paseo");
+		for (const e of d.execs.slice(3))
+			if (!e.cmd.includes(CLONE_CRED_DIR)) expect(e.opts.user).toBe("paseo");
+		expect(at(`rm -rf ${CLONE_CRED_DIR}`)).toBeGreaterThan(at("git fetch"));
+		expect(at(`rm -rf ${CLONE_CRED_DIR}`)).toBeLessThan(at("bun install"));
+		expect(d.execs[at(`rm -rf ${CLONE_CRED_DIR}`)]?.opts.user).toBe("root");
 		expect(at("git fetch")).toBeLessThan(at("bun install"));
 		expect(at("bun install")).toBeLessThan(at("bun test"));
 		expect(at("bun test")).toBeLessThan(at("paseo status"));
@@ -282,15 +307,61 @@ describe("runInBox", () => {
 		expect(cmdLines(d).some((l) => l.startsWith("paseo"))).toBe(false);
 	});
 
-	test("output pr: credential before the clone, push and pull request after the agent, line in the result", async () => {
+	test("git credential: only in the env of the clone command; never box env, a secret file or the agent's env", async () => {
 		const d = new FakeDriver();
-		d.handler = (cmd) => {
-			if (cmd[0] !== "git") return undefined;
-			if (cmd[1] === "rev-list") return { code: 0, stdout: "2\n", stderr: "" };
-			if (cmd[1] === "diff" && cmd[2] === "--name-only")
-				return { code: 0, stdout: "a\nb\n", stderr: "" };
-			return undefined;
-		};
+		const base = task();
+		const t = task({
+			env: { ...base.env, output: { kind: "pr" } },
+			secrets: {
+				...base.secrets,
+				GITHUB_TOKEN: "ghp_value",
+				GIT_SSH_KEY: "ssh-key-value",
+			},
+		});
+		const host = fakeHost();
+		const fetch = (async (_url: string, init: RequestInit = {}) =>
+			init.method === "POST"
+				? Response.json({ html_url: "https://github.com/acme/web/pull/3" })
+				: Response.json([])) as unknown as typeof globalThis.fetch;
+		await runInBox(t, { ...opts(d), fetch, hostRun: host.run }, never);
+		const spec = d.created[0];
+		expect(spec?.env).toEqual({ ...BOX_ENV, CLAUDE_CODE_OAUTH_TOKEN: SECRET });
+		expect(d.copiedIn).toEqual([
+			{
+				box: "box1",
+				dir: SECRETS_DIR,
+				names: ["CLAUDE_CODE_OAUTH_TOKEN", "deploy.key"],
+			},
+			// the deploy key: in CLONE_CRED_DIR for the clone, then removed
+			{ box: "box1", dir: CLONE_CRED_DIR, names: ["key.in"] },
+		]);
+		const withToken = d.execs.filter((e) =>
+			JSON.stringify(e.opts.env ?? {}).includes("ghp_value"),
+		);
+		expect(withToken.map((e) => e.cmd.join(" "))).toEqual([
+			expect.stringContaining("git fetch"),
+		]);
+		expect(withToken[0]?.opts.env?.GIT_SSH_COMMAND).toContain(
+			`-i ${CLONE_CRED_DIR}/key`,
+		);
+		for (const e of d.execs) {
+			expect(e.cmd.join(" ")).not.toContain("ghp_value");
+			expect(e.cmd.join(" ")).not.toContain("credential.helper");
+		}
+		const lines = cmdLines(d);
+		const at = (s: string) => lines.findIndex((l) => l.includes(s));
+		expect(at(`rm -rf ${CLONE_CRED_DIR}`)).toBe(at("git fetch") + 1);
+		expect(at("git rev-parse")).toBeGreaterThan(at(`rm -rf ${CLONE_CRED_DIR}`));
+		// the agent's command has no env of its own
+		expect(d.execs[at("paseo run")]?.opts.env).toBeUndefined();
+	});
+
+	test("output pr: the runner machine pushes mm/<item> after the agent, then the pull request", async () => {
+		const d = new FakeDriver();
+		d.handler = (cmd) =>
+			cmd[0] === "git" && cmd[1] === "rev-list"
+				? { code: 0, stdout: "2\n", stderr: "" }
+				: undefined;
 		const calls: string[] = [];
 		const fetch = (async (url: string, init: RequestInit = {}) => {
 			calls.push(`${init.method} ${url}`);
@@ -303,10 +374,11 @@ describe("runInBox", () => {
 			env: { ...base.env, output: { kind: "pr" } },
 			secrets: { ...base.secrets, GITHUB_TOKEN: "ghp_value" },
 		});
+		const host = fakeHost();
 		const steps: string[] = [];
 		const res = await runInBox(
 			t,
-			{ ...opts(d), fetch, onStep: (l) => steps.push(l) },
+			{ ...opts(d), fetch, hostRun: host.run, onStep: (l) => steps.push(l) },
 			never,
 		);
 		expect(res.status).toBe("done");
@@ -314,13 +386,21 @@ describe("runInBox", () => {
 		expect(steps).toContain(res.output?.line ?? "?");
 		const lines = cmdLines(d);
 		const at = (s: string) => lines.findIndex((l) => l.includes(s));
-		expect(at("credential.helper")).toBeGreaterThan(-1);
-		expect(at("credential.helper")).toBeLessThan(at("git fetch") + 1);
-		expect(at("paseo run")).toBeLessThan(at("git push"));
-		expect(lines.at(at("git push"))).toBe(
-			"git push -q --force origin HEAD:refs/heads/mm/mm-1",
-		);
-		for (const l of lines) expect(l).not.toContain("ghp_value");
+		// in the box: commit, then a bundle of the new commits; no push
+		expect(at("paseo run")).toBeLessThan(at("git bundle create"));
+		expect(lines.some((l) => l.includes("git push"))).toBe(false);
+		// on the runner machine: the push, with the token only in git's env
+		const push = host.calls.find((c) => c.cmd[1] === "push");
+		expect(push?.cmd).toEqual([
+			"git",
+			"push",
+			"-q",
+			"--force",
+			"origin",
+			"f00d000000000000000000000000000000000001:refs/heads/mm/mm-1",
+		]);
+		expect(push?.env.MM_GIT_TOKEN).toBe("ghp_value");
+		for (const l of host.lines()) expect(l).not.toContain("ghp_value");
 		expect(calls).toEqual([
 			"GET https://api.github.com/repos/acme/web/pulls?state=open&head=acme%3Amm%2Fmm-1",
 			"POST https://api.github.com/repos/acme/web/pulls",
@@ -330,18 +410,18 @@ describe("runInBox", () => {
 
 	test("a failing push fails the task with the reason; the box is deleted", async () => {
 		const d = new FakeDriver();
-		d.handler = (cmd) => {
-			if (cmd[0] !== "git") return undefined;
-			if (cmd[1] === "rev-list") return { code: 0, stdout: "1\n", stderr: "" };
-			if (cmd[1] === "diff" && cmd[2] === "--name-only")
-				return { code: 0, stdout: "a\n", stderr: "" };
-			if (cmd[1] === "push")
-				return { code: 128, stdout: "", stderr: "Permission denied" };
-			return undefined;
-		};
+		d.handler = (cmd) =>
+			cmd[0] === "git" && cmd[1] === "rev-list"
+				? { code: 0, stdout: "1\n", stderr: "" }
+				: undefined;
+		const host = fakeHost((cmd) =>
+			cmd[1] === "push"
+				? { code: 128, stdout: "", stderr: "Permission denied" }
+				: undefined,
+		);
 		const base = task();
 		const t = task({ env: { ...base.env, output: { kind: "branch" } } });
-		const res = await runInBox(t, opts(d), never);
+		const res = await runInBox(t, { ...opts(d), hostRun: host.run }, never);
 		expect(res.status).toBe("failed");
 		expect(res.summary).toContain("did it");
 		expect(res.summary).toContain(
@@ -362,9 +442,11 @@ describe("runInBox", () => {
 				: undefined;
 		const base = task();
 		const t = task({ env: { ...base.env, output: { kind: "pr" } } });
-		const res = await runInBox(t, opts(d), never);
+		const host = fakeHost();
+		const res = await runInBox(t, { ...opts(d), hostRun: host.run }, never);
 		expect(res.output).toBeUndefined();
-		expect(cmdLines(d).some((l) => l.startsWith("git push"))).toBe(false);
+		expect(cmdLines(d).some((l) => l.includes("git bundle"))).toBe(false);
+		expect(host.calls).toEqual([]);
 	});
 });
 

@@ -1,6 +1,7 @@
-// Box output against real git: a local bare repo is the "git host"; the GitHub
-// REST API is a fake fetch.
-import { afterAll, describe, expect, test } from "bun:test";
+// Box output against real git: a local bare repo is the "git host" (the
+// runner's push reaches it through url.insteadOf); the GitHub REST API is a
+// fake fetch.
+import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
 	mkdirSync,
 	mkdtempSync,
@@ -10,16 +11,22 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { type HostRun, hostRun } from "../../src/box/devcontainer.ts";
 import type { ExecResult } from "../../src/box/driver.ts";
 import {
+	CLONE_CRED_DIR,
+	cloneCredential,
 	deliverOutput,
-	gitCredentialScript,
 	githubRepo,
 	OutputError,
 	type OutputInput,
 	outputBranch,
 	redact,
+	splitGitSecrets,
 } from "../../src/box/output.ts";
+
+// Real git, many processes per test: slow on a busy machine.
+setDefaultTimeout(30_000);
 
 const root = mkdtempSync(join(tmpdir(), "mm-output-test-"));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
@@ -65,6 +72,7 @@ function host(): string {
 	must(root, ["git", "clone", "-q", "--bare", seed, bare]);
 	return bare;
 }
+const bareOf = new Map<string, string>();
 /** The box checkout: the same steps as run.ts. Returns dir and base sha. */
 function checkout(bare: string): { dir: string; base: string } {
 	const dir = join(root, `box${++n}`);
@@ -77,6 +85,7 @@ function checkout(bare: string): { dir: string; base: string } {
 		bare,
 		"main",
 	]);
+	bareOf.set(dir, bare);
 	return { dir, base: must(dir, ["git", "rev-parse", "HEAD"]).trim() };
 }
 
@@ -102,17 +111,42 @@ function github(open: { html_url: string }[] = []) {
 	return { calls, fetch: f };
 }
 
+const REPO = "https://github.com/acme/web.git";
+/** Git on the "runner machine": the repo URL leads to the bare host repo. */
+function hostTo(bare: string, repo = REPO): HostRun {
+	return (cmd, o = {}) => {
+		const env = { ...o.env };
+		const k = Number(env.GIT_CONFIG_COUNT ?? 0);
+		env.GIT_CONFIG_COUNT = String(k + 1);
+		env[`GIT_CONFIG_KEY_${k}`] = `url.${bare}.insteadOf`;
+		env[`GIT_CONFIG_VALUE_${k}`] = repo;
+		return hostRun(cmd, { ...o, env });
+	};
+}
+/** The box: commands run in `dir`; the bundle path is mapped into it. */
+const BOX_BUNDLE = "/tmp/mastermind-out.bundle";
 function input(
 	dir: string,
 	base: string,
 	over: Partial<OutputInput> = {},
 ): OutputInput {
+	const mapped = join(dir, ".git", "out.bundle");
+	const bare = bareOf.get(dir);
 	return {
-		exec: async (cmd) => sh(dir, cmd),
+		exec: async (cmd) =>
+			sh(
+				dir,
+				cmd.map((a) => (a === BOX_BUNDLE ? mapped : a)),
+			),
+		takeOut: async (path) => {
+			expect(path).toBe(BOX_BUNDLE);
+			return new Uint8Array(readFileSync(mapped));
+		},
+		...(bare ? { host: hostTo(bare, over.repo) } : {}),
 		itemId: "mm-1",
 		title: "mm-1: fix the bug",
 		output: { kind: "pr" },
-		repo: "https://github.com/acme/web.git",
+		repo: REPO,
 		ref: "main",
 		baseSha: base,
 		secrets: { GITHUB_TOKEN: TOKEN },
@@ -261,17 +295,17 @@ describe("deliverOutput", () => {
 		const bare = host();
 		const a = checkout(bare);
 		writeFileSync(join(a.dir, "x"), "1");
-		must(a.dir, [
-			"git",
-			"remote",
-			"set-url",
-			"origin",
-			join(root, `gone-${TOKEN}`),
-		]);
+		// the host refuses the push and echoes the token
+		const hook = join(bare, "hooks", "pre-receive");
+		writeFileSync(hook, `#!/bin/sh\necho "denied ${TOKEN}" >&2\nexit 1\n`, {
+			mode: 0o755,
+		});
 		const err = await deliverOutput(input(a.dir, a.base)).catch((e) => e);
 		expect(err).toBeInstanceOf(OutputError);
 		expect(err.message).toContain("git push mm/mm-1");
+		expect(err.message).toContain("denied ***");
 		expect(err.message).not.toContain(TOKEN);
+		rmSync(hook);
 
 		const b = checkout(bare);
 		writeFileSync(join(b.dir, "y"), "1");
@@ -287,57 +321,122 @@ describe("deliverOutput", () => {
 	});
 });
 
-describe("gitCredentialScript", () => {
-	test("git gets the token from the file when it asks; no value in .git/config", () => {
-		const secrets = join(root, "secrets");
-		mkdirSync(secrets, { recursive: true });
-		writeFileSync(join(secrets, "GITHUB_TOKEN"), TOKEN);
+describe("the push runs on the runner machine", () => {
+	test("only mm/<item> on the host: the agent's git config, hooks and branches in the box do nothing", async () => {
+		const bare = host();
+		const other = host();
+		const { dir, base } = checkout(bare);
+		const main = must(bare, ["git", "rev-parse", "main"]);
+		// the agent: a commit, a push URL elsewhere, a pre-push hook, a moved main
+		writeFileSync(join(dir, "a.txt"), "agent\n");
+		must(dir, ["git", "commit", "-qam", "agent"]);
+		must(dir, ["git", "config", "remote.origin.pushurl", other]);
+		must(dir, ["git", "config", "credential.helper", "!echo stolen >&2; f"]);
+		writeFileSync(
+			join(dir, ".git/hooks/pre-push"),
+			"#!/bin/sh\ntouch /tmp/x\n",
+			{
+				mode: 0o755,
+			},
+		);
+		must(dir, ["git", "branch", "-f", "main", "HEAD"]);
+		const r = await deliverOutput(
+			input(dir, base, { output: { kind: "branch" } }),
+		);
+		expect(r?.line).toBe("pushed branch mm/mm-1 (1 commit, 1 file)");
+		expect(branchSha(bare, "mm/mm-1").stdout).toBe(
+			must(dir, ["git", "rev-parse", "HEAD"]),
+		);
+		expect(must(bare, ["git", "rev-parse", "main"])).toBe(main);
+		expect(
+			must(bare, ["git", "for-each-ref", "--format=%(refname)"]).trim(),
+		).toBe("refs/heads/main\nrefs/heads/mm/mm-1");
+		expect(branchSha(other, "mm/mm-1").code).not.toBe(0);
+	});
+
+	test("the base comes from the host even when the ref moved since the clone", async () => {
+		const bare = host();
+		const { dir, base } = checkout(bare);
+		// main moves on the host after the clone
+		const seed = join(root, `move${++n}`);
+		must(root, ["git", "clone", "-q", bare, seed]);
+		writeFileSync(join(seed, "z"), "z");
+		must(seed, ["git", "add", "-A"]);
+		must(seed, ["git", "commit", "-qm", "moved"]);
+		must(seed, ["git", "push", "-q", "origin", "main"]);
+		writeFileSync(join(dir, "y"), "1");
+		const r = await deliverOutput(
+			input(dir, base, { output: { kind: "branch" } }),
+		);
+		expect(r?.line).toBe("pushed branch mm/mm-1 (1 commit, 1 file)");
+		expect(must(bare, ["git", "rev-parse", "mm/mm-1~1"]).trim()).toBe(base);
+	});
+});
+
+describe("git credential: split and clone", () => {
+	test("splitGitSecrets: the git credential secrets stay out of the box set", () => {
+		expect(
+			splitGitSecrets({
+				GITHUB_TOKEN: "t",
+				GH_TOKEN: "u",
+				GIT_TOKEN: "v",
+				GIT_SSH_KEY: "k",
+				GITHUB_APP_PRIVATE_KEY: "p",
+				CLAUDE_CODE_OAUTH_TOKEN: "c",
+				"deploy.key": "d",
+			}),
+		).toEqual({
+			git: {
+				GITHUB_TOKEN: "t",
+				GH_TOKEN: "u",
+				GIT_TOKEN: "v",
+				GIT_SSH_KEY: "k",
+				GITHUB_APP_PRIVATE_KEY: "p",
+			},
+			box: { CLAUDE_CODE_OAUTH_TOKEN: "c", "deploy.key": "d" },
+		});
+	});
+
+	test("cloneCredential: git gets the token from the command's env; nothing in .git/config", () => {
+		const c = cloneCredential({ GH_TOKEN: "", GITHUB_TOKEN: TOKEN });
+		expect(c.script).toBe("");
+		expect(c.key).toBeUndefined();
 		const dir = join(root, `cred${++n}`);
 		mkdirSync(dir);
 		must(dir, ["git", "init", "-q", "."]);
-		must(dir, [
-			"sh",
-			"-c",
-			gitCredentialScript({ GH_TOKEN: "", GITHUB_TOKEN: TOKEN }, secrets),
-		]);
 		const fill = Bun.spawnSync(["git", "credential", "fill"], {
 			cwd: dir,
 			stdin: Buffer.from("protocol=https\nhost=github.com\n\n"),
-			env: { PATH: process.env.PATH ?? "", HOME: root, ...GIT_ENV },
+			env: { PATH: process.env.PATH ?? "", HOME: root, ...GIT_ENV, ...c.env },
 		});
 		expect(fill.stdout.toString()).toContain(
 			`username=x-access-token\npassword=${TOKEN}\n`,
 		);
 		expect(readFileSync(join(dir, ".git/config"), "utf8")).not.toContain(TOKEN);
+		// without the command's env, git has no credential
+		const none = Bun.spawnSync(["git", "credential", "fill"], {
+			cwd: dir,
+			stdin: Buffer.from("protocol=https\nhost=github.com\n\n"),
+			env: { PATH: process.env.PATH ?? "", HOME: root, ...GIT_ENV },
+		});
+		expect(none.stdout.toString()).not.toContain(TOKEN);
 	});
 
-	test("a deploy key becomes core.sshCommand with a 0600 copy", () => {
-		const secrets = join(root, "secrets2");
-		mkdirSync(secrets, { recursive: true });
-		writeFileSync(join(secrets, "GIT_SSH_KEY"), "KEY", { mode: 0o444 });
-		const dir = join(root, `key${++n}`);
-		mkdirSync(dir);
-		must(dir, ["git", "init", "-q", "."]);
-		must(dir, [
-			"sh",
-			"-c",
-			gitCredentialScript({ GIT_SSH_KEY: "KEY" }, secrets),
-		]);
-		const cmd = must(dir, ["git", "config", "core.sshCommand"]);
-		expect(cmd).toContain(`-i ${dir}/.git/mastermind-git-key`);
-		const st = Bun.spawnSync([
-			"stat",
-			"-c",
-			"%a",
-			`${dir}/.git/mastermind-git-key`,
-		]);
-		expect(st.stdout.toString().trim()).toBe("600");
+	test("cloneCredential: a deploy key is a file in CLONE_CRED_DIR, used through GIT_SSH_COMMAND", () => {
+		const c = cloneCredential({ GIT_SSH_KEY: "KEY" });
+		expect(c.key).toBe("KEY\n");
+		expect(c.script).toContain(
+			`cp ${CLONE_CRED_DIR}/key.in ${CLONE_CRED_DIR}/key`,
+		);
+		expect(c.env.GIT_SSH_COMMAND).toContain(`-i ${CLONE_CRED_DIR}/key`);
+		expect(c.env.MM_GIT_TOKEN).toBeUndefined();
 	});
 
 	test("no git secret: nothing to set", () => {
-		expect(gitCredentialScript({ CLAUDE_CODE_OAUTH_TOKEN: "x" }, "/s")).toBe(
-			"",
-		);
+		expect(cloneCredential({})).toEqual({
+			env: { GIT_TERMINAL_PROMPT: "0" },
+			script: "",
+		});
 	});
 });
 

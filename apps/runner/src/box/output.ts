@@ -1,23 +1,49 @@
 /**
  * How code leaves the box (human decision C, 2026-11-11): through the git host.
  *
- *   agent done -> commit what is left -> nothing changed? say so, push nothing
- *   -> push branch mm/<item> (force: a retry starts again from the base)
+ *   agent done -> commit what is left (in the box) -> nothing changed? say so,
+ *   push nothing -> a git bundle of the new commits out of the box
+ *   -> on THIS machine: fetch the base, take the bundle, push branch mm/<item>
+ *      (force: a retry starts again from the base)
  *   -> output pr on GitHub: open a pull request against the base, or find the
  *      open one of an earlier try (the push updated it)
  *
+ * The git credential stays out of the agent's reach (mm-210.64; prior art:
+ * the Copilot coding agent cannot run git push, Codex removes secrets before
+ * the agent phase): the credential secrets (GIT_TOKEN, GITHUB_TOKEN or
+ * GH_TOKEN; or GIT_SSH_KEY, a deploy key) are never box env or files in the
+ * secrets directory. The clone gets them in the env of that one command
+ * ({@link cloneCredential}); the push runs on the runner machine, to the one
+ * ref refs/heads/mm/<item>, from a fresh repo the agent never touched.
  * Other git hosts: the branch is pushed, the pull request is opened by hand.
- * The git credential is one of the environment's secrets (GIT_TOKEN,
- * GITHUB_TOKEN or GH_TOKEN; or GIT_SSH_KEY, a deploy key), set on the checkout
- * before the clone ({@link gitCredentialScript}): no value in argv or a URL.
  */
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { EnvironmentOutput } from "@mastermind/core";
+import { gitEnv, type HostRun, hostRun } from "./devcontainer.ts";
 import type { ExecResult } from "./driver.ts";
 
 /** Secret names a token for `git push` and the GitHub API is read from, in order. */
 export const GIT_TOKEN_SECRETS = ["GIT_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"];
-/** Secret name of an SSH deploy key (a file in the box). */
+/** Secret name of an SSH deploy key (never a file the agent can read). */
 export const GIT_SSH_KEY_SECRET = "GIT_SSH_KEY";
+/** The runner owner's GitHub App (mm-210.67): its key mints installation tokens. */
+export const GITHUB_APP_SECRETS = [
+	"GITHUB_APP_ID",
+	"GITHUB_APP_PRIVATE_KEY",
+	"GITHUB_APP_SLUG",
+];
+/** The git credential secrets: held by the runner, never in the box for the agent. */
+export const GIT_CREDENTIAL_SECRETS = [
+	...GIT_TOKEN_SECRETS,
+	GIT_SSH_KEY_SECRET,
+	...GITHUB_APP_SECRETS,
+];
+/** Where the deploy key is for the clone only; deleted before anything else runs. */
+export const CLONE_CRED_DIR = "/run/mastermind/clone-credential";
+/** The bundle of the new commits, in the box. */
+const BUNDLE = "/tmp/mastermind-out.bundle";
 
 export type OutputResult = {
 	kind: "pr" | "branch";
@@ -32,8 +58,12 @@ export type OutputResult = {
 };
 
 export type OutputInput = {
-	/** Runs a command in the checkout of the box. */
+	/** Runs a command in the checkout of the box (no credential there). */
 	exec: (cmd: string[]) => Promise<ExecResult>;
+	/** The bytes of one file of the box. */
+	takeOut: (path: string) => Promise<Uint8Array>;
+	/** Git on this machine (the push); default: spawn. */
+	host?: HostRun;
 	itemId: string;
 	/** The item's title: commit message and pull request title. */
 	title: string;
@@ -44,11 +74,12 @@ export type OutputInput = {
 	ref: string;
 	/** The commit that was checked out. */
 	baseSha: string;
-	/** Resolved secret values, by name: the token for the GitHub API. */
+	/** The git credential secrets ({@link splitGitSecrets}), by name. */
 	secrets: Record<string, string>;
 	fetch?: typeof fetch;
 	/** GitHub REST API base; default https://api.github.com. */
 	githubApi?: string;
+	signal?: AbortSignal;
 };
 
 export class OutputError extends Error {
@@ -92,8 +123,6 @@ function tail(r: ExecResult, n = 500): string {
 	return `${r.stdout}${r.stderr}`.trim().slice(-n);
 }
 
-const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
-
 /** The token secret for git and the GitHub API: the first of {@link GIT_TOKEN_SECRETS} given. */
 export function gitTokenName(
 	secrets: Record<string, string>,
@@ -102,27 +131,53 @@ export function gitTokenName(
 }
 
 /**
- * Shell lines that set the git credential of the checkout (run after `git
- * init`, before the fetch, so the clone of a private repo and the push both
- * use it). The helper reads the token FILE when git asks: the value is never
- * in a URL, in argv or in .git/config. A deploy key becomes core.sshCommand
- * (a 0600 copy: ssh refuses a key others can read).
+ * Split resolved secrets: `git` (the credential secrets, kept on the runner
+ * machine) and `box` (the rest: box env and files for the agent).
  */
-export function gitCredentialScript(
-	secrets: Record<string, string>,
-	secretsDir: string,
-): string {
-	const lines: string[] = [];
-	const name = gitTokenName(secrets);
-	if (name && ENV_NAME.test(name))
-		lines.push(
-			`git config credential.helper '!f() { test "$1" = get || exit 0; echo username=x-access-token; printf "password=%s\\n" "$(cat ${secretsDir}/${name})"; }; f'`,
-		);
-	if (GIT_SSH_KEY_SECRET in secrets)
-		lines.push(
-			`k="$(pwd)/.git/mastermind-git-key" && cp ${secretsDir}/${GIT_SSH_KEY_SECRET} "$k" && chmod 600 "$k" && git config core.sshCommand "ssh -i $k -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"`,
-		);
-	return lines.join(" && ");
+export function splitGitSecrets(secrets: Record<string, string>): {
+	git: Record<string, string>;
+	box: Record<string, string>;
+} {
+	const git: Record<string, string> = {};
+	const box: Record<string, string> = {};
+	for (const [k, v] of Object.entries(secrets))
+		(GIT_CREDENTIAL_SECRETS.includes(k) ? git : box)[k] = v;
+	return { git, box };
+}
+
+/**
+ * The credential for the ONE clone command in the box: values only in that
+ * command's env (`env`), the credential helper through GIT_CONFIG_* env (never
+ * in .git/config, argv or a URL). A deploy key: put `key` into
+ * {@link CLONE_CRED_DIR} first; `script` (run before the fetch) makes a 0600
+ * copy, as ssh refuses a key others can read. Delete CLONE_CRED_DIR after.
+ */
+export function cloneCredential(git: Record<string, string>): {
+	env: Record<string, string>;
+	script: string;
+	key?: string;
+} {
+	const env: Record<string, string> = { GIT_TERMINAL_PROMPT: "0" };
+	let script = "";
+	const name = gitTokenName(git);
+	const token = name ? git[name] : undefined;
+	if (token) {
+		env.MM_GIT_TOKEN = token;
+		env.GIT_CONFIG_COUNT = "1";
+		env.GIT_CONFIG_KEY_0 = "credential.helper";
+		env.GIT_CONFIG_VALUE_0 =
+			'!f() { test "$1" = get || exit 0; echo username=x-access-token; printf "password=%s\\n" "$MM_GIT_TOKEN"; }; f';
+	}
+	const key = git[GIT_SSH_KEY_SECRET];
+	if (key) {
+		script = `(umask 077 && cp ${CLONE_CRED_DIR}/key.in ${CLONE_CRED_DIR}/key)`;
+		env.GIT_SSH_COMMAND = `ssh -i ${CLONE_CRED_DIR}/key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new`;
+	}
+	return {
+		env,
+		script,
+		...(key ? { key: key.endsWith("\n") ? key : `${key}\n` } : {}),
+	};
 }
 
 /**
@@ -162,8 +217,8 @@ export async function deliverOutput(
 		]);
 	else if (staged.code !== 0) fail("git diff", tail(staged));
 
-	// 2. What changed against the base.
-	const commits = Number(
+	// 2. New commits? Then a bundle of them (HEAD, without the base) comes out.
+	const count = Number(
 		(
 			await must("git rev-list", [
 				"git",
@@ -173,31 +228,108 @@ export async function deliverOutput(
 			])
 		).trim(),
 	);
-	const files = (
-		await must("git diff", ["git", "diff", "--name-only", i.baseSha, "HEAD"])
-	)
-		.split("\n")
-		.filter(Boolean).length;
-	if (!commits || !files)
-		return {
-			kind,
-			commits: 0,
-			filesChanged: 0,
-			line: "no changes: nothing pushed",
-		};
+	const none = (): OutputResult => ({
+		kind,
+		commits: 0,
+		filesChanged: 0,
+		line: "no changes: nothing pushed",
+	});
+	if (!count) return none();
+	await must("git bundle", [
+		"git",
+		"bundle",
+		"create",
+		BUNDLE,
+		"HEAD",
+		`^${i.baseSha}`,
+	]);
+	let bundle: Uint8Array;
+	try {
+		bundle = await i.takeOut(BUNDLE);
+	} catch (error) {
+		return fail("take out the bundle", String(error));
+	}
 
-	// 3. Push mm/<item>. Force: a retry starts again from the base.
+	// 3. On this machine: a fresh repo with only the credential; the base from
+	// the git host, the commits from the bundle (checked), push mm/<item>.
 	const branch = outputBranch(i.itemId);
 	const tokenName = gitTokenName(i.secrets);
 	const token = tokenName ? i.secrets[tokenName] : undefined;
-	await must(`git push ${branch}`, [
-		"git",
-		"push",
-		"-q",
-		"--force",
-		"origin",
-		`HEAD:refs/heads/${branch}`,
-	]);
+	const host = i.host ?? hostRun;
+	const dir = await mkdtemp(join(tmpdir(), "mm-push-"));
+	let commits: number;
+	let files: number;
+	try {
+		const ws = join(dir, "ws");
+		const file = join(dir, "out.bundle");
+		await writeFile(file, bundle, { mode: 0o600 });
+		const env = await gitEnv(i.secrets, dir);
+		const git = async (what: string, args: string[], ok = false) => {
+			const r = await host(["git", ...args], {
+				cwd: ws,
+				env,
+				...(i.signal ? { signal: i.signal } : {}),
+			});
+			if (r.code !== 0 && !ok) fail(what, `exited ${r.code}: ${tail(r)}`);
+			return r;
+		};
+		const init = await host(["git", "init", "-q", ws], { env });
+		if (init.code !== 0) fail("git init on the runner", tail(init));
+		await git("git remote", ["remote", "add", "origin", i.repo]);
+		await git(`fetch ${i.ref || "HEAD"}`, [
+			"fetch",
+			"-q",
+			"--depth",
+			"1",
+			"origin",
+			i.ref || "HEAD",
+		]);
+		const has = await git(
+			"cat-file",
+			["cat-file", "-e", `${i.baseSha}^{commit}`],
+			true,
+		);
+		if (has.code !== 0)
+			// The ref moved since the clone: fetch the base commit itself.
+			await git(`fetch ${i.baseSha}`, [
+				"fetch",
+				"-q",
+				"--depth",
+				"1",
+				"origin",
+				i.baseSha,
+			]);
+		await git("take the bundle", [
+			"-c",
+			"fetch.fsckObjects=true",
+			"fetch",
+			"-q",
+			file,
+			"HEAD",
+		]);
+		const tip = (
+			await git("rev-parse", ["rev-parse", "--verify", "FETCH_HEAD^{commit}"])
+		).stdout.trim();
+		commits = Number(
+			(
+				await git("rev-list", ["rev-list", "--count", `${i.baseSha}..${tip}`])
+			).stdout.trim(),
+		);
+		files = (await git("diff", ["diff", "--name-only", i.baseSha, tip])).stdout
+			.split("\n")
+			.filter(Boolean).length;
+		if (!commits || !files) return none();
+		// Force: a retry starts again from the base. One ref, set here.
+		await git(`git push ${branch}`, [
+			"push",
+			"-q",
+			"--force",
+			"origin",
+			`${tip}:refs/heads/${branch}`,
+		]);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
 	const what = `branch ${branch} (${commits} commit${commits === 1 ? "" : "s"}, ${files} file${files === 1 ? "" : "s"})`;
 	const res: OutputResult = {
 		kind,

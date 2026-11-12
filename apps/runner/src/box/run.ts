@@ -4,17 +4,21 @@
  *   prepare (devcontainer.ts, on this machine: git access check; the repo's or
  *   the environment's devcontainer.json built by the devcontainer CLI)
  *   -> ensure image (cached by recipe hash) -> create box (limits, network, labels)
- *   -> clone repo at ref into /workspace -> secrets as env and files
+ *   -> clone repo at ref into /workspace (the git credential only in the env
+ *   of that one command) -> secrets as env and files (never the git credential)
  *   -> devcontainer lifecycle commands (onCreate, updateContent, postCreate,
  *   postStart) -> setup, then check (fail: the reason and the output tail)
  *   -> the item's input files into INPUTS_DIR (files.ts, mm-210.60)
  *   -> wait for the Paseo daemon in the box -> `paseo run` inside, mode bypass
  *   -> take out a patch of the work -> outputs to Mastermind (the patch, files
- *   in OUTPUTS_DIR, the agent log tail) -> push a branch / open a pull request
- *   (output.ts, when the environment asks) -> DELETE the box (on every exit path)
+ *   in OUTPUTS_DIR, the agent log tail) -> the new commits as a git bundle;
+ *   THIS machine pushes branch mm/<item> / opens a pull request (output.ts,
+ *   when the environment asks) -> DELETE the box (on every exit path)
  *
  * The agent runs inside the box with no prompts: the box is the limit.
- * Secret values go only into the box: never into argv, logs or reports.
+ * Secret values go only into the box: never into argv, logs or reports. The
+ * git credential never reaches the agent (mm-210.64): it is not box env, not a
+ * file and not in .git/config; the push runs outside the box.
  */
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -33,7 +37,7 @@ import {
 	RESULT_SCHEMA,
 	runFailure,
 } from "../launcher.ts";
-import type { PreparedBox } from "./devcontainer.ts";
+import type { HostRun, PreparedBox } from "./devcontainer.ts";
 import {
 	BOX_LABEL,
 	type Box,
@@ -44,9 +48,12 @@ import {
 import type { BoxFiles } from "./files.ts";
 import { QUIET_PASEO_ENV } from "./image.ts";
 import {
+	CLONE_CRED_DIR,
+	cloneCredential,
 	deliverOutput,
-	gitCredentialScript,
 	type OutputResult,
+	redact,
+	splitGitSecrets,
 } from "./output.ts";
 import { untar } from "./tar.ts";
 
@@ -96,6 +103,8 @@ export type BoxRunOptions = {
 	fetch?: typeof fetch;
 	/** GitHub REST API base; default https://api.github.com. */
 	githubApi?: string;
+	/** Git on this machine, for the push after the agent; default: spawn. */
+	hostRun?: HostRun;
 	/** The item's files (inputs in, outputs out); null or absent: none. */
 	files?: () => BoxFiles | null;
 	/**
@@ -218,7 +227,11 @@ export async function runInBox(
 				);
 			}
 		if (all.aborted) throw stopped();
-		const secrets = { ...task.secrets, ...prep?.secrets };
+		// The git credential stays on this machine; the rest goes into the box.
+		const { git: gitSecrets, box: secrets } = splitGitSecrets({
+			...task.secrets,
+			...prep?.secrets,
+		});
 		const image = prep
 			? prep.image
 			: await driver.ensureImage({
@@ -252,13 +265,18 @@ export async function runInBox(
 		if (all.aborted) throw stopped();
 		const b = box;
 		let user = prep?.user ?? opts.user;
-		type Where = { root?: boolean; workdir?: string };
+		type Where = {
+			root?: boolean;
+			workdir?: string;
+			env?: Record<string, string>;
+		};
 		const run = async (cmd: string[], o: Where = {}) => {
 			const as = o.root ? "root" : user;
 			try {
 				return await b.exec(cmd, {
 					workdir: o.workdir ?? (o.root ? "/" : WORKSPACE),
 					...(as ? { user: as } : {}),
+					...(o.env ? { env: o.env } : {}),
 					signal: all,
 				});
 			} catch (error) {
@@ -270,7 +288,9 @@ export async function runInBox(
 			const r = await run(cmd, o);
 			if (all.aborted) throw stopped();
 			if (r.code !== 0)
-				throw new BoxStepError(`${what} exited ${r.code}: ${tail(r)}`);
+				throw new BoxStepError(
+					redact(`${what} exited ${r.code}: ${tail(r)}`, gitSecrets),
+				);
 			return r;
 		};
 
@@ -283,12 +303,17 @@ export async function runInBox(
 		// The workspace and the secret files belong to that user.
 		const uid =
 			(await must("id", ["id", "-u"], { workdir: "/" })).stdout.trim() || "0";
+		// CLONE_CRED_DIR: the deploy key for the clone only (removed after it).
+		const private_ = env.repo
+			? `${SECRETS_DIR} ${CLONE_CRED_DIR}`
+			: SECRETS_DIR;
+		const dirs = `${WORKSPACE} ${private_}`;
 		await must(
 			"prepare",
 			[
 				"sh",
 				"-c",
-				`mkdir -p ${WORKSPACE} ${SECRETS_DIR} && chown ${uid} ${WORKSPACE} ${SECRETS_DIR} && chmod 700 ${SECRETS_DIR}`,
+				`mkdir -p ${dirs} && chown ${uid} ${dirs} && chmod 700 ${private_}`,
 			],
 			{ root: true },
 		);
@@ -300,26 +325,47 @@ export async function runInBox(
 		if (files.length) await b.copyIn(SECRETS_DIR, files);
 		step(`box ${b.name} ready in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
 
-		// Checkout. Repo and ref go in as arguments to a fixed script.
+		// Checkout. Repo and ref go in as arguments to a fixed script. The git
+		// credential is in the env of this one command (and a deploy key in
+		// CLONE_CRED_DIR until it ends): nothing of it stays in the box.
 		let base: string | null = null;
 		if (env.repo) {
-			await must(`clone ${env.repo} at ${env.ref}`, [
-				"sh",
-				"-c",
-				[
-					"git init -q .",
-					// The credential (token file or deploy key) for clone and push.
-					gitCredentialScript(secrets, SECRETS_DIR),
-					'git remote add origin "$1"',
-					'git fetch -q --depth 1 origin "$2"',
-					"git checkout -q FETCH_HEAD",
-				]
-					.filter(Boolean)
-					.join(" && "),
-				"clone",
-				env.repo,
-				env.ref || "HEAD",
-			]);
+			const cred = cloneCredential(gitSecrets);
+			try {
+				if (cred.key)
+					await b.copyIn(CLONE_CRED_DIR, [
+						{ name: "key.in", data: cred.key, mode: 0o444 },
+					]);
+				await must(
+					`clone ${env.repo} at ${env.ref}`,
+					[
+						"sh",
+						"-c",
+						[
+							"git init -q .",
+							cred.script,
+							'git remote add origin "$1"',
+							'git fetch -q --depth 1 origin "$2"',
+							"git checkout -q FETCH_HEAD",
+						]
+							.filter(Boolean)
+							.join(" && "),
+						"clone",
+						env.repo,
+						env.ref || "HEAD",
+					],
+					{ env: cred.env },
+				);
+			} finally {
+				if (!all.aborted)
+					await must(
+						"remove the clone credential",
+						["rm", "-rf", CLONE_CRED_DIR],
+						{
+							root: true,
+						},
+					);
+			}
 			base = (
 				await must("git rev-parse", ["git", "rev-parse", "HEAD"])
 			).stdout.trim();
@@ -429,13 +475,20 @@ export async function runInBox(
 			try {
 				const out = await deliverOutput({
 					exec: (cmd) => run(cmd),
+					takeOut: async (path) => {
+						const [file] = untar(await b.copyOut(path));
+						if (!file) throw new Error(`${path} is not in the box`);
+						return file.data;
+					},
+					...(opts.hostRun ? { host: opts.hostRun } : {}),
+					signal: all,
 					itemId: task.beadId,
 					title: task.title,
 					output: env.output,
 					repo: env.repo,
 					ref: env.ref,
 					baseSha: base,
-					secrets,
+					secrets: gitSecrets,
 					...(opts.fetch ? { fetch: opts.fetch } : {}),
 					...(opts.githubApi ? { githubApi: opts.githubApi } : {}),
 				});
