@@ -4,6 +4,7 @@ import {
 	ENV_TRIAGE_LABEL,
 	envNameOf,
 	FAILED_START_LABEL,
+	NEEDS_HUMAN_LABEL,
 	NOT_ACCEPTED_LABEL,
 	queueOf,
 	toOf,
@@ -100,6 +101,11 @@ function StateLine({ bead }: { bead: Bead }) {
 				bead.labels.includes(FAILED_START_LABEL) ? (
 					<span data-failed-start className="text-signal">
 						failed to start · see the notes
+					</span>
+				) : bead.status !== "closed" &&
+					bead.labels.includes(NEEDS_HUMAN_LABEL) ? (
+					<span data-needs-human className="text-signal">
+						needs a human · see the notes
 					</span>
 				) : (
 					stage
@@ -324,7 +330,8 @@ export function BeadSheet() {
 				{bead && (
 					<footer className="sticky bottom-0 flex items-center gap-2 border-t bg-background px-5 py-3">
 						{bead.status === "closed" ||
-						bead.labels.includes(FAILED_START_LABEL) ? (
+						bead.labels.includes(FAILED_START_LABEL) ||
+						bead.labels.includes(NEEDS_HUMAN_LABEL) ? (
 							<Button
 								variant="outline"
 								disabled={acting}

@@ -9,6 +9,8 @@ import {
 	type DispatchSeen,
 	ENV_TRIAGE_LABEL,
 	FAILED_START_LABEL,
+	MAX_ATTEMPTS,
+	NEEDS_HUMAN_LABEL,
 } from "./dispatcher.ts";
 import { fakeWork, LEASE_MS } from "./fake-work.ts";
 
@@ -24,7 +26,11 @@ const runner = (id: string, extra: Partial<RunnerInfo> = {}): NextRequest => ({
 });
 
 function setup(
-	opts: { waitMs?: number; observe?: (seen: DispatchSeen) => void } = {},
+	opts: {
+		waitMs?: number;
+		observe?: (seen: DispatchSeen) => void;
+		maxAttempts?: () => number | undefined;
+	} = {},
 ) {
 	let clock = new Date("2026-11-10T08:00:00Z");
 	const now = () => clock;
@@ -35,6 +41,7 @@ function setup(
 		now,
 		waitMs: opts.waitMs ?? 0,
 		observe: opts.observe,
+		maxAttempts: opts.maxAttempts,
 		rules: () => [{ match: { type: "bug" }, queue: "fix" }],
 		notify: (n) => {
 			notices.push(n);
@@ -279,7 +286,7 @@ describe("no hot loop after a release (mm-sih)", () => {
 		d.next("alice", "build", runner(id)).then((r) => r.dispatch?.bead.id);
 
 	test("the same runner gets a released bead again after 1 min, 5 min, then never", async () => {
-		const { d, work, advance } = setup();
+		const { d, work, advance } = setup({ maxAttempts: () => 10 });
 		work.add({ id: "mm-1" }, "build");
 		const release = () =>
 			d.release("alice", "mm-1", { actor, reason: "no", startFailed: false });
@@ -340,7 +347,7 @@ describe("no hot loop after a release (mm-sih)", () => {
 	});
 
 	test("releases that are not failed starts never set failed:start", async () => {
-		const { d, work } = setup();
+		const { d, work } = setup({ maxAttempts: () => 10 });
 		work.add({ id: "mm-1" }, "build");
 		for (const id of ["a", "b", "c", "d"]) {
 			expect(await take(d, id)).toBe("mm-1");
@@ -350,6 +357,94 @@ describe("no hot loop after a release (mm-sih)", () => {
 			});
 		}
 		expect(work.beads.get("mm-1")?.labels).not.toContain(FAILED_START_LABEL);
+	});
+});
+
+describe("max attempts, then needs a human (mm-210.65)", () => {
+	const take = (d: Dispatcher, id: string) =>
+		d.next("alice", "build", runner(id)).then((r) => r.dispatch?.bead.id);
+	const release = (d: Dispatcher, id: string, reason = `gave up on ${id}`) =>
+		d.release("alice", "mm-1", { actor: `alice/${id}`, reason });
+
+	test(`${MAX_ATTEMPTS} releases (any runners): needs:human with the last reasons; not offered until reopen`, async () => {
+		const { d, work, advance } = setup();
+		work.add({ id: "mm-1" }, "build");
+		for (const id of ["a", "b"]) {
+			expect(await take(d, id)).toBe("mm-1");
+			await release(d, id);
+		}
+		expect(work.beads.get("mm-1")?.labels).not.toContain(NEEDS_HUMAN_LABEL);
+		expect(await take(d, "c")).toBe("mm-1");
+		await release(d, "c");
+		const bead = work.beads.get("mm-1");
+		expect(bead?.labels).toContain(NEEDS_HUMAN_LABEL);
+		expect(bead?.labels).not.toContain(FAILED_START_LABEL);
+		expect(work.comments.at(-1)?.text).toBe(
+			"not dispatched: 3 attempts ended without a result; last: released by alice/a: gave up on a; released by alice/b: gave up on b; released by alice/c: gave up on c. Reopen to try again.",
+		);
+		expect(await take(d, "d")).toBeUndefined();
+		advance(24 * 3600_000);
+		expect(await take(d, "d")).toBeUndefined();
+		expect(d.debug().decisions.at(-1)?.reason).toBe(
+			`held back: label ${NEEDS_HUMAN_LABEL} (reopen to try again)`,
+		);
+		// Reopen removes the label: the count starts again.
+		await work.setLabels(
+			"mm-1",
+			"rocky",
+			(bead?.labels ?? []).filter((l) => l !== NEEDS_HUMAN_LABEL),
+		);
+		for (const id of ["d", "e"]) {
+			expect(await take(d, id)).toBe("mm-1");
+			await release(d, id);
+		}
+		expect(work.beads.get("mm-1")?.labels).not.toContain(NEEDS_HUMAN_LABEL);
+	});
+
+	test("a lease expiry is an attempt; its reason is in the note", async () => {
+		const { d, work, advance } = setup();
+		work.add({ id: "mm-1" }, "build");
+		for (const id of ["a", "b"]) {
+			expect(await take(d, id)).toBe("mm-1");
+			await release(d, id);
+		}
+		expect(await take(d, "c")).toBe("mm-1");
+		advance(LEASE_MS + 1_000);
+		expect(await d.sweep()).toEqual(["mm-1"]);
+		expect(work.beads.get("mm-1")?.labels).toContain(NEEDS_HUMAN_LABEL);
+		expect(work.comments.at(-1)?.text).toContain(
+			"; lease of alice/c expired (last heartbeat 2026-11-10T08:00:00.000Z). Reopen",
+		);
+		expect(await take(d, "d")).toBeUndefined();
+	});
+
+	test("failed starts get failed:start only, not needs:human too", async () => {
+		const { d, work } = setup();
+		work.add({ id: "mm-1" }, "build");
+		for (const id of ["a", "b", "c"]) {
+			expect(await take(d, id)).toBe("mm-1");
+			await d.release("alice", "mm-1", {
+				actor: `alice/${id}`,
+				reason: "MISSING_PROVIDER",
+				startFailed: true,
+			});
+		}
+		const labels = work.beads.get("mm-1")?.labels;
+		expect(labels).toContain(FAILED_START_LABEL);
+		expect(labels).not.toContain(NEEDS_HUMAN_LABEL);
+	});
+
+	test("the maximum is a setting", async () => {
+		const { d, work } = setup({ maxAttempts: () => 4 });
+		work.add({ id: "mm-1" }, "build");
+		for (const id of ["a", "b", "c"]) {
+			expect(await take(d, id)).toBe("mm-1");
+			await release(d, id);
+		}
+		expect(work.beads.get("mm-1")?.labels).not.toContain(NEEDS_HUMAN_LABEL);
+		expect(await take(d, "d")).toBe("mm-1");
+		await release(d, "d");
+		expect(work.beads.get("mm-1")?.labels).toContain(NEEDS_HUMAN_LABEL);
 	});
 });
 

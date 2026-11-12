@@ -327,3 +327,72 @@ describe("selectWaiter", () => {
 		expect(selectWaiter(b, ws.map(runner))?.runner ?? null).toBe(want);
 	});
 });
+
+describe("selectWaiter: two accounts share one queue (mm-210.65)", () => {
+	const shared = { labels: ["queue:shared"] };
+	const t = (h: number) => `2026-11-10T0${h}:00:00Z`;
+	const a = (runner: string, extra: Partial<RunnerState> = {}) => ({
+		user: "a",
+		runner,
+		queues: ["shared", "a-only"],
+		...extra,
+	});
+	const b = (runner: string, extra: Partial<RunnerState> = {}) => ({
+		user: "b",
+		runner,
+		queues: ["shared"],
+		...extra,
+	});
+
+	const cases: [string, Partial<RunnerState>[], string][] = [
+		[
+			"more runners of A do not win over B",
+			[
+				a("a1", { lastServedAt: t(4) }),
+				a("a2"),
+				a("a3"),
+				b("b1", { lastServedAt: t(3) }),
+			],
+			"b1",
+		],
+		[
+			"A's never-served runner does not count: A was served through a1",
+			[
+				a("a1", { lastServedAt: t(5), running: 1 }),
+				a("a2"),
+				b("b1", { lastServedAt: t(2) }),
+			],
+			"b1",
+		],
+		[
+			"B waits first, A served less recently: A wins",
+			[b("b1", { lastServedAt: t(4) }), a("a1", { lastServedAt: t(2) })],
+			"a1",
+		],
+		[
+			"B's only runner is full: A gets it",
+			[b("b1", { running: 1 }), a("a1", { lastServedAt: t(5) })],
+			"a1",
+		],
+		[
+			"a runner of B not on the shared queue is skipped",
+			[b("b1", { queues: ["other"] }), a("a1", { lastServedAt: t(5) })],
+			"a1",
+		],
+	];
+	test.each(cases)("%s", (_name, ws, want) => {
+		expect(selectWaiter(shared, ws.map(runner))?.runner).toBe(want);
+	});
+
+	test("a stream of beads alternates between the accounts", () => {
+		const ws = [a("a1"), a("a2"), a("a3"), b("b1")].map(runner);
+		const got: string[] = [];
+		for (let h = 1; h <= 6; h++) {
+			const w = selectWaiter(shared, ws);
+			if (!w) throw new Error("no waiter");
+			w.lastServedAt = t(h);
+			got.push(w.user);
+		}
+		expect(got).toEqual(["a", "b", "a", "b", "a", "b"]);
+	});
+});

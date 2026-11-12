@@ -55,6 +55,13 @@ export const ENV_TRIAGE_LABEL = "triage:env";
  */
 export const FAILED_START_LABEL = "failed:start";
 
+/**
+ * Marks a bead the dispatcher holds back: it was claimed and then released or
+ * its lease expired too many times (the last reasons are in the notes). Like a
+ * dead-letter queue after SQS maxReceiveCount. A human reopen clears it.
+ */
+export const NEEDS_HUMAN_LABEL = "needs:human";
+
 /** The environment name a bead points to, or null. */
 export function envNameOf(bead: Pick<Bead, "labels">): string | null {
 	const label = bead.labels.find(

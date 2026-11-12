@@ -307,6 +307,22 @@ describe("notes, reopen, close, activity", () => {
 		expect((await store.comments(id)).at(-1)?.text).toBe("reopened: try again");
 	});
 
+	test("reopen of an open bead held back with needs:human removes the label", async () => {
+		const { store, routes } = setup("ann");
+		const { id } = await store.create("ann", {
+			title: "t",
+			labels: ["queue:build"],
+		});
+		await store.setLabels(id, "mastermind", ["queue:build", "needs:human"]);
+		const res = await routes["/api/beads/:id/reopen"].POST(
+			req("POST", "", { reason: "fixed the repo" }, id),
+		);
+		expect(((await res.json()) as Bead).labels).toEqual(["queue:build"]);
+		expect((await store.comments(id)).at(-1)?.text).toBe(
+			"reopened: fixed the repo",
+		);
+	});
+
 	test("activity is newest first, pages with before, caps limit", async () => {
 		const { store, routes } = setup();
 		for (let i = 0; i < 5; i++) await store.create("duke", { title: `t${i}` });

@@ -6,7 +6,8 @@
 //   GET  /api/beads/:id                                -> BeadDetail
 //   POST /api/beads/:id/comments    {text}             -> 201 BeadComment
 //   POST /api/beads/:id/reopen      {reason?}          -> Bead (an open bead
-//                                   held back with failed:start: removes the label)
+//                                   held back with failed:start or needs:human:
+//                                   removes the label)
 //   POST /api/beads/:id/close       {reason?}          -> Bead
 //   GET  /api/activity?before=&limit=                  -> ActivityPage
 import {
@@ -18,6 +19,7 @@ import {
 	FAILED_START_LABEL,
 	foldTimeline,
 	isAgentActor,
+	NEEDS_HUMAN_LABEL,
 	type NewWork,
 	type Priority,
 	type TimelineEntry,
@@ -242,17 +244,16 @@ export function beadsRoutes(
 				const reason = str((await body(req)).reason, "reason", MAX_TEXT);
 				const id = idOf(req);
 				const bead = await s.get(id);
-				if (
-					bead.status !== "closed" &&
-					bead.labels.includes(FAILED_START_LABEL)
-				) {
+				const held = (l: string) =>
+					l === FAILED_START_LABEL || l === NEEDS_HUMAN_LABEL;
+				if (bead.status !== "closed" && bead.labels.some(held)) {
 					// The dispatcher offers it again once the label is gone.
 					await s.comment(id, account, `reopened: ${reason ?? "try again"}`);
 					return json(
 						await s.setLabels(
 							id,
 							account,
-							bead.labels.filter((l) => l !== FAILED_START_LABEL),
+							bead.labels.filter((l) => !held(l)),
 						),
 					);
 				}

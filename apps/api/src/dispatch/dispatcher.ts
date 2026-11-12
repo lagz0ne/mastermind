@@ -11,6 +11,12 @@
  *   then 5 min, then not at all (per runner+bead, in memory). After
  *   {@link MAX_FAILED_STARTS} failed starts (any runner) the bead gets
  *   {@link FAILED_START_LABEL} and a note; a human reopen removes the label.
+ * - max attempts (mm-210.65): a bead claimed and then released or expired
+ *   {@link MAX_ATTEMPTS} times (any runner, any reason; option `maxAttempts`)
+ *   gets {@link NEEDS_HUMAN_LABEL} and a note with the last reasons, and is
+ *   not offered until a human reopen removes the label. Prior art: SQS
+ *   maxReceiveCount + dead-letter queue, Temporal maximumAttempts. Counts are
+ *   in memory, as the back-off.
  * - sweep: beads whose lease died go back to their queue.
  * - onEvent: a journal event routes a bead with no queue and wakes the waiters
  *   of a queue that has ready work.
@@ -50,6 +56,7 @@ import {
 	type HeartbeatRequest,
 	isAgentActor,
 	leaseState,
+	NEEDS_HUMAN_LABEL,
 	type NextReply,
 	type NextRequest,
 	NOT_ACCEPTED_LABEL,
@@ -90,6 +97,12 @@ export const RELEASE_BACKOFF_MS = [60_000, 300_000] as const;
 
 /** Failed starts of a bead (any runner) before it is held back. */
 export const MAX_FAILED_STARTS = 3;
+
+/** Attempts (claim, then release or lease expiry) of a bead before it needs a human. */
+export const MAX_ATTEMPTS = 3;
+
+/** Reasons of the last attempts kept for the needs-a-human note. */
+const ATTEMPT_REASONS_KEPT = 3;
 
 /** A direct bead that nobody accepted is offered again after this. */
 export const DIRECT_RETRY_MS = 30_000;
@@ -184,6 +197,11 @@ export type DispatcherOptions = {
 	 * (ms, this server's clock); null: none. Absent: no gate.
 	 */
 	readiness?: (account: string, runner: string) => RunnerStatusSeen | null;
+	/**
+	 * Attempts before a bead needs a human (a setting of its environment or
+	 * queue). Absent or undefined: {@link MAX_ATTEMPTS}.
+	 */
+	maxAttempts?: (bead: Bead) => number | undefined;
 	now?: () => Date;
 	onError?: (error: unknown) => void;
 };
@@ -203,7 +221,7 @@ export type EnvResolution =
 	| { ok: true; env: DispatchEnv }
 	| { ok: false; reason: string };
 
-export { ENV_TRIAGE_LABEL, FAILED_START_LABEL };
+export { ENV_TRIAGE_LABEL, FAILED_START_LABEL, NEEDS_HUMAN_LABEL };
 
 /** Read from the bead's labels: repo:, ref:, provider:, req: (see beads/env.ts). */
 export function defaultEnv(bead: Bead): DispatchEnv {
@@ -314,6 +332,8 @@ export class Dispatcher {
 	readonly #cool = new Map<string, { n: number; until: number }>();
 	/** Failed starts per bead. */
 	readonly #failed = new Map<string, number>();
+	/** Attempts per bead that ended without a result, with the last reasons. */
+	readonly #attempts = new Map<string, { n: number; reasons: string[] }>();
 	/** Per-queue lock: one claim pass at a time per queue in this replica. */
 	readonly #locks = new Map<string, Promise<unknown>>();
 	/** Recent decisions, oldest first; at most {@link DECISIONS_KEPT}. */
@@ -504,15 +524,17 @@ export class Dispatcher {
 		const n = (this.#cool.get(key)?.n ?? 0) + 1;
 		const ms = RELEASE_BACKOFF_MS[n - 1] ?? Number.POSITIVE_INFINITY;
 		this.#cool.set(key, { n, until: this.#now().getTime() + ms });
+		let heldBack = bead.labels.includes(FAILED_START_LABEL);
 		if (req.startFailed === true) {
 			const failed = (this.#failed.get(beadId) ?? 0) + 1;
 			this.#failed.set(beadId, failed);
-			if (
-				failed >= MAX_FAILED_STARTS &&
-				!bead.labels.includes(FAILED_START_LABEL)
-			)
+			if (failed >= MAX_FAILED_STARTS && !heldBack) {
 				await this.#holdBack(bead, failed, reason);
+				heldBack = true;
+			}
 		}
+		// failed:start already says why; one hold-back label is enough.
+		await this.#attempt(bead, `released by ${actor}: ${reason}`, heldBack);
 		this.#see({ kind: "done", actor, beadId });
 		this.#signal(bead);
 		return { ok: true };
@@ -535,9 +557,38 @@ export class Dispatcher {
 		}
 	}
 
-	/** Drop the back-off and failure count of a bead. */
+	/**
+	 * Count one attempt that ended without a result. At the bead's maximum:
+	 * label {@link NEEDS_HUMAN_LABEL} and a note with the last reasons.
+	 */
+	async #attempt(bead: Bead, reason: string, heldBack: boolean): Promise<void> {
+		const prev = this.#attempts.get(bead.id);
+		const n = (prev?.n ?? 0) + 1;
+		const reasons = [...(prev?.reasons ?? []), reason].slice(
+			-ATTEMPT_REASONS_KEPT,
+		);
+		this.#attempts.set(bead.id, { n, reasons });
+		const max = this.#opts.maxAttempts?.(bead) ?? MAX_ATTEMPTS;
+		if (n < max || heldBack || bead.labels.includes(NEEDS_HUMAN_LABEL)) return;
+		try {
+			await this.#work.comment(
+				bead.id,
+				this.#actor,
+				`not dispatched: ${n} attempts ended without a result; last: ${reasons.join("; ")}. Reopen to try again.`,
+			);
+			await this.#work.setLabels(bead.id, this.#actor, [
+				...bead.labels,
+				NEEDS_HUMAN_LABEL,
+			]);
+		} catch (error) {
+			this.#opts.onError?.(error);
+		}
+	}
+
+	/** Drop the back-off, failure and attempt counts of a bead. */
 	#forget(beadId: string): void {
 		this.#failed.delete(beadId);
+		this.#attempts.delete(beadId);
 		for (const key of this.#cool.keys())
 			if (key.endsWith(` ${beadId}`)) this.#cool.delete(key);
 	}
@@ -553,6 +604,11 @@ export class Dispatcher {
 			try {
 				await this.#work.release(bead.id, bead.assignee);
 				released.push(bead.id);
+				await this.#attempt(
+					bead,
+					`lease of ${bead.assignee} expired (last heartbeat ${bead.lease?.heartbeatAt ?? "none"})`,
+					bead.labels.includes(FAILED_START_LABEL),
+				);
 				this.#see({ kind: "done", actor: bead.assignee, beadId: bead.id });
 				this.#signal(bead);
 			} catch (error) {
@@ -992,8 +1048,22 @@ export class Dispatcher {
 				);
 				return false;
 			}
+			if (b.labels.includes(NEEDS_HUMAN_LABEL)) {
+				this.#decide(
+					"decline",
+					queue,
+					b.id,
+					undefined,
+					`held back: label ${NEEDS_HUMAN_LABEL} (reopen to try again)`,
+				);
+				return false;
+			}
 			// Was held back and the label is gone: a human reopened it.
-			if ((this.#failed.get(b.id) ?? 0) >= MAX_FAILED_STARTS)
+			if (
+				(this.#failed.get(b.id) ?? 0) >= MAX_FAILED_STARTS ||
+				(this.#attempts.get(b.id)?.n ?? 0) >=
+					(this.#opts.maxAttempts?.(b) ?? MAX_ATTEMPTS)
+			)
 				this.#forget(b.id);
 			return true;
 		});

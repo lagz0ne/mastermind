@@ -3,6 +3,7 @@ import {
 	ENV_TRIAGE_LABEL,
 	envNameOf,
 	FAILED_START_LABEL,
+	NEEDS_HUMAN_LABEL,
 	queueOf,
 } from "@mastermind/core";
 import { Link } from "@tanstack/react-router";
@@ -93,6 +94,20 @@ export function FailedStartMark({ bead }: { bead: Pick<Bead, "labels"> }) {
 	);
 }
 
+/** The dispatcher holds the bead back: 3 attempts ended without a result. */
+export function NeedsHumanMark({ bead }: { bead: Pick<Bead, "labels"> }) {
+	if (!bead.labels.includes(NEEDS_HUMAN_LABEL)) return null;
+	return (
+		<span
+			data-needs-human
+			title="Not dispatched: it was released or its lease expired too many times (the reasons are in the notes). Reopen to try again."
+			className="text-signal"
+		>
+			needs a human
+		</span>
+	);
+}
+
 /** `PR #7` for a GitHub-style pull request URL; else `PR`. */
 export function prLabel(prUrl: string): string {
 	const n = /\/pull\/(\d+)/.exec(prUrl)?.[1];
@@ -125,7 +140,9 @@ export function PrLink({
 export function BeadCard({ bead }: { bead: Bead }) {
 	const queue = queueOf(bead);
 	const env = envNameOf(bead) || bead.labels.includes(ENV_TRIAGE_LABEL);
-	const failed = bead.labels.includes(FAILED_START_LABEL);
+	const failed =
+		bead.labels.includes(FAILED_START_LABEL) ||
+		bead.labels.includes(NEEDS_HUMAN_LABEL);
 	const pr = bead.output?.prUrl;
 	// The PR link sits over the card, not in it: a link in a link is not valid
 	// HTML. A hidden copy in the footer keeps its place.
@@ -165,6 +182,7 @@ export function BeadCard({ bead }: { bead: Bead }) {
 						<CardFooter className="text-[11px] text-muted-foreground">
 							<EnvMark bead={bead} />
 							<FailedStartMark bead={bead} />
+							<NeedsHumanMark bead={bead} />
 							{bead.assignee && (
 								<span className="truncate">{bead.assignee}</span>
 							)}
