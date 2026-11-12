@@ -363,6 +363,11 @@ environment to the agent: the model credential stays in the proxy box.
 
 - Default on with Docker or Podman, also with `--no-paseo-link` (then without the host in
   your Paseo). `MASTERMIND_BOX_CONTROL=exec`: the agent runs through `docker exec paseo run`.
+- The environment's setup and check commands run in a Paseo terminal of the box over the same
+  connection: `sh -c '( <cmd> ) 2>&1'` then a marker line with a random nonce and the exit code;
+  the runner reads the terminal until the marker and kills it. stdout and stderr come mixed, a
+  line over 500 characters wraps, no stdin: the ticket gets the same output tail as before.
+  Measured: 100-300 ms per command, against 0.7-8.9 s through Docker exec on rootless Podman.
 - No connection to the box daemon: the ticket says so and the agent runs through exec.
 - Docker stays for the box lifecycle, the git clone and push with the credential, and big files.
 - Measured on rootless Podman, one agent step with Paseo's mock agent: 6.1 s over the

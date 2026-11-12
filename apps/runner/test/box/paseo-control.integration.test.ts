@@ -16,7 +16,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DockerDriver, dockerEndpoint } from "../../src/box/docker.ts";
 import { BOX_LABEL } from "../../src/box/driver.ts";
-import { runAgentOverPaseo } from "../../src/box/paseo-control.ts";
+import {
+	runAgentOverPaseo,
+	runCommandOverPaseo,
+} from "../../src/box/paseo-control.ts";
 import {
 	dockerExecStream,
 	linkDriver,
@@ -90,6 +93,38 @@ describe.skipIf(!host)("box control over Paseo on a real engine", () => {
 		const c = await paseoLinkOf(box)?.client();
 		if (!c) throw new Error("no link");
 		const tConnect = performance.now() - t0;
+
+		// Setup/check commands through a terminal vs Docker exec (mm-210.74).
+		const cmds = [
+			"echo out; echo err >&2; exit 3",
+			"seq 1 300",
+			`printf '%0600d\\n' 7`,
+			"true",
+		];
+		const term: number[] = [];
+		const ex: number[] = [];
+		for (const cmd of cmds) {
+			let t = performance.now();
+			const r = await runCommandOverPaseo(c, cmd, {
+				cwd: "/workspace",
+				signal: new AbortController().signal,
+			});
+			term.push(performance.now() - t);
+			t = performance.now();
+			const e = await box.exec(["sh", "-c", cmd], { workdir: "/workspace" });
+			ex.push(performance.now() - t);
+			expect(r.code).toBe(e.code);
+			if (cmd.startsWith("seq")) {
+				expect(r.stdout.split("\n")).toHaveLength(300);
+				expect(r.stdout.split("\n").at(-1)).toBe("300");
+			}
+			if (cmd.startsWith("echo")) expect(r.stdout).toBe("out\nerr");
+			if (cmd.startsWith("printf"))
+				expect(r.stdout.replaceAll("\n", "")).toHaveLength(600);
+		}
+		console.log(
+			`box commands: terminal ${term.map(Math.round).join(", ")} ms; docker exec ${ex.map(Math.round).join(", ")} ms`,
+		);
 
 		const sdk: number[] = [];
 		for (let i = 0; i < 3; i++) {

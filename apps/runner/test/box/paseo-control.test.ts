@@ -8,6 +8,7 @@ import {
 	providerModel,
 	readResult,
 	runAgentOverPaseo,
+	runCommandOverPaseo,
 	structuredPrompt,
 } from "../../src/box/paseo-control.ts";
 import { type BoxClient, linkDriver } from "../../src/box/paseo-link.ts";
@@ -328,5 +329,141 @@ describe("paseoRunAgent over a linked box", () => {
 	test("a box not made by linkDriver: exec", async () => {
 		const box = await new FakeDriver().create(spec);
 		expect(await paseoRunAgent()(box, task(), never)).toBeNull();
+	});
+});
+
+/** A fake terminal: shows `lines` after `after` captures; the marker from the real nonce. */
+function fakeTerminal(output: string[], code: number | null, after = 1) {
+	const calls: string[] = [];
+	let wrapped = "";
+	let n = 0;
+	const c = {
+		createWorkspace: async () => ({
+			workspace: { id: "ws-1", workspaceDirectory: "/workspace" },
+			error: null,
+		}),
+		createTerminal: async (
+			_cwd: string,
+			_name: string,
+			_r: unknown,
+			o: { args: string[]; workspaceId: string },
+		) => {
+			wrapped = o.args[1] ?? "";
+			calls.push(`create ${o.workspaceId}`);
+			return { terminal: { id: "t-1" }, error: null };
+		},
+		captureTerminal: async () => {
+			calls.push("capture");
+			const nonce = wrapped.match(/'__MM_EXIT_' '([0-9a-f]+)_'/)?.[1];
+			const done = ++n > after && code !== null;
+			return {
+				lines: [...output, ...(done ? [`__MM_EXIT_${nonce}_${code}`, ""] : [])],
+			};
+		},
+		killTerminal: async () => {
+			calls.push("kill");
+			return {};
+		},
+	};
+	return { c: c as unknown as BoxClient, calls, wrapped: () => wrapped };
+}
+
+describe("runCommandOverPaseo (mm-210.74)", () => {
+	const o = (signal = never) => ({ cwd: "/workspace", signal, pollMs: 1 });
+	test("output before the marker, the exit code; the terminal is killed", async () => {
+		const t = fakeTerminal(["out", "err   "], 3);
+		const r = await runCommandOverPaseo(t.c, "make test", o());
+		expect(r).toEqual({ code: 3, stdout: "out\nerr", stderr: "" });
+		expect(t.wrapped()).toContain("( make test\n) 2>&1");
+		expect(t.calls[0]).toBe("create ws-1");
+		expect(t.calls.at(-1)).toBe("kill");
+	});
+
+	test("a line that looks like a marker without the nonce is output", async () => {
+		const t = fakeTerminal(["__MM_EXIT_fake_0"], 0);
+		const r = await runCommandOverPaseo(t.c, "x", o());
+		expect(r.stdout).toBe("__MM_EXIT_fake_0");
+	});
+
+	test("abort: 130 and the terminal is killed", async () => {
+		const t = fakeTerminal(["..."], null);
+		const ac = new AbortController();
+		const p = runCommandOverPaseo(t.c, "sleep 99", o(ac.signal));
+		await Bun.sleep(5);
+		ac.abort();
+		expect((await p).code).toBe(130);
+		expect(t.calls.at(-1)).toBe("kill");
+	});
+
+	test("no terminal: the reason", async () => {
+		const t = fakeTerminal([], 0);
+		(t.c as unknown as { createTerminal: () => unknown }).createTerminal =
+			async () => ({ terminal: null, error: "denied" });
+		expect((await runCommandOverPaseo(t.c, "x", o())).stderr).toContain(
+			"denied",
+		);
+	});
+});
+
+describe("runInBox with runCommand (mm-210.74)", () => {
+	const base = (d: FakeDriver) => ({
+		driver: d,
+		defaultImage: "img",
+		outDir: out,
+		readyCommand: null,
+	});
+	const withSetup = () =>
+		task({
+			env: { ...task().env, setup: ["bun install"], check: ["bun test"] },
+		});
+
+	test("setup and check through the hook, not exec", async () => {
+		const d = new FakeDriver();
+		const seen: string[] = [];
+		const res = await runInBox(
+			withSetup(),
+			{
+				...base(d),
+				runCommand: async (_b, cmd) => {
+					seen.push(cmd);
+					return { code: 0, stdout: "", stderr: "" };
+				},
+			},
+			never,
+		);
+		expect(res.status).toBe("done");
+		expect(seen).toEqual(["bun install", "bun test"]);
+		expect(d.execs.some((e) => e.cmd.join(" ") === "sh -c bun install")).toBe(
+			false,
+		);
+	});
+
+	test("a failing check stops the task with the output tail", async () => {
+		const d = new FakeDriver();
+		await expect(
+			runInBox(
+				withSetup(),
+				{
+					...base(d),
+					runCommand: async (_b, cmd) =>
+						cmd === "bun test"
+							? { code: 1, stdout: "1 test failed", stderr: "" }
+							: { code: 0, stdout: "", stderr: "" },
+				},
+				never,
+			),
+		).rejects.toThrow("check `bun test` exited 1: 1 test failed");
+	});
+
+	test("the hook says null: exec", async () => {
+		const d = new FakeDriver();
+		await runInBox(
+			withSetup(),
+			{ ...base(d), runCommand: async () => null },
+			never,
+		);
+		expect(d.execs.some((e) => e.cmd.join(" ") === "sh -c bun install")).toBe(
+			true,
+		);
 	});
 });

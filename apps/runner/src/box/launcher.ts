@@ -26,7 +26,7 @@ import { DockerDriver, dockerEndpoint } from "./docker.ts";
 import type { BoxDriver } from "./driver.ts";
 import type { BoxFiles } from "./files.ts";
 import { DEFAULT_BOX_IMAGE } from "./image.ts";
-import { runAgentOverPaseo } from "./paseo-control.ts";
+import { runAgentOverPaseo, runCommandOverPaseo } from "./paseo-control.ts";
 import {
 	dockerExecStream,
 	linkDriver,
@@ -205,6 +205,20 @@ async function withPaseoLink(
 }
 
 /**
+ * Setup/check commands in a Paseo terminal over the box's connection
+ * (mm-210.74). No connection: exec (null); the agent step says why.
+ */
+export function paseoRunCommand(): NonNullable<BoxRunOptions["runCommand"]> {
+	return async (box, cmd, o) => {
+		const link = paseoLinkOf(box);
+		if (!link) return null;
+		const c = await link.client().catch(() => null);
+		if (!c) return null;
+		return runCommandOverPaseo(c, cmd, o);
+	};
+}
+
+/**
  * The agent step over the box's Paseo connection. No connection: the ticket
  * says so and the agent runs through exec (null).
  */
@@ -260,7 +274,9 @@ export async function startBoxMode(i: BoxModeInput) {
 			log: i.log,
 			...(i.onStep ? { onStep: i.onStep } : {}),
 			...(i.files ? { files: i.files } : {}),
-			...(control ? { runAgent: paseoRunAgent(i.onStep) } : {}),
+			...(control
+				? { runAgent: paseoRunAgent(i.onStep), runCommand: paseoRunCommand() }
+				: {}),
 			prepare: (task, step, signal) =>
 				prepareBox(
 					task,

@@ -233,3 +233,92 @@ async function waitResilient(
 		}
 	}
 }
+
+/** The SDK calls a terminal command uses (a fake in tests). */
+export type TerminalClient = Pick<
+	DaemonClient,
+	"createWorkspace" | "createTerminal" | "captureTerminal" | "killTerminal"
+>;
+
+/** The Paseo workspace at `path` in the box (created once; Paseo reuses it). */
+export async function workspaceAt(
+	c: Pick<DaemonClient, "createWorkspace">,
+	path: string,
+): Promise<{ id: string; dir: string } | { error: string }> {
+	const ws = await c.createWorkspace({
+		source: { kind: "directory", path },
+	} as Parameters<DaemonClient["createWorkspace"]>[0]);
+	if (!ws.workspace) return { error: ws.error ?? "?" };
+	return { id: ws.workspace.id, dir: ws.workspace.workspaceDirectory ?? path };
+}
+
+/** Terminal width: wide, so long lines rarely wrap (they still can). */
+const COLS = 500;
+
+/**
+ * One setup/check command in a Paseo terminal of the box (mm-210.74, verdict
+ * of mm-210.71): `sh -c '( <cmd> ) 2>&1; printf <marker><code>'`, then the
+ * terminal is read until the marker and killed (its scrollback goes with
+ * it). Like the Expect/tmux marker pattern: stdout and stderr come mixed, a
+ * line wider than {@link COLS} wraps, no stdin. Only for commands that hold
+ * no secret and need only text output and the exit code; the credential
+ * clone and the git bundle stay on Docker exec (mm-210.64).
+ */
+export async function runCommandOverPaseo(
+	c: TerminalClient,
+	cmd: string,
+	o: {
+		cwd: string;
+		signal: AbortSignal;
+		/** Default 60 min. */
+		timeoutMs?: number;
+		/** Poll interval; default 250 ms. */
+		pollMs?: number;
+	},
+): Promise<ExecResult> {
+	const nonce = crypto.randomUUID().replaceAll("-", "");
+	const marker = `__MM_EXIT_${nonce}_`;
+	// The marker is printed in two parts, so the command line itself (echoed
+	// by nothing, but kept in `ps`) never matches it.
+	const wrapped = `( ${cmd}\n) 2>&1; printf '\\n%s%s%s\\n' '__MM_EXIT_' '${nonce}_' "$?"; exec sleep 600`;
+	const ws = await workspaceAt(c, o.cwd);
+	if ("error" in ws)
+		return fail(`paseo: no workspace at ${o.cwd}: ${ws.error}`);
+	const created = await c.createTerminal(
+		o.cwd,
+		"mastermind: setup",
+		undefined,
+		{
+			workspaceId: ws.id,
+			command: "sh",
+			args: ["-c", wrapped],
+			size: { rows: 50, cols: COLS },
+		},
+	);
+	const id = created.terminal?.id;
+	if (!id) return fail(`paseo terminal: ${created.error ?? "not created"}`);
+	const until = Date.now() + (o.timeoutMs ?? 60 * 60_000);
+	try {
+		for (;;) {
+			if (o.signal.aborted) return fail("stopped", 130);
+			const cap = await c.captureTerminal(id, { stripAnsi: true });
+			const lines = cap.lines.map((l) => l.trimEnd());
+			const at = lines.findIndex((l) => l.startsWith(marker));
+			if (at >= 0) {
+				const code = Number(lines[at]?.slice(marker.length));
+				let out = lines.slice(0, at);
+				while (out.length && out[out.length - 1] === "") out = out.slice(0, -1);
+				return {
+					code: Number.isInteger(code) ? code : 1,
+					stdout: out.join("\n"),
+					stderr: "",
+				};
+			}
+			if (Date.now() > until)
+				return fail(`paseo terminal: \`${cmd}\` did not end in time`, 124);
+			await Bun.sleep(o.pollMs ?? 250);
+		}
+	} finally {
+		await c.killTerminal(id).catch(() => {});
+	}
+}

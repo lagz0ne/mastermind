@@ -103,6 +103,15 @@ export type BoxRunOptions = {
 		task: BoxTask,
 		signal: AbortSignal,
 	) => Promise<ExecResult | null>;
+	/**
+	 * Setup and check commands through another path than exec (mm-210.74: a
+	 * Paseo terminal, paseo-control.ts). Absent or null: exec.
+	 */
+	runCommand?: (
+		box: Box,
+		cmd: string,
+		o: { cwd: string; signal: AbortSignal },
+	) => Promise<ExecResult | null>;
 	/** Waits for the agent host in the box; default `paseo status`. null: no wait. */
 	readyCommand?: string[] | null;
 	/** How long the agent host may take to be ready. Default 60 s. */
@@ -434,10 +443,21 @@ export async function runInBox(
 		for (const l of prep?.lifecycle ?? []) await must(l.what, l.cmd);
 		if (prep?.lifecycle.length)
 			step(`devcontainer lifecycle: ${prep.lifecycle.length} commands passed`);
-		for (const cmd of env.setup ?? [])
-			await must(`setup \`${cmd}\``, ["sh", "-c", cmd]);
-		for (const cmd of env.check ?? [])
-			await must(`check \`${cmd}\``, ["sh", "-c", cmd]);
+		const shell = async (what: string, cmd: string) => {
+			const r = await opts.runCommand?.(b, cmd, {
+				cwd: WORKSPACE,
+				signal: all,
+			});
+			if (!r) return must(what, ["sh", "-c", cmd]);
+			if (all.aborted) throw stopped();
+			if (r.code !== 0)
+				throw new BoxStepError(
+					redact(`${what} exited ${r.code}: ${tail(r)}`, gitSecrets),
+				);
+			return r;
+		};
+		for (const cmd of env.setup ?? []) await shell(`setup \`${cmd}\``, cmd);
+		for (const cmd of env.check ?? []) await shell(`check \`${cmd}\``, cmd);
 		if ((env.setup?.length ?? 0) + (env.check?.length ?? 0) > 0)
 			step("setup and check passed");
 		// The agent phase: only the environment's allow list from here on.
