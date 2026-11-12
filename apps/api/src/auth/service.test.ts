@@ -286,6 +286,75 @@ describe("login by code", () => {
 		).rejects.toMatchObject({ code: "forbidden" });
 		await expect(
 			auth.approveLogin(other.code, "Bad Name", operator),
-		).rejects.toMatchObject({ code: "bad_request" });
+		).rejects.toMatchObject({
+			code: "bad_request",
+			message: "account id: a-z, 0-9 and -, at most 32",
+		});
+	});
+
+	test("a name in any case: the id is lowercase, the display name keeps the case", async () => {
+		const { auth, stores } = clocked();
+		const first = await auth.startLogin("a");
+		expect(
+			await auth.approveLogin(first.code, " Lagz0ne ", operator),
+		).toMatchObject({ account: "lagz0ne", created: true });
+		const r = await auth.pollLogin(first.cookie);
+		if (r.status !== "approved") throw new Error(r.status);
+		expect(r.account).toBe("lagz0ne");
+		expect(await auth.session(r.sessionId)).toBe("lagz0ne");
+		expect((await stores.accounts.get("lagz0ne"))?.value).toMatchObject({
+			id: "lagz0ne",
+			displayName: "Lagz0ne",
+		});
+
+		// Lowercase typing logs in to the same account and keeps the display name.
+		const again = await auth.startLogin("b");
+		expect(
+			await auth.approveLogin(again.code, "lagz0ne", operator),
+		).toMatchObject({ account: "lagz0ne", created: false });
+		await auth.pollLogin(again.cookie);
+		expect((await stores.accounts.get("lagz0ne"))?.value.displayName).toBe(
+			"Lagz0ne",
+		);
+
+		// The account itself, in a new case: the new display name.
+		const self = await auth.startLogin("c");
+		await auth.approveLogin(self.code, "LAGZ0NE", {
+			kind: "account",
+			account: "lagz0ne",
+		});
+		await auth.pollLogin(self.cookie);
+		expect((await stores.accounts.get("lagz0ne"))?.value.displayName).toBe(
+			"LAGZ0NE",
+		);
+
+		// Another account cannot reach an existing one through its case.
+		const other = await auth.startLogin("d");
+		await expect(
+			auth.approveLogin(other.code, "Lagz0ne", {
+				kind: "account",
+				account: "duke",
+			}),
+		).rejects.toMatchObject({ code: "forbidden" });
+	});
+
+	test("an account made before display names gets one from a mixed-case approval", async () => {
+		const { auth, stores } = clocked();
+		await stores.accounts.create("lagz0ne", {
+			id: "lagz0ne",
+			createdAt: "2026-11-10T00:00:00.000Z",
+			invitedBy: null,
+		});
+		const s = await auth.startLogin("a");
+		await auth.approveLogin(s.code, "Lagz0ne", operator);
+		expect(await auth.pollLogin(s.cookie)).toMatchObject({
+			status: "approved",
+		});
+		expect((await stores.accounts.get("lagz0ne"))?.value).toEqual({
+			id: "lagz0ne",
+			displayName: "Lagz0ne",
+			createdAt: "2026-11-10T00:00:00.000Z",
+			invitedBy: null,
+		});
 	});
 });

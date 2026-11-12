@@ -1,8 +1,9 @@
 import { BusError, type Store } from "@mastermind/bus";
 import { normalizeCode, randomCode } from "./code.ts";
 import {
+	ACCOUNT_ID_RULE,
+	accountIdOf,
 	formatCredential,
-	isAccountId,
 	isName,
 	parseCredential,
 	randomId,
@@ -33,6 +34,11 @@ export type Kv<T> = Pick<
 
 export type Account = {
 	id: string;
+	/**
+	 * The name in the case the person typed it (`Lagz0ne` for id `lagz0ne`).
+	 * Absent on accounts made before display names, and when it equals the id.
+	 */
+	displayName?: string;
 	createdAt: string;
 	invitedBy: string | null;
 };
@@ -63,7 +69,13 @@ export type TokenRecord =
 			approved: Approval | null;
 	  };
 
-export type Approval = { account: string; create: boolean; by: string | null };
+export type Approval = {
+	account: string;
+	/** The name as typed, when its case differs from the id. */
+	displayName?: string;
+	create: boolean;
+	by: string | null;
+};
 
 export type Approver =
 	| { kind: "operator" }
@@ -176,30 +188,34 @@ export class Auth {
 	}
 
 	/**
-	 * Approve the login of `code` for `account`. The operator may name any
-	 * account (it is created when missing). A logged-in account approves for
-	 * itself (another device) or for a new account name (an invite). Of many
+	 * Approve the login of `code` for `name`. The name is trimmed and
+	 * lowercased to the account id (`Lagz0ne` -> `lagz0ne`); a name in mixed
+	 * case is kept as the display name. The operator may name any account (it
+	 * is created when missing). A logged-in account approves for itself
+	 * (another device) or for a new account name (an invite). Of many
 	 * concurrent approvals, one wins.
 	 */
 	async approveLogin(
 		codeInput: string,
-		account: string,
+		name: string,
 		approver: Approver,
 	): Promise<ApproveResult> {
-		if (!isAccountId(account))
-			throw new AuthError("bad_request", "bad account id");
+		const account = accountIdOf(name);
+		if (!account) throw new AuthError("bad_request", ACCOUNT_ID_RULE);
+		const typed = name.trim();
+		const display = typed !== account ? { displayName: typed } : {};
 		const exists = (await this.stores.accounts.get(account)) !== null;
 		let approval: Approval;
 		if (approver.kind === "operator")
-			approval = { account, create: !exists, by: null };
+			approval = { account, ...display, create: !exists, by: null };
 		else if (approver.account === account)
-			approval = { account, create: false, by: account };
+			approval = { account, ...display, create: false, by: account };
 		else if (exists)
 			throw new AuthError(
 				"forbidden",
 				`account ${account} exists; only it can approve its own logins`,
 			);
-		else approval = { account, create: true, by: approver.account };
+		else approval = { account, ...display, create: true, by: approver.account };
 
 		const code = normalizeCode(codeInput);
 		if (!code) throw noSuchCode();
@@ -263,13 +279,16 @@ export class Auth {
 			if (isConflict(err)) return { status: "expired" };
 			throw err;
 		}
+		let made = false;
 		if (approved.create) {
 			try {
 				await this.stores.accounts.create(approved.account, {
 					id: approved.account,
+					...(approved.displayName && { displayName: approved.displayName }),
 					createdAt: this.now().toISOString(),
 					invitedBy: approved.by,
 				});
+				made = true;
 			} catch (err) {
 				if (!isConflict(err)) throw err;
 				// The operator may log in to an account made meanwhile; an
@@ -277,8 +296,24 @@ export class Auth {
 				if (approved.by !== null)
 					throw new AuthError("conflict", `account ${approved.account} exists`);
 			}
-		} else if (!(await this.stores.accounts.get(approved.account)))
-			return { status: "expired" };
+		}
+		if (!made) {
+			const a = await this.stores.accounts.get(approved.account);
+			if (!a) return { status: "expired" };
+			// The operator or the account itself typed the name in a new case:
+			// that is the display name from now on. Lowercase typing keeps it.
+			if (approved.displayName && a.value.displayName !== approved.displayName)
+				try {
+					await this.stores.accounts.update(
+						approved.account,
+						{ ...a.value, displayName: approved.displayName },
+						a.revision,
+					);
+				} catch (err) {
+					// A concurrent change wins; the login goes on.
+					if (!isConflict(err)) throw err;
+				}
+		}
 		const sessionId = randomSecret();
 		await this.stores.sessions.create(sha256(sessionId), {
 			account: approved.account,
@@ -359,6 +394,11 @@ export class Auth {
 			keys.map((k) => this.stores.serviceAccounts.get(k)),
 		);
 		return entries.flatMap((e) => (e ? [view(e.value)] : []));
+	}
+
+	/** The name to show for an account: its display name, else its id. */
+	async displayName(id: string): Promise<string> {
+		return (await this.stores.accounts.get(id))?.value.displayName ?? id;
 	}
 
 	/** Every account, oldest first. */

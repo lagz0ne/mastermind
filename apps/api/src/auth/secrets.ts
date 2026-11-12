@@ -56,6 +56,18 @@ export function isAccountId(value: unknown): value is string {
 	return typeof value === "string" && ACCOUNT_ID.test(value);
 }
 
+/** The account id rule, as a person reads it in an error message. */
+export const ACCOUNT_ID_RULE = "account id: a-z, 0-9 and -, at most 32";
+
+/**
+ * A name as a person types it (`' Lagz0ne '`) to the account id (`lagz0ne`):
+ * trimmed and lowercased. Null when the result breaks the id rule.
+ */
+export function accountIdOf(typed: string): string | null {
+	const id = typed.trim().toLowerCase();
+	return ACCOUNT_ID.test(id) ? id : null;
+}
+
 export function isName(value: unknown): value is string {
 	return typeof value === "string" && NAME.test(value);
 }

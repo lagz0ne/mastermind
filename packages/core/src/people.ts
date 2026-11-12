@@ -7,6 +7,8 @@
 /** An account (a human). */
 export type AccountView = {
 	id: string;
+	/** The name in the case the person typed it (`Lagz0ne`); absent = the id. */
+	displayName?: string;
 	createdAt: string;
 	/** The account that invited it; null for the first account. */
 	invitedBy: string | null;

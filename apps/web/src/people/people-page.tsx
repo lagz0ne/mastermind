@@ -77,10 +77,12 @@ function ApproveLoginPanel({
 	const submit = (e: FormEvent) => {
 		e.preventDefault();
 		if (!code.trim()) return setError("the code is required");
-		if (!ID.test(account)) return setError(`account id: ${ID_HINT}`);
+		// Any case: the server lowers it for the id and keeps it as the display name.
+		if (!ID.test(account.trim().toLowerCase()))
+			return setError(`account id: ${ID_HINT}`);
 		setBusy(true);
 		setError(null);
-		approveLogin(code, account)
+		approveLogin(code, account.trim())
 			.then((r) => {
 				setResult(r);
 				onDone();
@@ -122,12 +124,13 @@ function ApproveLoginPanel({
 					className="h-7 w-32 border bg-background px-2 font-mono text-sm uppercase"
 				/>
 				<label htmlFor="approve-account" className="text-sm">
-					Account id
+					Account name
 				</label>
 				<input
 					id="approve-account"
 					value={account}
-					onChange={(e) => setAccount(e.target.value.trim().toLowerCase())}
+					onChange={(e) => setAccount(e.target.value)}
+					title="Any case: the id is the name in lowercase; the name keeps your case"
 					placeholder="minh"
 					autoComplete="off"
 					className="h-7 w-40 border bg-background px-2 font-mono text-sm"
@@ -379,7 +382,7 @@ function AccountRows({
 						g.account === me && "underline decoration-2 underline-offset-4",
 					)}
 				>
-					{g.account}
+					{g.name}
 				</span>
 				<span
 					className={cn(

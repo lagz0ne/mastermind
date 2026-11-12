@@ -16,7 +16,7 @@ import {
  *   POST   /api/auth/login/approve         {code, account}; operator (Bearer key) or a session
  *   GET    /api/auth/login/poll            pending-login cookie -> {status}; session cookie once approved
  *   POST   /api/auth/logout
- *   GET    /api/auth/me                    -> {account, csrf}
+ *   GET    /api/auth/me                    -> {account, displayName, csrf}
  *   POST   /api/auth/tokens                {kind: "enrol", name} -> single-use enrol token
  *   POST   /api/auth/enrol                 {token} -> service account credential (runner adapters)
  *   GET    /api/auth/credential            Bearer <credential> -> 200 {account, serviceAccount} or 401
@@ -226,9 +226,10 @@ export function authRoutes(
 		},
 		"/api/auth/me": {
 			GET: withAccount(
-				async (_req, account) =>
+				async (_req, account, auth) =>
 					json({
 						account,
+						displayName: await auth.displayName(account),
 						csrf: Bun.CSRF.generate(opts.csrfSecret, {
 							expiresIn: 12 * 60 * 60 * 1000,
 						}),

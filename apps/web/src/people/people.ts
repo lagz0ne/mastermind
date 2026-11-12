@@ -93,6 +93,8 @@ export function usePeople(): People {
 /** One account and its runner rows, for the table. */
 export type AccountGroup = {
 	account: string;
+	/** What to show: the display name, else the id. */
+	name: string;
 	invitedBy: string | null;
 	createdAt: string | null;
 	runners: RunnerView[];
@@ -107,6 +109,7 @@ export function groupByAccount(
 	for (const a of accounts)
 		groups.set(a.id, {
 			account: a.id,
+			name: a.displayName ?? a.id,
 			invitedBy: a.invitedBy,
 			createdAt: a.createdAt || null,
 			runners: [],
@@ -114,7 +117,13 @@ export function groupByAccount(
 	for (const r of runners) {
 		let g = groups.get(r.account);
 		if (!g) {
-			g = { account: r.account, invitedBy: null, createdAt: null, runners: [] };
+			g = {
+				account: r.account,
+				name: r.account,
+				invitedBy: null,
+				createdAt: null,
+				runners: [],
+			};
 			groups.set(r.account, g);
 		}
 		g.runners.push(r);

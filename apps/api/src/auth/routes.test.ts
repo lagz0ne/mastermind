@@ -51,6 +51,34 @@ describe("auth routes", () => {
 		expect(res.status).toBe(401);
 	});
 
+	test("me shows the display name in the case it was typed", async () => {
+		const s = setup();
+		const sessionId = await loginAs(s.auth, "Lagz0ne");
+		const me = await s.routes["/api/auth/me"].GET(
+			new Request(`${URL_BASE}/x`, {
+				headers: { cookie: `${SESSION_COOKIE}=${sessionId}` },
+			}),
+		);
+		expect(await me.json()).toMatchObject({
+			account: "lagz0ne",
+			displayName: "Lagz0ne",
+		});
+	});
+
+	test("approve: a bad name gets 400 with the rule", async () => {
+		const { routes, cookie, csrf } = await login();
+		const res = await routes["/api/auth/login/approve"].POST(
+			post(
+				{ code: "ABCD-EFGH", account: "no spaces" },
+				{ cookie, [CSRF_HEADER]: csrf },
+			),
+		);
+		expect(res.status).toBe(400);
+		expect(await res.json()).toEqual({
+			error: "account id: a-z, 0-9 and -, at most 32",
+		});
+	});
+
 	test("minting tokens needs the CSRF header; only enrol tokens are left", async () => {
 		const { routes, cookie, csrf } = await login();
 		const tokens = routes["/api/auth/tokens"].POST;

@@ -34,6 +34,18 @@ const runner = (
 });
 
 describe("groupByAccount", () => {
+	test("the name is the display name, else the id", () => {
+		const g = groupByAccount(
+			[{ ...account("lagz0ne"), displayName: "Lagz0ne" }, account("bob")],
+			[runner("zed", "z1")],
+		);
+		expect(g.map((x) => [x.account, x.name])).toEqual([
+			["lagz0ne", "Lagz0ne"],
+			["bob", "bob"],
+			["zed", "zed"],
+		]);
+	});
+
 	test("accounts in order with their runners; unknown accounts last", () => {
 		const g = groupByAccount(
 			[account("admin"), account("bob", "admin")],
