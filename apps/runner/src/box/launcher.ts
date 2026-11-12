@@ -26,10 +26,12 @@ import { DockerDriver, dockerEndpoint } from "./docker.ts";
 import type { BoxDriver } from "./driver.ts";
 import type { BoxFiles } from "./files.ts";
 import { DEFAULT_BOX_IMAGE } from "./image.ts";
+import { runAgentOverPaseo } from "./paseo-control.ts";
 import {
 	dockerExecStream,
 	linkDriver,
 	type PaseoLinkOptions,
+	paseoLinkOf,
 	sweepPaseoLinks,
 } from "./paseo-link.ts";
 import { type BoxRunOptions, runInBox, sweepBoxes, WORKSPACE } from "./run.ts";
@@ -131,6 +133,12 @@ export type BoxModeInput = {
 	 * MASTERMIND_PASEO_LINK=0): off.
 	 */
 	paseoLink?: false | Partial<Omit<PaseoLinkOptions, "runnerId">>;
+	/**
+	 * How the runner drives the agent in a box: `exec` (`docker exec paseo
+	 * run`) or `paseo` (one SDK connection over the relay, mm-210.73).
+	 * Default: MASTERMIND_BOX_CONTROL, else `exec`.
+	 */
+	boxControl?: "exec" | "paseo";
 };
 
 /** Where the relay sockets live: next to the runner config, 0700. */
@@ -139,49 +147,88 @@ export function paseoLinkDir(env: Record<string, string | undefined>): string {
 }
 
 /**
- * The driver with Paseo links, when on and this machine's Paseo answers;
- * the sweep removes hosts an earlier run of this runner left behind.
+ * The driver with Paseo links (mm-210.68, mm-210.73): the relay to each box
+ * daemon, the user's host when `register` (this machine's Paseo answers;
+ * the sweep removes hosts an earlier run of this runner left), and the
+ * SDK control connection when `control`.
  */
 async function withPaseoLink(
 	driver: BoxDriver,
 	i: BoxModeInput,
 	own: boolean,
-): Promise<BoxDriver> {
-	const want =
-		i.paseoLink === false || i.env.MASTERMIND_PASEO_LINK === "0"
-			? null
-			: (i.paseoLink ?? (own ? {} : null));
-	if (!want) return driver;
-	const dir = want.dir ?? paseoLinkDir(i.env);
+): Promise<{ driver: BoxDriver; control: boolean }> {
+	const want = i.paseoLink === false ? {} : (i.paseoLink ?? (own ? {} : null));
 	const open =
-		want.open ?? (own ? dockerExecStream(dockerEndpoint(i.env)) : null);
-	if (!open) return driver;
-	let usable = true;
-	const gone = await sweepPaseoLinks({
-		dir,
-		runnerId: i.runnerId,
-		...(want.paseo ? { paseo: want.paseo } : {}),
-		log: (l) => {
-			usable = false;
-			i.log(l);
-		},
-	});
-	if (gone.length)
+		want?.open ?? (own ? dockerExecStream(dockerEndpoint(i.env)) : null);
+	const control =
+		(i.boxControl ?? i.env.MASTERMIND_BOX_CONTROL?.trim()) === "paseo";
+	let register = i.paseoLink !== false && i.env.MASTERMIND_PASEO_LINK !== "0";
+	if (!want || !open || (!register && !control))
+		return { driver, control: false };
+	const dir = want.dir ?? paseoLinkDir(i.env);
+	if (register) {
+		const gone = await sweepPaseoLinks({
+			dir,
+			runnerId: i.runnerId,
+			...(want.paseo ? { paseo: want.paseo } : {}),
+			log: (l) => {
+				register = false;
+				i.log(l);
+			},
+		});
+		if (gone.length)
+			i.log(
+				`paseo link: removed ${gone.length} host(s) left from an earlier run`,
+			);
+		if (register)
+			i.log(
+				"paseo link: each box shows as a host 'mastermind:<item>' in this machine's Paseo (--no-paseo-link: off)",
+			);
+	}
+	if (control)
 		i.log(
-			`paseo link: removed ${gone.length} host(s) left from an earlier run`,
+			"box control: the agent runs through one Paseo connection to the box daemon (MASTERMIND_BOX_CONTROL=paseo)",
 		);
-	if (!usable) return driver;
-	i.log(
-		"paseo link: each box shows as a host 'mastermind:<item>' in this machine's Paseo (--no-paseo-link: off)",
-	);
-	return linkDriver(driver, {
-		...want,
-		dir,
-		open,
-		runnerId: i.runnerId,
-		log: i.log,
-		...(i.onStep ? { step: i.onStep } : {}),
-	});
+	if (!register && !control) return { driver, control: false };
+	return {
+		driver: linkDriver(driver, {
+			...want,
+			dir,
+			open,
+			register,
+			runnerId: i.runnerId,
+			log: i.log,
+			...(i.onStep ? { step: i.onStep } : {}),
+		}),
+		control,
+	};
+}
+
+/**
+ * The agent step over the box's Paseo connection. No connection: the ticket
+ * says so and the agent runs through exec (null).
+ */
+export function paseoRunAgent(
+	step: (beadId: string, line: string) => void = () => {},
+): NonNullable<BoxRunOptions["runAgent"]> {
+	return async (box, task, signal) => {
+		const link = paseoLinkOf(box);
+		if (!link) return null;
+		let c: Awaited<ReturnType<typeof link.client>>;
+		try {
+			c = await link.client();
+		} catch (error) {
+			step(
+				task.beadId,
+				`box control: ${error instanceof Error ? error.message : error}; the agent runs through exec`,
+			);
+			return null;
+		}
+		return runAgentOverPaseo(c, task, signal, {
+			onAgent: (id) =>
+				step(task.beadId, `agent ${id} started through the Paseo connection`),
+		});
+	};
 }
 
 /**
@@ -191,7 +238,7 @@ async function withPaseoLink(
 export async function startBoxMode(i: BoxModeInput) {
 	const engine0 = i.driver ?? new DockerDriver({ env: i.env, log: i.log });
 	const engine = await engine0.ping();
-	const driver = await withPaseoLink(engine0, i, !i.driver);
+	const { driver, control } = await withPaseoLink(engine0, i, !i.driver);
 	const gone = await sweepBoxes(driver, i.runnerId);
 	if (gone.length)
 		i.log(
@@ -213,6 +260,7 @@ export async function startBoxMode(i: BoxModeInput) {
 			log: i.log,
 			...(i.onStep ? { onStep: i.onStep } : {}),
 			...(i.files ? { files: i.files } : {}),
+			...(control ? { runAgent: paseoRunAgent(i.onStep) } : {}),
 			prepare: (task, step, signal) =>
 				prepareBox(
 					task,

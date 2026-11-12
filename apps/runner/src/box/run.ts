@@ -93,6 +93,16 @@ export type BoxRunOptions = {
 	outDir?: string;
 	/** The agent command in the box; default `paseo run` (see {@link paseoRun}). */
 	agentCommand?: (task: BoxTask) => string[];
+	/**
+	 * The agent step through another path than exec (mm-210.73: the Paseo SDK
+	 * connection, paseo-control.ts). Same result shape as `paseo run --json`.
+	 * Absent or null: `agentCommand` through exec.
+	 */
+	runAgent?: (
+		box: Box,
+		task: BoxTask,
+		signal: AbortSignal,
+	) => Promise<ExecResult | null>;
 	/** Waits for the agent host in the box; default `paseo status`. null: no wait. */
 	readyCommand?: string[] | null;
 	/** How long the agent host may take to be ready. Default 60 s. */
@@ -492,7 +502,8 @@ export async function runInBox(
 		}
 
 		const cmd = (opts.agentCommand ?? paseoRun)({ ...task, prompt });
-		const r = await run(cmd);
+		const r =
+			(await opts.runAgent?.(b, { ...task, prompt }, all)) ?? (await run(cmd));
 		if (all.aborted) throw stopped();
 		const sendOut = async (patch: boolean) => {
 			if (!io) return;

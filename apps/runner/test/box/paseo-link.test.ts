@@ -10,6 +10,7 @@ import {
 	type BoxSpec,
 } from "../../src/box/driver.ts";
 import {
+	type BoxClient,
 	bridgeScript,
 	LINK_META,
 	linkDriver,
@@ -178,7 +179,7 @@ describe("PaseoLink", () => {
 		await link.stop();
 	});
 
-	test("default readiness: HTTP server_info, then paseo ls through the relay", async () => {
+	test("default readiness: HTTP server_info, then an SDK call through the relay", async () => {
 		// A fake box daemon: answers every request with server_info.
 		const daemon = net.createServer((c) => {
 			c.on("error", () => {});
@@ -190,31 +191,55 @@ describe("PaseoLink", () => {
 		});
 		await new Promise<void>((r) => daemon.listen(0, "127.0.0.1", () => r()));
 		const port = (daemon.address() as net.AddressInfo).port;
-		const calls: string[][] = [];
-		let wsUp = false;
-		const paseo: PaseoCall = async (args) => {
-			calls.push(args);
-			if (args[0] === "ls") {
-				const ok = wsUp;
-				wsUp = true; // the WebSocket answers one round later than HTTP
-				return { code: ok ? 0 : 1, stdout: "[]", stderr: "" };
-			}
-			return fakePaseo().call(args);
+		const calls: string[] = [];
+		let n = 0;
+		const client = {
+			fetchAgents: async () => ({}),
+			close: async () => {
+				calls.push("close");
+			},
 		};
-		const o = opts(paseo, {
+		const o = opts(fakePaseo().call, {
 			open: async () => net.connect(port, "127.0.0.1"),
+			// The WebSocket answers one round later than HTTP.
+			connect: async (url) => {
+				calls.push(`connect ${url}`);
+				if (++n < 2) throw new Error("503");
+				return client as unknown as BoxClient;
+			},
 		});
 		delete o.ready;
 		const link = new PaseoLink(o, fakeBox(), "mm-7", "e1");
 		await link.start();
-		expect(calls.map((c) => (c[0] === "ls" ? `ls ${c[2]}` : c[1]))).toEqual([
-			`ls unix://${link.socketPath}`,
-			`ls unix://${link.socketPath}`,
-			"add",
+		expect(calls).toEqual([
+			`connect unix://${link.socketPath}`,
+			`connect unix://${link.socketPath}`,
 		]);
+		expect(link.registration).toBe("reg-1");
+		// The connection of the check stays: it is the control connection.
+		expect(await link.client()).toBe(client as unknown as BoxClient);
 		await link.stop();
+		expect(calls.at(-1)).toBe("close");
 		await new Promise<void>((r) => daemon.close(() => r()));
 	}, 15_000);
+
+	test("register false: no host, the control connection only", async () => {
+		const p = fakePaseo();
+		const client = { fetchAgents: async () => ({}), close: async () => {} };
+		const link = new PaseoLink(
+			opts(p.call, {
+				register: false,
+				connect: async () => client as unknown as BoxClient,
+			}),
+			fakeBox(),
+			"mm-7",
+			"e1",
+		);
+		expect(await link.client()).toBe(client as unknown as BoxClient);
+		expect(link.registration).toBeNull();
+		expect(p.calls).toEqual([]);
+		await link.stop();
+	});
 
 	test("stopped before the daemon is up: no host at all", async () => {
 		const p = fakePaseo();

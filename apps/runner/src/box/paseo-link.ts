@@ -22,6 +22,12 @@
  * control path is Paseo's own protocol (the connected-hosts direction of the
  * lead, 2026-11-12). It goes away when Paseo can reach a box another way.
  *
+ * The same relay carries the runner's own control connection to the box
+ * (mm-210.73): ONE persistent SDK connection ({@link PaseoLink.client}),
+ * made while waiting for the daemon, used for the agent step
+ * (paseo-control.ts). With register false, the user's host is skipped and
+ * only that connection is made.
+ *
  * No password: the box daemon has none and is reachable only through this
  * socket, in a directory only the runner's user can open (0700, socket 0600),
  * like the Docker socket and Paseo's own local socket. Nothing secret is in
@@ -31,8 +37,10 @@ import { chmod, mkdir, readdir, rm } from "node:fs/promises";
 import net from "node:net";
 import { join } from "node:path";
 import { Duplex } from "node:stream";
+import { createHostClient } from "@getpaseo/client/node";
 import type { DockerEndpoint } from "./docker.ts";
 import { BOX_LABEL, type Box, type BoxDriver, type BoxSpec } from "./driver.ts";
+import type { AgentClient } from "./paseo-control.ts";
 import { BOX_ENV } from "./run.ts";
 
 /** Host label prefix and metadata keys of the hosts this runner registers. */
@@ -101,7 +109,14 @@ export type PaseoLinkOptions = {
 	/** A byte stream to the bridge in a box (default: Docker exec, {@link dockerExecStream}). */
 	open: OpenStream;
 	paseo?: PaseoCall;
-	/** Is the box daemon up? Default: HTTP {@link daemonAnswers}, then `paseo ls` through the relay. */
+	/**
+	 * Register the box as a host of this machine's Paseo (the user's view).
+	 * Default true. false: the relay and the SDK connection only (box control).
+	 */
+	register?: boolean;
+	/** The SDK connection over the relay; default {@link connectBoxClient}. */
+	connect?: (connection: string) => Promise<BoxClient>;
+	/** Is the box daemon up? Default: HTTP {@link daemonAnswers}, then an SDK call through the relay. */
 	ready?: (box: Box) => Promise<boolean>;
 	/** How long the box daemon may take to start. Default 120 s. */
 	readyTimeoutMs?: number;
@@ -109,6 +124,35 @@ export type PaseoLinkOptions = {
 	step?: (item: string, line: string) => void;
 	log?: (line: string) => void;
 };
+
+/** The persistent SDK connection to a box daemon. */
+export type BoxClient = AgentClient & {
+	fetchAgents(o?: object): Promise<unknown>;
+	close(): Promise<void>;
+};
+
+/**
+ * One SDK connection to `connection` (unix://<relay socket>), with Paseo's
+ * own reconnect: the box agent's control path (mm-210.73).
+ */
+export async function connectBoxClient(
+	connection: string,
+	runnerId = "runner",
+): Promise<BoxClient> {
+	const c = createHostClient(connection, {
+		clientId: `mastermind-runner-${runnerId}`,
+		clientType: "cli",
+		connectTimeoutMs: 15_000,
+		reconnect: { enabled: true, baseDelayMs: 500, maxDelayMs: 5000 },
+	});
+	try {
+		await c.connect();
+	} catch (error) {
+		await c.close().catch(() => {});
+		throw error;
+	}
+	return c as unknown as BoxClient;
+}
 
 type HostRow = {
 	registrationId: string;
@@ -163,6 +207,8 @@ export class PaseoLink {
 	#registration: string | null = null;
 	#stopped = false;
 	#started: Promise<void> | null = null;
+	#client: BoxClient | null = null;
+	#error: string | null = null;
 	readonly socketPath: string;
 	readonly label: string;
 
@@ -184,11 +230,34 @@ export class PaseoLink {
 	/** Start in the background; a failure is logged, never thrown. */
 	start(): Promise<void> {
 		this.#started ??= this.#start().catch((error) => {
-			(this.o.log ?? (() => {}))(
-				`paseo link ${this.item}: ${error instanceof Error ? error.message : error}`,
-			);
+			this.#error = error instanceof Error ? error.message : String(error);
+			(this.o.log ?? (() => {}))(`paseo link ${this.item}: ${this.#error}`);
 		});
 		return this.#started;
+	}
+
+	/**
+	 * The ONE SDK connection to the box daemon, once it answers (waits for
+	 * the start). Throws when the daemon never came up or the link stopped.
+	 */
+	async client(): Promise<BoxClient> {
+		await this.start();
+		if (this.#client) return this.#client;
+		if (this.#stopped) throw new Error("the box is being deleted");
+		const c = await this.#connect().catch((error) => {
+			throw new Error(
+				`no Paseo connection to the box: ${this.#error ?? (error instanceof Error ? error.message : error)}`,
+			);
+		});
+		this.#client = c;
+		return c;
+	}
+
+	#connect(): Promise<BoxClient> {
+		const url = `unix://${this.socketPath}`;
+		return this.o.connect
+			? this.o.connect(url)
+			: connectBoxClient(url, this.o.runnerId);
 	}
 
 	async #start(): Promise<void> {
@@ -210,7 +279,7 @@ export class PaseoLink {
 				throw new Error("the box daemon did not start; no Paseo host");
 			await Bun.sleep(2000);
 		}
-		if (this.#stopped) return;
+		if (this.#stopped || this.o.register === false) return;
 		const r = await (this.o.paseo ?? paseoCall)([
 			"host",
 			"add",
@@ -242,19 +311,23 @@ export class PaseoLink {
 	}
 
 	/**
-	 * Default readiness: the box daemon answers HTTP (cheap) AND a WebSocket
-	 * call through this relay (`paseo ls`): the WebSocket answers 503 for 1-4 s
-	 * after HTTP is up (mm-210.71).
+	 * Default readiness: the box daemon answers HTTP (cheap) AND an SDK call
+	 * over the WebSocket through this relay: the WebSocket answers 503 for
+	 * 1-4 s after HTTP is up (mm-210.71). The connection stays: it is the
+	 * box's control connection.
 	 */
 	async #answers(box: Box): Promise<boolean> {
 		if (!(await daemonAnswers(this.o.open, box))) return false;
-		const r = await (this.o.paseo ?? paseoCall)([
-			"ls",
-			"--host",
-			`unix://${this.socketPath}`,
-			"--json",
-		]);
-		return r.code === 0;
+		let c: BoxClient | null = null;
+		try {
+			c = await this.#connect();
+			await c.fetchAgents({});
+			this.#client = c;
+			return true;
+		} catch {
+			await c?.close().catch(() => {});
+			return false;
+		}
 	}
 
 	#relay(client: net.Socket): void {
@@ -295,6 +368,9 @@ export class PaseoLink {
 		this.#stopped = true;
 		await this.#started;
 		await this.#unregister().catch(() => {});
+		const c = this.#client;
+		this.#client = null;
+		await c?.close().catch(() => {});
 		for (const s of this.#streams) s.destroy();
 		const server = this.#server;
 		this.#server = null;
@@ -355,6 +431,11 @@ export function linkDriver(driver: BoxDriver, o: PaseoLinkOptions): BoxDriver {
 			};
 		},
 	});
+}
+
+/** The link of a box made by {@link linkDriver}; undefined for any other box. */
+export function paseoLinkOf(box: Box): PaseoLink | undefined {
+	return (box as Box & { paseoLink?: PaseoLink }).paseoLink;
 }
 
 function linkedBox(box: Box, link: PaseoLink): Box {

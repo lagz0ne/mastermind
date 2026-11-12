@@ -13,6 +13,7 @@
 		"test": "bun test"
 	},
 	"dependencies": {
+		"@getpaseo/client": "0.15.4",
 		"@mastermind/bus": "workspace:*",
 		"@mastermind/core": "workspace:*",
 		"@nats-io/nats-core": "^3.4.0"
