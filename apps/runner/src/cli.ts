@@ -109,6 +109,13 @@ import {
 	runningOther,
 	stopRunner,
 } from "./lock.ts";
+import {
+	type GateState,
+	gatePath,
+	readGate,
+	recordProbe,
+	writeGate,
+} from "./login-gate.ts";
 import { serveOffers } from "./offer.ts";
 import {
 	fail,
@@ -128,6 +135,7 @@ import {
 	type BoxCheck,
 	evaluate,
 	type LoginRefused,
+	loginFix,
 	loginRefusal,
 	RECHECK_MS,
 	readinessLine,
@@ -712,14 +720,16 @@ function doctorInput(
 		secrets: () => secretsFor(cfg, routing, io),
 		box,
 		// Step e in box mode: the model credential a box gets (mm-210.82).
-		modelSecret: async () =>
-			probeModelSecret({
-				store: await new SecretStore(secretsPath(io.env))
-					.load()
-					.catch(() => ({})),
-				env: io.env,
-			}),
+		modelSecret: () => modelFor(io),
 	};
+}
+
+/** The model credential a box gets: store, else env (never printed). */
+async function modelFor(io: Io) {
+	return probeModelSecret({
+		store: await new SecretStore(secretsPath(io.env)).load().catch(() => ({})),
+		env: io.env,
+	});
 }
 
 /** The default image of box mode: --box-image, else MASTERMIND_BOX_IMAGE, else the default. */
@@ -791,6 +801,11 @@ async function cmdDoctor(path: string, f: Flags, io: Io): Promise<number> {
 	});
 	// The running runner sends it to Mastermind as lastDoctor.
 	if (cfg) await writeDoctor(path, report).catch(() => {});
+	// The box probe's answer sets or lifts the login gate of a running runner (mm-210.81).
+	if (cfg && !f["no-box"])
+		await recordProbe(path, report, await modelFor(io), MODEL_SECRETS).catch(
+			() => null,
+		);
 	if (f.json) io.out(JSON.stringify(report, null, 2));
 	else for (const l of formatReport(report)) io.out(l);
 	return report.ok ? EXIT.ok : EXIT.error;
@@ -1056,6 +1071,13 @@ async function cmdOnboard(
 				deep: true,
 			});
 			await writeDoctor(path, report).catch(() => {});
+			if (driver)
+				await recordProbe(
+					path,
+					report,
+					await modelFor(io),
+					MODEL_SECRETS,
+				).catch(() => null);
 			const bad = report.steps.find((s) => s.status === "fail");
 			if (!bad) return pass(`${report.steps.length} steps pass`);
 			for (const l of formatReport(report)) io.out(`  ${l}`);
@@ -1369,8 +1391,18 @@ async function runStart(
 	/** Mastermind's `superseded` line: a newer process of this runner runs. */
 	let superseded: string | null = null;
 	let publishNow = async () => {};
-	/** The provider refused the box's model credential (mm-210.81). */
-	let loginRefused: LoginRefused | null = null;
+	/**
+	 * The provider refused the box's model credential (mm-210.81): kept in
+	 * login-gate.json, so a separate `doctor --deep` can set it and a restart
+	 * keeps it.
+	 */
+	const gate0 = noBox ? null : await readGate(path);
+	let loginRefused: LoginRefused | null = gate0?.refused ?? null;
+	let gateAt = gate0?.at ?? "";
+	if (loginRefused)
+		log(
+			`error: the agent's provider refused ${loginRefused.secret} (${loginRefused.problem}, ${loginRefused.at}); the environments that need it take no work; fix: ${loginFix(loginRefused.secret)}`,
+		);
 	const reevaluate = () => {
 		const r = evaluate({
 			loginRefused,
@@ -1392,30 +1424,52 @@ async function runStart(
 		log(readinessLine(r));
 		void publishNow().then(() => runner?.readinessChanged());
 	};
-	/** A later doctor --deep whose box probe answered lifts the refusal. */
-	const probePassed = (r: DoctorReport | null) => {
-		if (!loginRefused || !r?.deep || noBox || r.at <= loginRefused.at) return;
-		if (r.steps.find((x) => x.id === "e")?.status !== "pass") return;
-		log(
-			`login: the doctor's box probe passed; ${loginRefused.secret} is accepted again`,
-		);
-		loginRefused = null;
+	/** Take the gate file when it is newer (a doctor --deep in another process). */
+	const adoptGate = (g: GateState | null) => {
+		if (!g || g.at <= gateAt) return;
+		gateAt = g.at;
+		const was = loginRefused;
+		loginRefused = g.refused;
+		if (g.refused && g.refused.hash !== was?.hash)
+			log(
+				`error: the agent's provider refused ${g.refused.secret} (${g.refused.problem}); the environments that need it take no work until it changes; fix: ${loginFix(g.refused.secret)}`,
+			);
+		else if (!g.refused && was)
+			log(
+				`login: the doctor's box probe passed; ${was.secret} is accepted again`,
+			);
 		reevaluate();
+	};
+	/** Set or clear the refusal here and in the file. */
+	const setGate = (refused: LoginRefused | null) => {
+		const g = { refused, at: new Date().toISOString() };
+		void writeGate(path, g).catch((error) =>
+			log(`login gate: cannot write ${gatePath(path)}: ${error}`),
+		);
+		adoptGate(g);
+	};
+	/** A doctor --deep in this process (the operator's remote doctor). */
+	const probeDone = async (r: DoctorReport) => {
+		if (noBox) return;
+		adoptGate(
+			await recordProbe(path, r, await modelFor(io), MODEL_SECRETS).catch(
+				() => null,
+			),
+		);
 	};
 	/** A changed (or removed) value lifts the refusal: checked with the secrets. */
 	const refusalCheck = async () => {
-		if (!loginRefused) return;
-		const hit = await lookupSecret(loginRefused.secret, {
+		const refused = loginRefused;
+		if (!refused) return;
+		const hit = await lookupSecret(refused.secret, {
 			store: await new SecretStore(secretsPath(io.env))
 				.load()
 				.catch(() => ({})),
 			env: io.env,
 		});
-		if (refusalHolds(loginRefused, hit?.value)) return;
-		log(
-			`login: ${loginRefused.secret} changed; its environments are checked again`,
-		);
-		loginRefused = null;
+		if (refusalHolds(refused, hit?.value)) return;
+		log(`login: ${refused.secret} changed; its environments are checked again`);
+		setGate(null);
 	};
 	let conn: Awaited<ReturnType<typeof connectRunner>> | null = null;
 	const statusSubject = subjects.runnerStatus(cfg.account, settings.id);
@@ -1427,9 +1481,8 @@ async function runStart(
 		file: statusPath(path),
 		check: async () => {
 			// A local `doctor` run writes doctor.json; send it as lastDoctor.
-			const doctor = await readDoctor(path);
-			diag.doctor(doctor);
-			probePassed(doctor);
+			diag.doctor(await readDoctor(path));
+			if (!noBox) adoptGate(await readGate(path));
 			const c = await runChecks(settings, {
 				paseoHost: f["paseo-host"],
 				login: noBox,
@@ -1537,12 +1590,7 @@ async function runStart(
 								env,
 								MODEL_SECRETS,
 							);
-							if (!r) return;
-							loginRefused = r;
-							log(
-								`error: the agent's provider refused ${r.secret} (${r.problem}); the environments that need it take no work until it changes; fix: run claude setup-token again, then mastermind-runner secrets set ${r.secret}`,
-							);
-							reevaluate();
+							if (r) setGate(r);
 						},
 					}),
 			settings,
@@ -1589,7 +1637,7 @@ async function runStart(
 				}),
 			onReport: (r) => {
 				diag.doctor(r);
-				probePassed(r);
+				void probeDone(r);
 				void writeDoctor(path, r).catch(() => {});
 			},
 			log,
