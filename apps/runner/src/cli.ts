@@ -4,7 +4,15 @@
  * connects to Mastermind over NATS as a service account of the user's account,
  * takes work from queues and runs agents for it through Paseo.
  *
- *   mastermind-runner enroll <token> --url <mastermind url> [settings]
+ *   mastermind-runner env init [dir] [--image <ref>] [--secret NAME]... [--network open|host,host]
+      [--output pr|branch|none] [--check-cmd <cmd>]... [--post-create <cmd>] [--instructions <text>] [--force]
+      writes .devcontainer/devcontainer.json with a customizations.mastermind block
+      (asks when a terminal and no flags), merges into an existing file, validates it
+  mastermind-runner env test [dir] [--ref <branch>] [--deep] [--json]
+      runs the environment like a task, without a task: access check, build,
+      box, clone, lifecycle, check, network phases (--deep: a probe agent);
+      PASS/FAIL per step with the fix; the box is deleted; nothing is pushed
+  mastermind-runner enroll <token> --url <mastermind url> [settings]
  *   mastermind-runner start [settings] [--save]
  *   mastermind-runner check [settings]
  *   mastermind-runner route [dispatch.json] [--env e --queue q --stage s --type t --label l --priority n]
@@ -24,6 +32,7 @@
  * Environment: MASTERMIND_URL, MASTERMIND_NATS_URL, MASTERMIND_RUNNER_CONFIG,
  * MASTERMIND_RUNNER_ROUTING, MASTERMIND_RUNNER_SECRETS.
  */
+import { stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { publish, subjects } from "@mastermind/bus";
@@ -65,6 +74,13 @@ import {
 } from "./diagnostics.ts";
 import { type DoctorBox, formatReport, runDoctor } from "./doctor.ts";
 import { EnrolError, enrol } from "./enroll.ts";
+import {
+	EnvInitError,
+	type InitOptions,
+	initEnvironment,
+	parseNetwork,
+} from "./env.ts";
+import { type EnvTestStep, envTest } from "./env-test.ts";
 import { PaseoLauncher } from "./launcher.ts";
 import { serveOffers } from "./offer.ts";
 import {
@@ -148,6 +164,14 @@ const OPTIONS = {
 	"github-app-key": { type: "string" },
 	"non-interactive": { type: "boolean" },
 	"no-browser": { type: "boolean" },
+	image: { type: "string" },
+	secret: { type: "string", multiple: true },
+	network: { type: "string" },
+	output: { type: "string" },
+	"check-cmd": { type: "string", multiple: true },
+	"post-create": { type: "string" },
+	instructions: { type: "string" },
+	ref: { type: "string" },
 	json: { type: "boolean" },
 	version: { type: "boolean", short: "v" },
 	help: { type: "boolean", short: "h" },
@@ -428,6 +452,8 @@ export async function main(argv: string[], io: Io): Promise<number> {
 			case "secrets":
 			case "secret":
 				return await cmdSecrets(path, rest, f, io);
+			case "env":
+				return await cmdEnv(path, rest, f, io);
 			default:
 				throw new UsageError(`unknown command ${cmd}`);
 		}
@@ -440,7 +466,11 @@ export async function main(argv: string[], io: Io): Promise<number> {
 			io.err(error.message);
 			return EXIT.revoked;
 		}
-		if (error instanceof ConfigError || error instanceof EnrolError) {
+		if (
+			error instanceof ConfigError ||
+			error instanceof EnrolError ||
+			error instanceof EnvInitError
+		) {
 			io.err(error.message);
 			return EXIT.error;
 		}
@@ -879,6 +909,131 @@ async function cmdOnboard(
 	if (f.start) return cmdStart(path, f, io);
 	say("start it: mastermind-runner start");
 	return EXIT.ok;
+}
+
+const OUTPUTS = ["pr", "branch", "none"];
+
+/** `env init [dir]` and `env test [dir]` (env.ts, env-test.ts). */
+async function cmdEnv(
+	path: string,
+	args: string[],
+	f: Flags,
+	io: Io,
+): Promise<number> {
+	const [sub, target] = args;
+	const dir = resolve(io.cwd, target ?? ".");
+	const interactive =
+		!f["non-interactive"] && (io.interactive ?? process.stdin.isTTY === true);
+	const say = f.json ? io.err : io.out;
+	if (sub === "init") {
+		const o: InitOptions = { force: f.force === true };
+		if (f.image) o.image = f.image;
+		if (f.secret?.length) o.secrets = f.secret;
+		if (f.network) o.network = parseNetwork(f.network);
+		if (f.output) {
+			if (!OUTPUTS.includes(f.output))
+				throw new UsageError("--output must be pr, branch or none");
+			o.output = f.output as InitOptions["output"];
+		}
+		if (f["check-cmd"]?.length) o.check = f["check-cmd"];
+		if (f["post-create"]) o.postCreate = f["post-create"];
+		if (f.instructions) o.instructions = f.instructions;
+		const given = [f.image, f.secret, f.network, f.output, f["check-cmd"]].some(
+			(x) => x !== undefined,
+		);
+		if (interactive && !given) {
+			const ask = terminalPrompt({
+				out: say,
+				interactive,
+				...(io.ask ? { ask: io.ask } : {}),
+				readSecret: io.readSecret ?? readSecretFromStdin,
+			}).line;
+			const image = (
+				await ask("base image (Enter: keep or the default): ")
+			).trim();
+			if (image) o.image = image;
+			const secrets = (
+				await ask("secret names the box needs, comma separated (Enter: none): ")
+			)
+				.split(",")
+				.map((x) => x.trim())
+				.filter(Boolean);
+			if (secrets.length) o.secrets = secrets;
+			const net = (
+				await ask(
+					"network: open, or the hosts the agent may reach (Enter: open): ",
+				)
+			).trim();
+			if (net) o.network = parseNetwork(net);
+			const out = (
+				await ask("output: pr, branch or none (Enter: pr): ")
+			).trim();
+			if (out) {
+				if (!OUTPUTS.includes(out))
+					throw new UsageError("output must be pr, branch or none");
+				o.output = out as InitOptions["output"];
+			}
+		}
+		const r = await initEnvironment(dir, o);
+		if (f.json) io.out(JSON.stringify(r, null, 2));
+		else {
+			io.out(`${r.action}: ${r.path}`);
+			for (const w of r.validation.warnings) io.out(`  note: ${w}`);
+			for (const e of r.validation.errors) io.out(`  ✗ ${e}`);
+			if (r.validation.ok)
+				io.out(
+					`valid. Next: commit and push it, then: mastermind-runner env test ${target ?? "."}`,
+				);
+		}
+		return r.validation.ok ? EXIT.ok : EXIT.error;
+	}
+	if (sub === "test") {
+		if (!(await dirExists(dir)))
+			throw new UsageError(
+				`env test takes a repo directory; ${target} is not one (an environment by name: not yet)`,
+			);
+		const cfg = await loadConfig(path).catch(() => null);
+		const s = applyFlags(cfg?.runner ?? defaultSettings("env-test"), f, io.cwd);
+		const steps: EnvTestStep[] = [];
+		const emit = (x: EnvTestStep) => {
+			steps.push(x);
+			say(`${x.ok ? "PASS" : "FAIL"} ${x.step}: ${x.detail}`);
+			if (x.fix) say(`  fix: ${x.fix}`);
+		};
+		let ok = false;
+		const engine = await findEngine({ env: io.env });
+		if (!engine.ok)
+			emit({
+				step: "box engine",
+				ok: false,
+				detail: engine.problem,
+				fix: engine.fix,
+			});
+		else
+			ok = await envTest({
+				dir,
+				...(f.ref ? { ref: f.ref } : {}),
+				deep: f.deep === true,
+				agent: s.agent,
+				defaultImage: boxImage(f, io),
+				env: engine.env,
+				loadSecrets: () => new SecretStore(secretsPath(io.env)).load(),
+				driver: new DockerDriver({ env: engine.env }),
+				emit,
+			});
+		if (f.json) io.out(JSON.stringify({ ok, steps }, null, 2));
+		else say(ok ? "env test PASS" : "env test FAIL");
+		return ok ? EXIT.ok : EXIT.error;
+	}
+	throw new UsageError("env init [dir] | env test [dir]");
+}
+
+async function dirExists(p: string): Promise<boolean> {
+	try {
+		return (await stat(p)).isDirectory();
+	} catch {
+		return false;
+	}
 }
 
 async function cmdCheck(path: string, f: Flags, io: Io): Promise<number> {

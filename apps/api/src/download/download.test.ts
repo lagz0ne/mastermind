@@ -114,6 +114,15 @@ test("installScript refuses an origin that is not safe to quote", () => {
 });
 
 describe("downloads", () => {
+	test("the setup guide (apps/runner/SETUP.md) as text", async () => {
+		const r = await fetch(`${base}/download/runner-setup`);
+		expect(r.status).toBe(200);
+		expect(r.headers.get("content-type")).toContain("text/plain");
+		const text = await r.text();
+		expect(text).toStartWith("# Set up a worker");
+		expect(text).toContain("mastermind-runner env test");
+	});
+
 	test("sha256 and the binary, gzip or not", async () => {
 		const q = "os=linux&arch=arm64";
 		const sum = await fetch(`${base}/download/mastermind-runner.sha256?${q}`);

@@ -197,7 +197,7 @@ function AddRunnerPanel({ onDone }: { onDone: () => void }) {
 		return (
 			<div className="flex flex-col gap-2" data-doop-id="runner-command">
 				<Secret
-					label="Run this in the work directory on the machine of the runner (Linux or macOS). It installs the runner, checks the machine, enrols it, asks for missing secrets, runs a deep doctor, and starts it when it is ready. It stops at the first failed check and prints the fix; run it again after the fix."
+					label="Run this in the work directory on the machine of the runner (Linux or macOS). It installs the runner, checks the machine, enrols it, sets up the Claude login and the git credential on that machine, asks for missing secrets, runs a deep doctor, and starts it when it is ready. It stops at the first failed check and prints the fix; run it again after the fix."
 					value={command}
 				/>
 				<ul className="list-inside list-disc text-muted-foreground text-xs">
@@ -211,6 +211,19 @@ function AddRunnerPanel({ onDone }: { onDone: () => void }) {
 					</li>
 					<li>
 						Start again later: <code>{RUNNER_BIN} start</code>
+					</li>
+					<li>
+						Step by step (box engine, Claude login, GitHub App, environment
+						test):{" "}
+						<a
+							href="/download/runner-setup"
+							target="_blank"
+							rel="noreferrer"
+							className="underline"
+							data-doop-id="runner-setup-guide"
+						>
+							Set up a worker
+						</a>
 					</li>
 				</ul>
 			</div>

@@ -303,3 +303,45 @@ describe("env test", () => {
 		expect(fixFor("devcontainer build failed")).toContain("devcontainer build");
 	});
 });
+
+describe("env command", () => {
+	test("env init through the CLI: flags only, then valid; env test on no directory is a usage error", async () => {
+		const { main, EXIT } = await import("../src/cli.ts");
+		const dir = join(tmp, "cli-init");
+		mkdirSync(dir);
+		const out: string[] = [];
+		const io = {
+			env: {
+				MASTERMIND_RUNNER_CONFIG: join(tmp, "cli-init-cfg", "runner.json"),
+			},
+			out: (l: string) => out.push(l),
+			err: (l: string) => out.push(l),
+			cwd: dir,
+			interactive: false,
+		};
+		expect(
+			await main(
+				[
+					"env",
+					"init",
+					".",
+					"--secret",
+					"DOCS_KEY",
+					"--network",
+					"github.com",
+					"--output",
+					"branch",
+				],
+				io,
+			),
+		).toBe(EXIT.ok);
+		expect(out[0]).toBe(
+			`created: ${join(dir, ".devcontainer/devcontainer.json")}`,
+		);
+		expect(out.at(-1)).toContain("mastermind-runner env test .");
+		expect(await main(["env", "init", ".", "--output", "zip"], io)).toBe(
+			EXIT.usage,
+		);
+		expect(await main(["env", "test", "no-such-dir"], io)).toBe(EXIT.usage);
+	});
+});

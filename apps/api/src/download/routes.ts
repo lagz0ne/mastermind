@@ -4,6 +4,7 @@
  *   GET /install.sh                                          the installer, for `curl … | sh`
  *   GET /download/mastermind-runner?os=<os>&arch=<arch>      the executable
  *   GET /download/mastermind-runner.sha256?os=<os>&arch=<arch>   `<sha256>  mastermind-runner`
+ *   GET /download/runner-setup                               the guide "Set up a worker" (apps/runner/SETUP.md)
  *
  * os: linux | darwin; arch: x64 | arm64. The binaries come from the image build
  * (runner/manifest.json next to index.js), so they match this server's commit.
@@ -12,6 +13,8 @@
  */
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+// The guide is bundled into the server, so every install serves its own copy.
+import setupGuide from "../../../runner/SETUP.md" with { type: "text" };
 import { installScript, SAFE_ORIGIN } from "./install-script.ts";
 import {
 	compileRunner,
@@ -136,6 +139,15 @@ export function downloadRoutes(opts: DownloadOptions = {}) {
 				new Response(installScript(requestOrigin(req)), {
 					headers: {
 						"content-type": "text/x-shellscript; charset=utf-8",
+						"cache-control": "no-cache",
+					},
+				}),
+		},
+		"/download/runner-setup": {
+			GET: (): Response =>
+				new Response(setupGuide, {
+					headers: {
+						"content-type": "text/plain; charset=utf-8",
 						"cache-control": "no-cache",
 					},
 				}),
