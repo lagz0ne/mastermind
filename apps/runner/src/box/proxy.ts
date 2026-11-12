@@ -288,7 +288,7 @@ function allowed(host, p) {
 function refuse(c, status, text) {
   c.end("HTTP/1.1 " + status + "\\r\\ncontent-type: text/plain\\r\\nconnection: close\\r\\ncontent-length: " + Buffer.byteLength(text) + "\\r\\n\\r\\n" + text);
 }
-net.createServer((c) => {
+const srv = net.createServer((c) => {
   c.on("error", () => {});
   let buf = Buffer.alloc(0);
   const onData = (d) => {
@@ -342,7 +342,7 @@ net.createServer((c) => {
     up.on("close", () => live.delete(x));
   };
   c.on("data", onData);
-}).listen(port, "0.0.0.0", () => console.log("${PROXY_READY} on " + port + " for " + allow.join(",")));
+}).listen(port, "0.0.0.0", () => console.log("${PROXY_READY} on " + srv.address().port + " for " + allow.join(",")));
 if (process.env.MM_MODEL_PATH) {
   const http = require("node:http");
   const https = require("node:https");
@@ -358,7 +358,7 @@ if (process.env.MM_MODEL_PATH) {
     res.writeHead(status, { "content-type": "text/plain", connection: "close" });
     res.end("mastermind model proxy: " + text + "\\n");
   };
-  http.createServer((req, res) => {
+  const msrv = http.createServer((req, res) => {
     const url = req.url || "/";
     const path = url.split("?")[0];
     if (path !== prefix && !path.startsWith(prefix + "/")) {
@@ -385,7 +385,7 @@ if (process.env.MM_MODEL_PATH) {
     up.on("error", (e) => { console.log("mm-proxy model: " + shown + ": " + e.message); fail(res, 502, e.message); });
     res.on("close", () => { if (!res.writableFinished) up.destroy(); });
     req.pipe(up);
-  }).listen(mport, "0.0.0.0", () => console.log("${MODEL_READY} " + mport + " to " + upstream.host));
+  }).listen(mport, "0.0.0.0", () => console.log("${MODEL_READY} " + msrv.address().port + " to " + upstream.host));
 }
 `;
 

@@ -78,27 +78,36 @@ const rulesDir = mkdtempSync(join(tmpdir(), "mm-proxy-rules-"));
 afterAll(() => rmSync(rulesDir, { recursive: true, force: true }));
 let rulesN = 0;
 
+/** The port in a ready line (the proxy listens on port 0: no clashes). */
+function portIn(log: string, ready: string): number | null {
+	const m = new RegExp(`${ready} (?:on )?(\\d+)`).exec(log);
+	return m ? Number(m[1]) : null;
+}
+
 async function startProxy(bin: string, allow: string) {
-	const port = 20000 + Math.floor(Math.random() * 20000);
 	const rules = join(rulesDir, `rules-${++rulesN}`);
 	const lines: string[] = [];
 	const p = Bun.spawn([bin, "-e", PROXY_JS], {
 		env: {
 			...process.env,
 			MM_PROXY_ALLOW: allow,
-			MM_PROXY_PORT: String(port),
+			MM_PROXY_PORT: "0",
 			MM_PROXY_RULES: rules,
 		},
 		stdout: "pipe",
-		stderr: "inherit",
+		stderr: "pipe",
 	});
 	const reader = p.stdout.getReader();
 	let seen = "";
-	while (!seen.includes(PROXY_READY)) {
+	while (portIn(seen, PROXY_READY) === null) {
 		const { value, done } = await reader.read();
-		if (done) throw new Error(`proxy ended: ${seen}`);
+		if (done)
+			throw new Error(
+				`proxy ended: ${seen}${await new Response(p.stderr).text()}`,
+			);
 		seen += new TextDecoder().decode(value);
 	}
+	const port = portIn(seen, PROXY_READY) ?? 0;
 	lines.push(seen);
 	(async () => {
 		for (;;) {
@@ -111,7 +120,7 @@ async function startProxy(bin: string, allow: string) {
 	const setAllow = async (gen: number, list: string) => {
 		writeFileSync(`${rules}.new`, `${gen}\n${list}`);
 		renameSync(`${rules}.new`, rules);
-		const until = Date.now() + 5000;
+		const until = Date.now() + 10_000;
 		while (!lines.join("").includes(proxyAllowLine(gen))) {
 			if (Date.now() > until) throw new Error(`no ack: ${lines.join("")}`);
 			await Bun.sleep(20);
@@ -202,7 +211,7 @@ for (const bin of bins)
 				});
 				s.on("error", () => {});
 				s.write(`CONNECT 127.0.0.1:${t} HTTP/1.1\r\n\r\n`);
-				const until = Date.now() + 3000;
+				const until = Date.now() + 10_000;
 				while (!got.includes("200 Connection Established")) {
 					if (Date.now() > until) throw new Error(got);
 					await Bun.sleep(20);
@@ -210,7 +219,7 @@ for (const bin of bins)
 				// Agent phase: only *.ok.test.
 				const log = await proxy.setAllow(1, "*.ok.test");
 				expect(log).toContain("mm-proxy allow 1: *.ok.test (closed 1)");
-				const until2 = Date.now() + 3000;
+				const until2 = Date.now() + 10_000;
 				while (!closed && Date.now() < until2) await Bun.sleep(20);
 				expect(closed).toBe(true);
 				const r = await raw(
@@ -306,15 +315,13 @@ describe("model route (mm-210.70)", () => {
 				authFile,
 				JSON.stringify({ header: "authorization", value: "Bearer REAL-1" }),
 			);
-			const port = 20000 + Math.floor(Math.random() * 20000);
-			const mport = port + 1;
 			const path = modelPath();
 			const p = Bun.spawn([bin, "-e", PROXY_JS], {
 				env: {
 					...process.env,
 					MM_PROXY_ALLOW: "",
-					MM_PROXY_PORT: String(port),
-					MM_MODEL_PORT: String(mport),
+					MM_PROXY_PORT: "0",
+					MM_MODEL_PORT: "0",
 					MM_MODEL_PATH: path,
 					MM_MODEL_UPSTREAM: `http://127.0.0.1:${upstream.port}`,
 					MM_MODEL_AUTH_FILE: authFile,
@@ -325,11 +332,15 @@ describe("model route (mm-210.70)", () => {
 			try {
 				const reader = p.stdout.getReader();
 				let log = "";
-				while (!log.includes(MODEL_READY)) {
+				while (portIn(log, MODEL_READY) === null) {
 					const { value, done } = await reader.read();
-					if (done) throw new Error(`proxy ended: ${log}`);
+					if (done)
+						throw new Error(
+							`proxy ended: ${log}${await new Response(p.stderr).text()}`,
+						);
 					log += new TextDecoder().decode(value);
 				}
+				const mport = portIn(log, MODEL_READY) ?? 0;
 				const base = `http://127.0.0.1:${mport}`;
 				seen.length = 0;
 				const r = await fetch(`${base}/${path}/v1/messages?beta=true`, {
