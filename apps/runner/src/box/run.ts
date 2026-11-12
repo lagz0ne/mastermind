@@ -4,8 +4,10 @@
  *   ensure image (cached by recipe hash) -> create box (limits, network, labels)
  *   -> clone repo at ref into /workspace -> secrets as env and files
  *   -> setup, then check (fail: the reason and the output tail)
+ *   -> the item's input files into INPUTS_DIR (files.ts, mm-210.60)
  *   -> wait for the Paseo daemon in the box -> `paseo run` inside, mode bypass
- *   -> take out a patch of the work -> push a branch / open a pull request
+ *   -> take out a patch of the work -> outputs to Mastermind (the patch, files
+ *   in OUTPUTS_DIR, the agent log tail) -> push a branch / open a pull request
  *   (output.ts, when the environment asks) -> DELETE the box (on every exit path)
  *
  * The agent runs inside the box with no prompts: the box is the limit.
@@ -13,7 +15,13 @@
  */
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { DispatchEnv } from "@mastermind/core";
+import {
+	type DispatchEnv,
+	formatBytes,
+	INPUTS_DIR,
+	OUTPUTS_DIR,
+	safeFileName,
+} from "@mastermind/core";
 import type { AgentSettings } from "../config.ts";
 import {
 	type AgentResult,
@@ -29,6 +37,7 @@ import {
 	BoxError,
 	type ExecResult,
 } from "./driver.ts";
+import type { BoxFiles } from "./files.ts";
 import { QUIET_PASEO_ENV } from "./image.ts";
 import {
 	deliverOutput,
@@ -83,6 +92,8 @@ export type BoxRunOptions = {
 	fetch?: typeof fetch;
 	/** GitHub REST API base; default https://api.github.com. */
 	githubApi?: string;
+	/** The item's files (inputs in, outputs out); null or absent: none. */
+	files?: () => BoxFiles | null;
 };
 
 export type BoxRunResult = AgentResult & {
@@ -294,6 +305,29 @@ export async function runInBox(
 		if ((env.setup?.length ?? 0) + (env.check?.length ?? 0) > 0)
 			step("setup and check passed");
 
+		// The item's files: inputs into INPUTS_DIR; the agent leaves outputs in OUTPUTS_DIR.
+		const io = opts.files?.() ?? null;
+		let prompt = task.prompt;
+		if (io) {
+			if (base)
+				await must("git exclude", [
+					"sh",
+					"-c",
+					"printf '.mastermind/\\n' >> .git/info/exclude",
+				]);
+			await must("files dirs", ["mkdir", "-p", INPUTS_DIR, OUTPUTS_DIR]);
+			const names = await filesIn(b, io, task.beadId).catch((error) => {
+				throw new BoxStepError(
+					`files in: ${error instanceof Error ? error.message : error}`,
+				);
+			});
+			if (names.length)
+				step(
+					`files in: ${names.map((f) => `${f.name} (${formatBytes(f.size)})`).join(", ")} at ${INPUTS_DIR}`,
+				);
+			prompt += `\n\n${filesPrompt(names.map((f) => f.name))}`;
+		}
+
 		const ready =
 			opts.readyCommand === undefined
 				? ["paseo", "status", "--json"]
@@ -312,10 +346,28 @@ export async function runInBox(
 			}
 		}
 
-		const cmd = (opts.agentCommand ?? paseoRun)(task);
+		const cmd = (opts.agentCommand ?? paseoRun)({ ...task, prompt });
 		const r = await run(cmd);
 		if (all.aborted) throw stopped();
-		if (r.code !== 0) throw new LaunchError(runFailure(r));
+		const sendOut = async (patch: boolean) => {
+			if (!io) return;
+			try {
+				const sent = await filesOut(b, io, task.beadId, {
+					log: `${r.stdout}${r.stderr}`,
+					patch: patch && base ? PATCH : null,
+				});
+				if (sent.length) step(`files out: ${sent.join(", ")}`);
+			} catch (error) {
+				if (all.aborted) throw stopped();
+				step(
+					`files out failed: ${error instanceof Error ? error.message : error}`,
+				);
+			}
+		};
+		if (r.code !== 0) {
+			await sendOut(false);
+			throw new LaunchError(runFailure(r));
+		}
 		const result: BoxRunResult = parseResult(r.stdout);
 
 		// Take the work out as a patch against the checked-out commit.
@@ -338,6 +390,7 @@ export async function runInBox(
 				}
 			} else log(`${task.beadId}: box: no patch: ${tail(p, 300)}`);
 		}
+		await sendOut(true);
 
 		// Code leaves through the git host: branch mm/<item>, pull request.
 		if (base && result.status === "done") {
@@ -383,6 +436,112 @@ export async function runInBox(
 			step(`box ${box.name} deleted`);
 		}
 	}
+}
+
+/** The prompt lines that tell the agent where its files are. */
+export function filesPrompt(inputs: string[]): string {
+	const lines = inputs.length
+		? [`Input files of this task are in ${INPUTS_DIR}: ${inputs.join(", ")}.`]
+		: [];
+	lines.push(
+		`To hand files back (reports, artifacts), put them in ${OUTPUTS_DIR} (plain files, up to ${MAX_OUT_FILES}).`,
+	);
+	return lines.join("\n");
+}
+
+/** Outputs taken from OUTPUTS_DIR, at most. */
+export const MAX_OUT_FILES = 20;
+/** The agent log goes out as its last bytes. */
+const LOG_TAIL_BYTES = 256 * 1024;
+
+/** Stream one file into the box (buffered when the driver cannot stream). */
+async function putInBox(
+	b: Box,
+	dir: string,
+	f: { name: string; size: number; data: ReadableStream<Uint8Array> },
+): Promise<void> {
+	if (b.copyInStream) return b.copyInStream(dir, { ...f, mode: 0o444 });
+	const data = new Uint8Array(await new Response(f.data).arrayBuffer());
+	await b.copyIn(dir, [{ name: f.name, data, mode: 0o444 }]);
+}
+
+/** Stream one file out of the box (buffered when the driver cannot stream). */
+async function takeFromBox(
+	b: Box,
+	path: string,
+): Promise<{ size: number; data: ReadableStream<Uint8Array> } | null> {
+	if (b.copyOutStream) return b.copyOutStream(path);
+	const [file] = untar(await b.copyOut(path));
+	return file
+		? { size: file.data.length, data: new Blob([file.data]).stream() }
+		: null;
+}
+
+/** Copy the item's inputs into INPUTS_DIR; returns name and size per file. */
+async function filesIn(b: Box, io: BoxFiles, beadId: string) {
+	const done: { name: string; size: number }[] = [];
+	for (const f of await io.stage(beadId)) {
+		const got = await io.read(beadId, f.name);
+		if (!got) throw new Error(`${f.name} is gone from the bucket`);
+		await putInBox(b, INPUTS_DIR, { name: f.name, ...got });
+		done.push({ name: f.name, size: got.size });
+	}
+	return done;
+}
+
+/**
+ * Upload the outputs: the patch (changes.patch), the plain files in
+ * OUTPUTS_DIR, and the agent log tail (agent.log); then tell Mastermind.
+ * Returns `name (size)` per file.
+ */
+async function filesOut(
+	b: Box,
+	io: BoxFiles,
+	beadId: string,
+	o: { log: string; patch: string | null },
+): Promise<string[]> {
+	const sent: { name: string; size: number }[] = [];
+	const send = async (name: string, path: string) => {
+		const f = await takeFromBox(b, path);
+		if (!f || (name === "changes.patch" && f.size === 0)) {
+			await f?.data.cancel();
+			return;
+		}
+		await io.write(beadId, name, f.data, { size: f.size });
+		sent.push({ name, size: f.size });
+	};
+	if (o.patch) await send("changes.patch", o.patch);
+	const listed = await b.exec(
+		[
+			"sh",
+			"-c",
+			// biome-ignore lint/suspicious/noTemplateCurlyInString: a shell script
+			'for f in "$1"/*; do [ -f "$f" ] && [ ! -L "$f" ] && printf \'%s\\n\' "${f##*/}"; done; true',
+			"list",
+			OUTPUTS_DIR,
+		],
+		{ workdir: "/" },
+	);
+	const names = listed.stdout
+		.split("\n")
+		.filter((n) => n && safeFileName(n) === n && n !== "agent.log")
+		.slice(0, MAX_OUT_FILES);
+	for (const n of names) await send(n, `${OUTPUTS_DIR}/${n}`);
+	const log = new TextEncoder().encode(o.log);
+	const tailBytes = log.subarray(Math.max(0, log.length - LOG_TAIL_BYTES));
+	if (tailBytes.length) {
+		await io.write(beadId, "agent.log", new Blob([tailBytes]).stream(), {
+			size: tailBytes.length,
+			contentType: "text/plain; charset=utf-8",
+		});
+		sent.push({ name: "agent.log", size: tailBytes.length });
+	}
+	if (sent.length)
+		await io.out(
+			beadId,
+			sent.map((f) => f.name),
+		);
+	return sent.map((f) => `${f.name} (${formatBytes(f.size)})`);
 }
 
 /**

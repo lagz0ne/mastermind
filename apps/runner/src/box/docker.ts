@@ -24,7 +24,10 @@ import {
 	parseAllow,
 	proxyEnv,
 } from "./proxy.ts";
-import { tar } from "./tar.ts";
+import { tar, tarStream, untarFirst } from "./tar.ts";
+
+/** A streamed file copy into or out of a box may take this long. */
+const STREAM_MS = 10 * 60_000;
 
 const API = "/v1.41";
 /** Most output kept per exec stream. */
@@ -198,6 +201,8 @@ export class DockerDriver implements BoxDriver {
 		init: {
 			body?: unknown;
 			raw?: Uint8Array;
+			/** A tar archive that streams (files, mm-210.60). */
+			stream?: ReadableStream<Uint8Array>;
 			signal?: AbortSignal;
 			ok404?: boolean;
 			/** Default: the call timeout. null: none (exec output, bounded by the box). */
@@ -214,10 +219,10 @@ export class DockerDriver implements BoxDriver {
 		);
 		const signal = signals.length ? AbortSignal.any(signals) : undefined;
 		const headers: Record<string, string> = {};
-		let body: Uint8Array | string | undefined;
-		if (init.raw) {
+		let body: Uint8Array | string | ReadableStream<Uint8Array> | undefined;
+		if (init.raw || init.stream) {
 			headers["content-type"] = "application/x-tar";
-			body = init.raw;
+			body = init.raw ?? init.stream;
 		} else if (init.body !== undefined) {
 			headers["content-type"] = "application/json";
 			body = JSON.stringify(init.body);
@@ -229,6 +234,7 @@ export class DockerDriver implements BoxDriver {
 				headers,
 				body,
 				signal,
+				...(init.stream ? { duplex: "half" } : {}),
 				...(this.#ep.unix ? { unix: this.#ep.unix } : {}),
 			} as RequestInit);
 		} catch (error) {
@@ -596,6 +602,7 @@ export class DockerDriver implements BoxDriver {
 		init?: {
 			body?: unknown;
 			raw?: Uint8Array;
+			stream?: ReadableStream<Uint8Array>;
 			signal?: AbortSignal;
 			ok404?: boolean;
 			timeoutMs?: number | null;
@@ -672,6 +679,35 @@ class DockerBox implements Box {
 			`/containers/${this.id}/archive?path=${encodeURIComponent(dir)}`,
 			{ raw: tar(files) },
 		);
+	}
+
+	async copyInStream(
+		dir: string,
+		file: {
+			name: string;
+			size: number;
+			data: ReadableStream<Uint8Array>;
+			mode?: number;
+		},
+	): Promise<void> {
+		await this.driver.request(
+			"PUT",
+			`/containers/${this.id}/archive?path=${encodeURIComponent(dir)}`,
+			{ stream: tarStream(file), timeoutMs: STREAM_MS },
+		);
+	}
+
+	async copyOutStream(
+		path: string,
+	): Promise<{ size: number; data: ReadableStream<Uint8Array> } | null> {
+		const res = await this.driver.request(
+			"GET",
+			`/containers/${this.id}/archive?path=${encodeURIComponent(path)}`,
+			{ ok404: true, timeoutMs: STREAM_MS },
+		);
+		if (res.status === 404 || !res.body) return null;
+		const f = await untarFirst(res.body);
+		return f ? { size: f.size, data: f.data } : null;
 	}
 
 	async copyOut(path: string): Promise<Uint8Array> {

@@ -19,6 +19,8 @@ describe("file names", () => {
 		["..", null],
 		["", null],
 		["dir/", null],
+		["x".repeat(150), "x".repeat(100)],
+		["語".repeat(40), "語".repeat(33)],
 	])("%p -> %p", (raw, want) => {
 		expect(safeFileName(raw)).toBe(want);
 	});

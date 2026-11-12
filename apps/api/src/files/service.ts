@@ -19,7 +19,7 @@ import {
 	INPUTS_BUCKET,
 	MAX_OBJECT_BYTES,
 } from "@mastermind/bus";
-import type { Bead } from "@mastermind/core";
+import { type Bead, safeFileName } from "@mastermind/core";
 import type { NatsConnection } from "@nats-io/nats-core";
 import { streamNames } from "../backup/jetstream.ts";
 
@@ -60,16 +60,7 @@ export type Dir = "in" | "out";
 /** A file of an item as the API shows it. */
 export type ItemFile = Omit<FileInfo, "name"> & { name: string; dir: Dir };
 
-/** A file name from a client: one path segment of safe characters, or null. */
-export function safeFileName(raw: string): string | null {
-	const base = raw.split(/[\\/]/).pop() ?? "";
-	const name = base
-		.normalize("NFC")
-		.replace(/[^\p{L}\p{N}._\-+()@ ,=]/gu, "_")
-		.trim()
-		.slice(0, 200);
-	return name === "" || /^\.+$/.test(name) ? null : name;
-}
+export { safeFileName };
 
 export const objectName = (item: string, dir: Dir, name: string) =>
 	`${item}/${dir}/${name}`;

@@ -35,6 +35,7 @@ import {
 	type RunnerInfo,
 } from "@mastermind/core";
 import { DockerDriver } from "./box/docker.ts";
+import { natsBoxFiles } from "./box/files.ts";
 import { DEFAULT_BOX_IMAGE, startBoxMode } from "./box/launcher.ts";
 import { checkRequirement, FileSetupMemory } from "./check.ts";
 import {
@@ -885,6 +886,9 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 					outDir: join(dirname(path), "results"),
 					log,
 					onStep: (beadId, line) => runner?.progress(beadId, line),
+					// Inputs and outputs on this account's files bucket (mm-210.60).
+					files: () =>
+						conn && !conn.isClosed() ? natsBoxFiles(conn, cfg.account) : null,
 				});
 			boxCheck = { ok: true };
 		} catch (error) {

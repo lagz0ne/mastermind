@@ -20,6 +20,7 @@ import { missingReason, resolveSecrets } from "../secrets/needs.ts";
 import { SecretStore, secretsPath } from "../secrets/store.ts";
 import { DockerDriver } from "./docker.ts";
 import type { BoxDriver } from "./driver.ts";
+import type { BoxFiles } from "./files.ts";
 import { DEFAULT_BOX_IMAGE } from "./image.ts";
 import { type BoxRunOptions, runInBox, sweepBoxes, WORKSPACE } from "./run.ts";
 
@@ -111,6 +112,8 @@ export type BoxModeInput = {
 	log: (line: string) => void;
 	onStep?: (beadId: string, line: string) => void;
 	driver?: BoxDriver;
+	/** The item's files (inputs in, outputs out); null while not connected. */
+	files?: () => BoxFiles | null;
 };
 
 /**
@@ -138,6 +141,7 @@ export async function startBoxMode(i: BoxModeInput) {
 			outDir: i.outDir,
 			log: i.log,
 			...(i.onStep ? { onStep: i.onStep } : {}),
+			...(i.files ? { files: i.files } : {}),
 		}),
 	};
 }

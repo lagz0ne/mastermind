@@ -71,6 +71,20 @@ export interface Box {
 	): Promise<void>;
 	/** The regular files under `path` (a file or a directory), as a tar archive. */
 	copyOut(path: string): Promise<Uint8Array>;
+	/** Stream one file into directory `dir` (it must exist); never all in memory. */
+	copyInStream?(
+		dir: string,
+		file: {
+			name: string;
+			size: number;
+			data: ReadableStream<Uint8Array>;
+			mode?: number;
+		},
+	): Promise<void>;
+	/** Stream the regular file at `path` out; null when there is none. */
+	copyOutStream?(
+		path: string,
+	): Promise<{ size: number; data: ReadableStream<Uint8Array> } | null>;
 	/** The tail of the box's own output (its main process). */
 	logs(tail?: number): Promise<string>;
 	/** Stop and delete the box and its anonymous volumes. Never throws on "gone". */

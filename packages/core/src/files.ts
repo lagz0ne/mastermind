@@ -37,6 +37,23 @@ export const OUTPUTS_DIR = "/workspace/.mastermind/out";
 export const itemFileUrl = (item: string, f: Pick<ItemFile, "dir" | "name">) =>
 	`/api/items/${encodeURIComponent(item)}/files/${f.dir}/${encodeURIComponent(f.name)}`;
 
+/** Longest file name, UTF-8 bytes (a plain tar header holds 100). */
+export const MAX_FILE_NAME_BYTES = 100;
+
+/** A file name from a client or a box: one path segment of safe characters, or null. */
+export function safeFileName(raw: string): string | null {
+	const base = raw.split(/[\\/]/).pop() ?? "";
+	let name = base
+		.normalize("NFC")
+		.replace(/[^\p{L}\p{N}._\-+()@ ,=]/gu, "_")
+		.trim();
+	const enc = new TextEncoder();
+	while (enc.encode(name).length > MAX_FILE_NAME_BYTES)
+		name = Array.from(name).slice(0, -1).join("");
+	name = name.trim();
+	return name === "" || /^\.+$/.test(name) ? null : name;
+}
+
 /** 1536 -> "1.5 KiB". */
 export function formatBytes(n: number): string {
 	const units = ["B", "KiB", "MiB", "GiB", "TiB"];

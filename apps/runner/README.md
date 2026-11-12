@@ -161,6 +161,21 @@ The environment's `output` says how code leaves the box. After the agent says `d
   shows it. A failed push or pull request fails the task with the reason. Closing the item
   merges nothing.
 
+## Box files: inputs in, outputs out
+
+Files attached to a ticket go into the box. Files the agent makes come back to the ticket.
+They move on NATS, in the bucket of the runner's account (`mm_files_<account>`). The auth
+callout gives a runner that bucket and no other bucket.
+
+| When | What |
+|---|---|
+| After the checkout, before the agent | Mastermind copies the item's inputs to the account bucket. The runner streams each one to `/workspace/.mastermind/in/<name>`. If this step fails, the task fails and the agent does not start. |
+| The agent's prompt | It gets a line that names the inputs and `/workspace/.mastermind/out`. |
+| After the agent | The runner uploads `changes.patch` (if there is a change), up to 20 plain files from `/workspace/.mastermind/out`, and `agent.log` (the last 256 KiB of the agent's output). The ticket shows `file out: <name> (<size>)`. If an upload fails, it is reported on the ticket and the task still completes. |
+
+The runner adds `.mastermind/` to `.git/info/exclude`, so these files never go into the patch
+or the pushed branch. Each file streams through the runner; no file is held in memory as a whole.
+
 ## Box network: open, none or an allow list
 
 The environment's `network` sets what the box can reach:
