@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
 	BEAD_VERBS,
 	beadToken,
+	FILES_VERBS,
 	parseSubject,
 	patterns,
 	SubjectError,
@@ -61,6 +62,18 @@ describe("subjects", () => {
 				verb,
 			});
 		}
+		for (const verb of FILES_VERBS) {
+			expect(parseSubject(subjects.files("bob", "mm-210.14", verb))).toEqual({
+				kind: "files",
+				account: "bob",
+				bead: "mm-210.14",
+				verb,
+			});
+		}
+		expect(subjects.files("bob", "mm-210.14", "stage")).toBe(
+			"mm.u.bob.f.mm-210~14.stage",
+		);
+		expect(parseSubject("mm.u.bob.f.mm-1.explode")).toBeNull();
 		expect(parseSubject(subjects.ready("web"))).toEqual({
 			kind: "ready",
 			queue: "web",

@@ -10,6 +10,9 @@
  *   mm.u.<account>.r.<runner>.offer  request: a direct bead offered to one runner;
  *                                    the offer's reply subject is ...offer.reply.<nonce>
  *                                    and the runner ANSWERS with a request to it
+ *   mm.u.<account>.f.<bead>.<verb>   request: stage (copy the item's inputs into
+ *                                    the account's files bucket) | out (these
+ *                                    outputs are in the bucket) (mm-210.60)
  *   mm.q.<queue>.ready               publish: a queue has work
  *   mm.events.bead.<bead>            publish: one bead changed (beads journal)
  *
@@ -30,6 +33,10 @@ export const BEAD_VERBS = [
 	"release",
 ] as const;
 export type BeadVerb = (typeof BEAD_VERBS)[number];
+
+/** What a runner asks about the files of the item it holds (mm-210.60). */
+export const FILES_VERBS = ["stage", "out"] as const;
+export type FilesVerb = (typeof FILES_VERBS)[number];
 
 /** The queue group that every Mastermind replica serves in. */
 export const SERVICE_QUEUE = "mastermind";
@@ -102,6 +109,9 @@ export const subjects = {
 	/** The offers to every runner of an account (the runner's subscribe permission). */
 	runnerOfferScope: (account: string) =>
 		`mm.u.${token("account", account)}.r.*.offer`,
+	/** Request from a runner about the files of a bead it holds (mm-210.60). */
+	files: (account: string, bead: string, verb: FilesVerb) =>
+		`mm.u.${token("account", account)}.f.${beadToken(bead)}.${verb}`,
 	ready: (queue: string) => `mm.q.${token("queue", queue)}.ready`,
 	beadEvent: (bead: string) => `mm.events.bead.${beadToken(bead)}`,
 	/** Everything an account's service accounts may publish to (for the auth callout). */
@@ -113,6 +123,7 @@ export const patterns = {
 	next: "mm.u.*.q.*.next",
 	bead: (verb: BeadVerb) => `mm.u.*.d.*.${verb}`,
 	allBeadVerbs: "mm.u.*.d.*.*",
+	files: (verb: FilesVerb) => `mm.u.*.f.*.${verb}`,
 	runnerStatus: "mm.u.*.r.*.status",
 	ready: "mm.q.*.ready",
 	beadEvents: "mm.events.bead.*",
@@ -121,12 +132,15 @@ export const patterns = {
 export type ParsedSubject =
 	| { kind: "next"; account: string; queue: string }
 	| { kind: "bead"; account: string; bead: string; verb: BeadVerb }
+	| { kind: "files"; account: string; bead: string; verb: FilesVerb }
 	| { kind: "runnerStatus"; account: string; runner: string }
 	| { kind: "ready"; queue: string }
 	| { kind: "beadEvent"; bead: string };
 
 const isVerb = (v: string): v is BeadVerb =>
 	(BEAD_VERBS as readonly string[]).includes(v);
+const isFilesVerb = (v: string): v is FilesVerb =>
+	(FILES_VERBS as readonly string[]).includes(v);
 const ok = (t: string | undefined): t is string =>
 	t !== undefined && t !== "" && !/[*>\s]/.test(t);
 
@@ -140,6 +154,8 @@ export function parseSubject(subject: string): ParsedSubject | null {
 			return { kind: "next", account: b, queue: d };
 		if (c === "d" && e !== undefined && isVerb(e))
 			return { kind: "bead", account: b, bead: beadFromToken(d), verb: e };
+		if (c === "f" && e !== undefined && isFilesVerb(e))
+			return { kind: "files", account: b, bead: beadFromToken(d), verb: e };
 		if (c === "r" && e === "status" && !d.includes("~"))
 			return { kind: "runnerStatus", account: b, runner: d };
 		return null;

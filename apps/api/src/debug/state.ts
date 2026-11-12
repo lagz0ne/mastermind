@@ -29,6 +29,8 @@ export type DebugSources = {
 	errors?: () => LogLine[];
 	/** Waiters and recent decisions of this replica's dispatcher; null while it starts. */
 	dispatcher?: () => DispatcherDebug | null;
+	/** File count and bytes per files bucket (mm-210.60); null while NATS starts. */
+	files?: (() => Promise<unknown>) | null;
 	now?: () => Date;
 	/** Per section. Default 5 s. */
 	timeoutMs?: number;
@@ -115,38 +117,43 @@ export async function debugState(src: DebugSources) {
 	const now = (src.now ?? (() => new Date()))();
 	const t = src.timeoutMs ?? 5_000;
 	const auth = () => src.auth?.() ?? off("auth");
-	const [accounts, serviceAccounts, routing, environments, items, dispatcher] =
-		await Promise.all([
-			section(
-				async () =>
-					(await auth().accounts()).map((a) => ({
-						id: a.id,
-						createdAt: a.createdAt,
-						invitedBy: a.invitedBy,
-					})),
-				t,
-			),
-			section(
-				async () =>
-					(await auth().serviceAccounts()).map((s) => ({
-						id: s.id,
-						account: s.account,
-						name: s.name,
-						createdAt: s.createdAt,
-					})),
-				t,
-			),
-			section(() => (src.routing?.() ?? off("routing")).read(), t),
-			section(() => (src.environments?.() ?? off("environments")).read(), t),
-			section(async () => {
-				if (!src.items) off("the work store");
-				return summarizeItems(
-					await (src.items as () => Promise<Bead[]>)(),
-					now,
-				);
-			}, t),
-			section(() => src.dispatcher?.() ?? off("the dispatcher"), t),
-		]);
+	const [
+		accounts,
+		serviceAccounts,
+		routing,
+		environments,
+		items,
+		dispatcher,
+		files,
+	] = await Promise.all([
+		section(
+			async () =>
+				(await auth().accounts()).map((a) => ({
+					id: a.id,
+					createdAt: a.createdAt,
+					invitedBy: a.invitedBy,
+				})),
+			t,
+		),
+		section(
+			async () =>
+				(await auth().serviceAccounts()).map((s) => ({
+					id: s.id,
+					account: s.account,
+					name: s.name,
+					createdAt: s.createdAt,
+				})),
+			t,
+		),
+		section(() => (src.routing?.() ?? off("routing")).read(), t),
+		section(() => (src.environments?.() ?? off("environments")).read(), t),
+		section(async () => {
+			if (!src.items) off("the work store");
+			return summarizeItems(await (src.items as () => Promise<Bead[]>)(), now);
+		}, t),
+		section(() => src.dispatcher?.() ?? off("the dispatcher"), t),
+		section(() => (src.files ?? off("files"))(), t),
+	]);
 	return {
 		version: src.version,
 		now: now.toISOString(),
@@ -160,6 +167,7 @@ export async function debugState(src: DebugSources) {
 		environments,
 		items,
 		dispatcher,
+		files,
 		errors: src.errors?.() ?? [],
 	};
 }

@@ -15,6 +15,9 @@ import type { DispatchNats } from "./dispatch/start.ts";
 import { downloadRoutes } from "./download/routes.ts";
 import { environmentRoutes } from "./environments/routes.ts";
 import { startEnvironmentsInBackground } from "./environments/start.ts";
+import { filesRoutes } from "./files/routes.ts";
+import { filesConfigFromEnv } from "./files/service.ts";
+import { startFilesInBackground } from "./files/start.ts";
 import { exitOnNatsClosed } from "./nats-exit.ts";
 import { RunnerRegistry } from "./people/registry.ts";
 import { peopleRoutes } from "./people/routes.ts";
@@ -147,6 +150,21 @@ const beads = beadsRoutes(natsWork ? natsWork.beads : null, {
 	onError: (error) => console.error(`beads: ${error}`),
 });
 
+// Files of items (inputs, outputs) on JetStream object stores, on the dispatcher's NATS (mm-210.60).
+const filesConfig = filesConfigFromEnv(env);
+const itemFiles =
+	dispatchNats && natsWork
+		? startFilesInBackground(dispatchNats, natsWork.beads, filesConfig, {
+				onError: (error) => console.error(`files: ${error}`),
+			})
+		: null;
+const filesApi = filesRoutes({
+	files: () => itemFiles?.files() ?? null,
+	beads: natsWork ? natsWork.beads : null,
+	requireAccount,
+	onError: (error) => console.error(`files: ${error}`),
+});
+
 // Read-only operator snapshot (Bearer MASTERMIND_OPERATOR_KEY; off when unset).
 const connections = new ConnectionWatch();
 auth?.ready
@@ -165,6 +183,13 @@ const debug = debugRoutes({
 		items: natsWork ? () => natsWork.board.board() : null,
 		errors: () => errorLines.lines(),
 		dispatcher: () => natsWork?.dispatcher()?.debug() ?? null,
+		files: itemFiles
+			? async () => {
+					const f = itemFiles.files();
+					if (!f) throw new Error("files are starting");
+					return f.usage();
+				}
+			: null,
 	},
 	items: natsWork ? natsWork.beads : null,
 	events: {
@@ -181,6 +206,8 @@ const debug = debugRoutes({
 const server = Bun.serve({
 	port,
 	development: env.NODE_ENV !== "production",
+	// Uploads stream (files): allow the largest file plus a margin; default is 128 MiB.
+	maxRequestBodySize: filesConfig.maxObjectBytes + 1024 * 1024,
 	routes: traced(
 		telemetry,
 		{
@@ -203,6 +230,7 @@ const server = Bun.serve({
 				onError: (error) => console.error(`runner-api: ${error}`),
 			}),
 			...beads,
+			...filesApi,
 			...debug,
 			// Public: /install.sh and the runner binaries of this commit.
 			...downloadRoutes({
@@ -226,6 +254,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 		await natsWork?.stop();
 		await routing?.stop();
 		await environments?.stop();
+		await itemFiles?.stop();
 		await auth?.stop();
 		board.stop();
 		await server.stop();
