@@ -78,6 +78,7 @@ export function joinRunners(
 			running: e.running,
 			version: e.version,
 			readiness: e.diagnostics?.readiness ?? null,
+			paseo: e.diagnostics?.checks?.paseoProviders ?? null,
 			...(e.duplicateSession ? { duplicateSession: e.duplicateSession } : {}),
 		});
 	}

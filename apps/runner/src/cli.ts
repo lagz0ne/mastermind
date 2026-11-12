@@ -1492,6 +1492,12 @@ async function runStart(
 			setupMemory: new FileSetupMemory(join(dirname(path), "setup-state.json")),
 			log,
 			providerStatus: () => diag.checks.providers,
+			// Provider, mode and model are checked against the runner's Paseo (mm-210.84).
+			paseoReport: () =>
+				diag.checks.paseoProviders && {
+					...(f["paseo-host"] ? { host: f["paseo-host"] } : {}),
+					providers: diag.checks.paseoProviders,
+				},
 			onChange: () => diag.changed(),
 		});
 		diag.loop = runner;

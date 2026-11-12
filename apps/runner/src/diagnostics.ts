@@ -11,6 +11,7 @@ import { existsSync } from "node:fs";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type {
+	PaseoProviderState,
 	RunnerDiagnostics,
 	RunnerInFlight,
 	RunnerReadiness,
@@ -141,12 +142,24 @@ export async function runChecks(
 	const why: NonNullable<Checks["why"]> = {};
 	const notReady: Record<string, { problem: string; fix: string }> = {};
 	const wanted = providersOf(s);
+	let reported: PaseoProviderState[] | undefined;
 	let daemon = false;
 	try {
 		const p = await connect(opts.paseoHost);
 		try {
 			daemon = true;
 			const list = await p.providers();
+			// Everything Paseo reports, for routing and /people (mm-210.84).
+			reported = list.map((x) => ({
+				name: x.provider,
+				status: x.status,
+				enabled: x.enabled,
+				loggedIn: null,
+				defaultMode: x.defaultMode,
+				modes: x.modes,
+				models: x.models,
+				...(x.error ? { error: x.error } : {}),
+			}));
 			for (const name of wanted) {
 				const x = list.find((y) => y.provider === name);
 				const fix = `log in to ${name} on this machine (or install it), then check: paseo provider ls`;
@@ -167,6 +180,8 @@ export async function runChecks(
 				providers[name] = true;
 				if (!opts.login) continue;
 				const l = await p.login(name).catch(() => null);
+				const r = reported.find((y) => y.name === name);
+				if (r && l) r.loggedIn = l.loggedIn;
 				if (l?.loggedIn === false) {
 					providers[name] = false;
 					notReady[name] = {
@@ -201,6 +216,7 @@ export async function runChecks(
 		providers,
 		workdir: s.workdir ? exists(s.workdir) : null,
 		checkedAt: (opts.now?.() ?? new Date()).toISOString(),
+		...(reported ? { paseoProviders: reported } : {}),
 		...(Object.keys(why).length ? { why } : {}),
 	};
 }

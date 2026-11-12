@@ -4,7 +4,7 @@
  * `runners` event of `GET /api/people/events`, shared by the api and the web UI.
  */
 
-import type { RunnerReadiness } from "./dispatch.ts";
+import type { PaseoProviderState, RunnerReadiness } from "./dispatch.ts";
 
 /** An account (a human). */
 export type AccountView = {
@@ -45,7 +45,13 @@ export type RunnerView = {
 	/** Queues it asks for work on. */
 	queues: string[];
 	capabilities: string[];
+	/** Providers Paseo reports available on the runner's host. */
 	providers: string[];
+	/**
+	 * Every provider as the runner's Paseo reports it (mm-210.84): status,
+	 * login, default mode. Not configured in Mastermind. Null/absent: no report.
+	 */
+	paseo?: PaseoProviderState[] | null;
 	/** Agents at once; "unlimited"; null when the runner does not say. */
 	capacity: number | "unlimited" | null;
 	/** Ids of the beads its agents hold now. */

@@ -8,10 +8,14 @@
  *      here (plus requires and secrets, see check.ts): met, or declined
  *   b. the user's rules, in order, first match wins: a target, or decline
  *   c. agent fields: rule, then target, then the stage default; first set
- *      wins. An old server's env.agent / env.provider is ignored.
- *      The provider is never left empty (paseo run needs --provider): then the
- *      runner's default provider, then the first offered provider whose check
- *      did not fail; none: decline
+ *      wins. An old server's env.agent / env.provider is ignored (mm-210.84).
+ *      The provider is never left empty: then the runner's default provider,
+ *      then the first offered provider whose check did not fail, then the
+ *      first provider Paseo reports ready (Paseo has no default provider);
+ *      none: decline. No mode set: Paseo's default mode of that provider.
+ *      Where the runner's Paseo is the target's, the choice is checked
+ *      against it: provider ready, enabled and not logged out, mode in its
+ *      modes, model in its models; else decline with Paseo's reason
  *   d. no rule matches: decline with the reason (Mastermind gets the bead back)
  *
  * The file is `routing.json` next to the runner config (no secrets in it).
@@ -21,7 +25,11 @@
  */
 import { existsSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
-import type { Dispatch, DispatchStage } from "@mastermind/core";
+import type {
+	Dispatch,
+	DispatchStage,
+	PaseoProviderState,
+} from "@mastermind/core";
 import { DISPATCH_STAGES } from "@mastermind/core";
 import {
 	type AgentSettings,
@@ -263,13 +271,29 @@ export function mismatch(m: RuleMatch, d: Routable): string | null {
 }
 
 /**
- * The mode of an unattended agent when no layer sets one: a mode that does
- * not stop to ask for permission (nobody is there to answer). Undefined: the
- * provider's own default.
+ * The mode of an unattended agent when no layer sets one and Paseo does not
+ * report (an old check, or a target on another host): a mode that does not
+ * stop to ask for permission. Undefined: the provider's own default.
  */
 const UNATTENDED_MODE: Record<string, string> = { claude: "auto" };
 export function defaultMode(provider: string): string | undefined {
-	return UNATTENDED_MODE[provider.split("/")[0] as string];
+	return UNATTENDED_MODE[baseOf(provider)];
+}
+
+const baseOf = (provider: string) => provider.split("/")[0] as string;
+
+/** Why Paseo cannot run `provider` now; null: it can (or Paseo does not list it and has no say). */
+export function paseoRefusal(
+	x: PaseoProviderState | undefined,
+	provider: string,
+): string | null {
+	if (!x) return `provider ${provider} is not listed by Paseo`;
+	if (!x.enabled) return `provider ${provider} is disabled in Paseo`;
+	if (x.status !== "ready")
+		return `provider ${provider} is ${x.status} in Paseo${x.error ? `: ${x.error}` : ""}`;
+	if (x.loggedIn === false)
+		return `provider ${provider} is not logged in (Paseo)`;
+	return null;
 }
 
 /** Where the provider comes from when no layer sets one. */
@@ -278,6 +302,11 @@ export type ProviderFallback = {
 	agentProvider?: string;
 	/** Provider check results (diagnostics); false: not available. */
 	available?: Record<string, boolean>;
+	/**
+	 * What the runner's Paseo reports (diagnostics, mm-210.84) and its host
+	 * (undefined: local). Used for targets on that host only.
+	 */
+	paseo?: { host?: string; providers: PaseoProviderState[] };
 };
 
 /** Pick the target and agent for a dispatch. Pure: no files, no commands. */
@@ -351,29 +380,85 @@ export function route(
 			}
 		}
 	}
+	// Paseo's report counts for a target on the runner's own Paseo only.
+	const paseo =
+		fallback.paseo && (target.paseoHost ?? "") === (fallback.paseo.host ?? "")
+			? fallback.paseo.providers
+			: undefined;
+	const reportOf = (p: string) => paseo?.find((x) => x.name === baseOf(p));
 	if (!agent.provider) {
 		const ok = (p: string) =>
-			fallback.available?.[p.split("/")[0] as string] !== false;
+			fallback.available?.[baseOf(p)] !== false &&
+			(!paseo || !paseoRefusal(reportOf(p), baseOf(p)));
 		const own = fallback.agentProvider;
-		const p = own && ok(own) ? own : providers.find(ok);
+		const p =
+			own && ok(own)
+				? own
+				: (providers.find(ok) ??
+					paseo?.find((x) => !paseoRefusal(x, x.name))?.name);
 		if (!p)
 			return {
 				ok: false,
-				reason: `no provider available on this runner (offered: ${providers.join(", ") || "none"})`,
+				reason: `no provider available on this runner (offered: ${providers.join(", ") || "none"}${
+					paseo
+						? `; Paseo ready: ${
+								paseo
+									.filter((x) => !paseoRefusal(x, x.name))
+									.map((x) => x.name)
+									.join(", ") || "none"
+							}`
+						: ""
+				})`,
 				why,
 			};
 		agent.provider = p;
 		from.push(
-			`provider ${p} from ${p === own ? "runner default" : "runner providers"}`,
+			`provider ${p} from ${
+				p === own
+					? "runner default"
+					: providers.includes(p)
+						? "runner providers"
+						: "Paseo (first ready)"
+			}`,
 		);
 	}
+	const report = reportOf(agent.provider);
+	if (paseo) {
+		const base = baseOf(agent.provider);
+		const no = paseoRefusal(report, base);
+		if (no) return { ok: false, reason: no, why };
+	}
 	if (!agent.mode) {
-		const m = defaultMode(agent.provider);
+		const m = report?.defaultMode ?? defaultMode(agent.provider);
 		if (m) {
 			agent.mode = m;
-			from.push(`mode ${m} (unattended default)`);
+			from.push(
+				`mode ${m} (${report?.defaultMode ? "Paseo default" : "unattended default"})`,
+			);
 		}
 	}
+	if (
+		report &&
+		agent.mode &&
+		report.modes.length &&
+		!report.modes.includes(agent.mode)
+	)
+		return {
+			ok: false,
+			reason: `mode ${agent.mode} is not a mode of ${baseOf(agent.provider)} in Paseo (${report.modes.join(", ")})`,
+			why,
+		};
+	const model =
+		agent.model ??
+		(agent.provider.includes("/")
+			? agent.provider.slice(agent.provider.indexOf("/") + 1)
+			: undefined);
+	if (report && model && report.models.length && !report.models.includes(model))
+		return {
+			ok: false,
+			reason: `model ${model} is not listed for ${baseOf(agent.provider)} in Paseo`,
+			why,
+		};
 	if (from.length) why.push(from.join(", "));
 	return {
 		ok: true,

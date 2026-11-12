@@ -5,6 +5,7 @@ import {
 	groupByAccount,
 	outdated,
 	outdatedNotice,
+	paseoOf,
 	readinessOf,
 	runnerCommand,
 	statsOf,
@@ -218,5 +219,47 @@ describe("readinessOf (mm-210.59)", () => {
 		);
 		expect(degraded.bad).toBe(true);
 		expect(degraded.lines).toEqual([{ text: "no Docker", bad: true }]);
+	});
+});
+
+describe("paseoOf (mm-210.84)", () => {
+	const p = (
+		name: string,
+		over: Partial<NonNullable<RunnerView["paseo"]>[number]> = {},
+	) => ({
+		name,
+		status: "ready",
+		enabled: true,
+		loggedIn: null,
+		defaultMode: "auto",
+		modes: [],
+		models: [],
+		...over,
+	});
+
+	test("ready providers with their default mode; the rest counted; title lists all", () => {
+		const v = paseoOf({
+			paseo: [
+				p("claude"),
+				p("codex", { status: "unavailable", defaultMode: "auto-review" }),
+				p("pi", { enabled: false }),
+			],
+		});
+		expect(v).toEqual({
+			text: "Paseo: claude ready, mode auto · 2 more not ready",
+			title: "claude ready, mode auto\ncodex unavailable\npi disabled",
+			bad: false,
+		});
+	});
+
+	test("a logged-out provider is named; none ready is a problem; no report: null", () => {
+		expect(paseoOf({ paseo: [p("claude", { loggedIn: false })] })).toEqual({
+			text: "Paseo: claude not logged in",
+			title: "claude not logged in",
+			bad: true,
+		});
+		expect(paseoOf({ paseo: [] })?.text).toBe("Paseo: no provider");
+		expect(paseoOf({ paseo: null })).toBeNull();
+		expect(paseoOf({})).toBeNull();
 	});
 });

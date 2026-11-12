@@ -39,6 +39,7 @@ import {
 	type Decision,
 	decisionLine,
 	implicitRouting,
+	type ProviderFallback,
 	type Routing,
 	route,
 } from "./routing.ts";
@@ -66,6 +67,12 @@ export type RunnerOptions = {
 	backoff?: Backoff;
 	/** Latest provider check results (false: not available in Paseo). */
 	providerStatus?: () => Record<string, boolean>;
+	/**
+	 * What the runner's Paseo reports (diagnostics checks.paseoProviders) and
+	 * its host: routing picks and checks provider, mode and model with it
+	 * (mm-210.84). Undefined: no report yet.
+	 */
+	paseoReport?: () => ProviderFallback["paseo"];
 	/** Called when in-flight work, the last `next` or the last decision changes. */
 	onChange?: () => void;
 	/** Agents run on this machine, not in a box (--no-box): say so on every task. */
@@ -291,6 +298,7 @@ export class Runner {
 		const decision = route(offer, this.#routing, settings.providers, {
 			agentProvider: settings.agent.provider,
 			available: this.#o.providerStatus?.(),
+			paseo: this.#o.paseoReport?.(),
 		});
 		const id = offer.bead.id;
 		const notReady = this.#o.readiness
@@ -456,6 +464,7 @@ export class Runner {
 		const decision = route(d, this.#routing, settings.providers, {
 			agentProvider: settings.agent.provider,
 			available: this.#o.providerStatus?.(),
+			paseo: this.#o.paseoReport?.(),
 		});
 		this.lastDecision = decision.ok
 			? `${id}: ${decisionLine(decision, settings.id)}`

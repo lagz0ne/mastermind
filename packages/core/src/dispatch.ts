@@ -110,6 +110,30 @@ export function directQueue(address: string): string {
 }
 
 /**
+ * One agent provider as Paseo reports it on a runner's host (mm-210.84).
+ * Mastermind stores no agent settings: it only shows what Paseo says.
+ */
+export type PaseoProviderState = {
+	name: string;
+	/** Paseo's word: ready, loading, error, unavailable. */
+	status: string;
+	enabled: boolean;
+	/**
+	 * Paseo's diagnostic `Auth.loggedIn`; null: not asked (box mode: the agent
+	 * logs in in the box) or not said. True means a credential is present,
+	 * not that it is accepted (mm-210.80).
+	 */
+	loggedIn: boolean | null;
+	/** The mode an agent gets when none is set; null: Paseo does not say. */
+	defaultMode: string | null;
+	modes: string[];
+	/** Model ids Paseo lists; empty: not known. */
+	models: string[];
+	/** Paseo's reason when not ready. */
+	error?: string;
+};
+
+/**
  * What the runner must prepare before it starts the agent. No agent settings
  * (provider, model, mode): the runner decides them with Paseo (mm-210.84).
  */
@@ -312,6 +336,11 @@ export type RunnerDiagnostics = {
 		/** The workdir exists; null when none is set. */
 		workdir: boolean | null;
 		checkedAt: string | null;
+		/**
+		 * Every provider as the runner's Paseo reports it (mm-210.84), in
+		 * Paseo's order. Absent: a runner older than that.
+		 */
+		paseoProviders?: PaseoProviderState[];
 	};
 	/** The last 20 problem lines of the runner log, without secrets. */
 	lastErrors: string[];

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { tmpdir } from "node:os";
-import type { Dispatch } from "@mastermind/core";
+import type { Dispatch, PaseoProviderState } from "@mastermind/core";
 import { ConfigError } from "../src/config.ts";
 import {
 	decisionLine,
@@ -275,4 +275,105 @@ test("lintRouting: unknown targets, unbound environments, queues nobody takes", 
 		"environment web: /nonexistent/mm-web does not exist",
 	]);
 	expect(lintRouting(sample(), { queues: ["q"] })).toEqual([]);
+});
+
+describe("the runner asks Paseo (mm-210.84)", () => {
+	const bare = implicitRouting({ agent: {} });
+	const claude: PaseoProviderState = {
+		name: "claude",
+		status: "ready",
+		enabled: true,
+		loggedIn: null,
+		defaultMode: "acceptEdits",
+		modes: ["default", "acceptEdits", "auto", "bypassPermissions"],
+		models: ["opus", "sonnet"],
+	};
+	const codex: PaseoProviderState = {
+		name: "codex",
+		status: "ready",
+		enabled: true,
+		loggedIn: true,
+		defaultMode: "auto-review",
+		modes: ["auto-review", "full-access"],
+		models: [],
+	};
+	const paseo = (...providers: PaseoProviderState[]) => ({
+		paseo: { providers },
+	});
+
+	test("no mode set: Paseo's default mode of that provider", () => {
+		const r = route(d(), bare, ["claude"], paseo(claude));
+		if (!r.ok) throw new Error(r.reason);
+		expect(r.agent).toEqual({ provider: "claude", mode: "acceptEdits" });
+		expect(r.why.join("\n")).toContain("mode acceptEdits (Paseo default)");
+	});
+
+	test("no provider in the runner's settings: the first provider Paseo reports ready", () => {
+		const r = route(
+			d(),
+			bare,
+			[],
+			paseo({ ...claude, status: "unavailable" }, codex),
+		);
+		if (!r.ok) throw new Error(r.reason);
+		expect(r.agent).toEqual({ provider: "codex", mode: "auto-review" });
+		expect(r.why.join("\n")).toContain(
+			"provider codex from Paseo (first ready)",
+		);
+	});
+
+	test("a provider Paseo reports unavailable, disabled, logged out or unknown: declined with Paseo's reason", () => {
+		const own = implicitRouting({ agent: { provider: "claude" } });
+		const reason = (c: PaseoProviderState | null) => {
+			const r = route(d(), own, ["claude"], paseo(...(c ? [c] : [])));
+			return r.ok ? "ok" : r.reason;
+		};
+		expect(
+			reason({
+				...claude,
+				status: "error",
+				error: "claude not found on PATH",
+			}),
+		).toBe("provider claude is error in Paseo: claude not found on PATH");
+		expect(reason({ ...claude, enabled: false })).toBe(
+			"provider claude is disabled in Paseo",
+		);
+		expect(reason({ ...claude, loggedIn: false })).toBe(
+			"provider claude is not logged in (Paseo)",
+		);
+		expect(reason(null)).toBe("provider claude is not listed by Paseo");
+		expect(reason(claude)).toBe("ok");
+	});
+
+	test("a mode or model Paseo does not list: declined", () => {
+		// Rule 3 of the sample sets mode auto; this Paseo has no such mode.
+		const noAuto = { ...claude, modes: ["default", "plan"] };
+		const r = route(
+			d({ env: "web", priority: 1 }),
+			sample(),
+			["claude"],
+			paseo(noAuto),
+		);
+		expect(r).toMatchObject({
+			ok: false,
+			reason: "mode auto is not a mode of claude in Paseo (default, plan)",
+		});
+		const own = implicitRouting({ agent: { provider: "claude/haiku" } });
+		expect(route(d(), own, ["claude"], paseo(claude))).toMatchObject({
+			ok: false,
+			reason: "model haiku is not listed for claude in Paseo",
+		});
+		const listed = implicitRouting({ agent: { provider: "claude/opus" } });
+		expect(route(d(), listed, ["claude"], paseo(claude)).ok).toBe(true);
+	});
+
+	test("a target on another Paseo host is not checked against the local report", () => {
+		const r = route(
+			d({ env: "ml" }),
+			sample(),
+			["claude", "codex"],
+			paseo({ ...claude, status: "unavailable" }),
+		);
+		expect(r.ok && r.agent.provider).toBe("codex");
+	});
 });

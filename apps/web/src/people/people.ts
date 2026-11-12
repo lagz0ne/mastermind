@@ -196,6 +196,36 @@ export function runnerCommand(
 }
 
 /**
+ * What the runner's Paseo reports (mm-210.84), short: the ready providers
+ * with their default mode, a logged-out one, and how many others are not
+ * ready. `title`: every provider. Null: no report.
+ */
+export function paseoOf(
+	r: Pick<RunnerView, "paseo">,
+): { text: string; title: string; bad: boolean } | null {
+	if (!r.paseo) return null;
+	const one = (p: NonNullable<RunnerView["paseo"]>[number]) => {
+		if (p.loggedIn === false) return `${p.name} not logged in`;
+		if (!p.enabled) return `${p.name} disabled`;
+		if (p.status !== "ready")
+			return `${p.name} ${p.status}${p.error ? ` (${p.error})` : ""}`;
+		return `${p.name} ready${p.defaultMode ? `, mode ${p.defaultMode}` : ""}`;
+	};
+	const ok = (p: NonNullable<RunnerView["paseo"]>[number]) =>
+		p.enabled && p.status === "ready" && p.loggedIn !== false;
+	const ready = r.paseo.filter(ok);
+	const loggedOut = r.paseo.filter((p) => p.loggedIn === false);
+	const rest = r.paseo.length - ready.length - loggedOut.length;
+	const parts = [...ready, ...loggedOut].map(one);
+	if (rest > 0) parts.push(`${rest} more not ready`);
+	return {
+		text: `Paseo: ${parts.join(" · ") || "no provider"}`,
+		title: r.paseo.map(one).join("\n"),
+		bad: ready.length === 0,
+	};
+}
+
+/**
  * The state cell and the lines under a runner's name (mm-210.59): offline,
  * enrolled (never connected), or its readiness and the failed checks. A
  * connected runner that reports no readiness gets no work: say so. Its

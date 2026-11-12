@@ -339,7 +339,28 @@ describe("debug doctor cli", () => {
 					online: true,
 					queues: [],
 					running: [],
-					diagnostics: { lastDoctor: report },
+					diagnostics: {
+						lastDoctor: report,
+						checks: {
+							paseoProviders: [
+								{
+									name: "claude",
+									status: "ready",
+									enabled: true,
+									loggedIn: true,
+									defaultMode: "auto",
+								},
+								{
+									name: "codex",
+									status: "unavailable",
+									enabled: true,
+									loggedIn: null,
+									defaultMode: "auto-review",
+									error: "codex not found on PATH",
+								},
+							],
+						},
+					},
 				},
 			],
 			routing: { error: "x" },
@@ -350,5 +371,9 @@ describe("debug doctor cli", () => {
 		expect(state).toContain("doctor lagz0ne/yo-buid");
 		expect(state).toContain("a PASS, e FAIL");
 		expect(state).toContain("OUTPUT_SCHEMA_FAILED  fix: mastermind-runner");
+		// mm-210.84: what Paseo reports, per runner.
+		expect(state).toContain(
+			"lagz0ne/yo-buid Paseo: claude ready, logged in, mode auto · codex unavailable, mode auto-review (codex not found on PATH)",
+		);
 	});
 });

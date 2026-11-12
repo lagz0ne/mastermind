@@ -35,6 +35,8 @@ export type FakeProvider = {
 	status?: "ready" | "loading" | "error" | "unavailable";
 	defaultModeId?: string | null;
 	modes?: string[];
+	models?: string[];
+	enabled?: boolean;
 	error?: string;
 	/** Paseo's diagnostic text; default: a logged-in Claude Code block. */
 	diagnostic?: string;
@@ -117,9 +119,12 @@ export class FakePaseo {
 					entries: this.providers.map((p) => ({
 						provider: p.provider,
 						status: p.status ?? "ready",
-						enabled: true,
+						enabled: p.enabled ?? true,
 						defaultModeId: p.defaultModeId ?? null,
 						modes: (p.modes ?? []).map((id) => ({ id, label: id })),
+						...(p.models
+							? { models: p.models.map((id) => ({ id, label: id })) }
+							: {}),
 						...(p.error ? { error: p.error } : {}),
 					})),
 				};

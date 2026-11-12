@@ -16,6 +16,7 @@ import {
 	outdated,
 	outdatedNotice,
 	type People,
+	paseoOf,
 	RUNNER_BIN,
 	readinessOf,
 	revoke,
@@ -318,6 +319,7 @@ function RunnerRow({
 	const sa = r.serviceAccount;
 	const off = !r.online;
 	const ready = readinessOf(r);
+	const paseo = paseoOf(r);
 	const doRevoke = () => {
 		if (!sa) return;
 		if (!window.confirm(`Revoke ${sa.name}? Its runner disconnects at once.`))
@@ -396,6 +398,18 @@ function RunnerRow({
 				{r.capabilities.length > 0 && (
 					<span className="text-[11px] text-muted-foreground">
 						{r.capabilities.join(" · ")}
+					</span>
+				)}
+				{paseo && (
+					<span
+						data-doop-id="runner-paseo"
+						title={paseo.title}
+						className={cn(
+							"basis-full text-[11px] leading-[15px]",
+							paseo.bad ? "text-signal" : "text-muted-foreground",
+						)}
+					>
+						{paseo.text}
 					</span>
 				)}
 			</span>

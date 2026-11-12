@@ -275,6 +275,10 @@ export function formatState(s: Any): string {
 			// Two processes of one runner (mm-210.79).
 			if (r.duplicateSession)
 				out.push(`  ${r.account}/${r.runner}: ${r.duplicateSession}`);
+			// What the runner's Paseo reports; Mastermind sets none of it (mm-210.84).
+			const paseo = r.diagnostics?.checks?.paseoProviders;
+			if (Array.isArray(paseo))
+				out.push(`  ${r.account}/${r.runner} Paseo: ${paseoCell(paseo)}`);
 		}
 	if (!isErr(s.runners))
 		for (const r of s.runners as Any[])
@@ -425,6 +429,25 @@ function doctorSummary(who: string, r: Any, now: Date): string[] {
 				`    ${st.id}. ${st.problem ?? (st.detail ?? []).at(-1) ?? ""}${st.fix ? `  fix: ${st.fix}` : ""}`,
 			);
 	return out;
+}
+
+/** Every provider the runner's Paseo reports: status, login, default mode. */
+export function paseoCell(providers: Any[]): string {
+	if (!providers.length) return "no provider";
+	return providers
+		.map((p) => {
+			const bits = [
+				p.enabled === false ? "disabled" : String(p.status),
+				...(p.loggedIn === true
+					? ["logged in"]
+					: p.loggedIn === false
+						? ["NOT logged in"]
+						: []),
+				...(p.defaultMode ? [`mode ${p.defaultMode}`] : []),
+			];
+			return `${p.name} ${bits.join(", ")}${p.error ? ` (${p.error})` : ""}`;
+		})
+		.join(" · ");
 }
 
 /** Worker readiness (mm-210.59) in one cell: state and ready environments. */

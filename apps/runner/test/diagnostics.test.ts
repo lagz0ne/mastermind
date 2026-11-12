@@ -101,6 +101,56 @@ describe("runChecks and problems (Paseo SDK)", () => {
 		});
 		expect(ok.providers).toEqual({ claude: true });
 		expect(problems(ok, s)).toEqual([]);
+		// The login lands in the Paseo report too; without login it is null.
+		expect(ok.paseoProviders?.[0]?.loggedIn).toBe(true);
+		expect(box.paseoProviders?.[0]?.loggedIn).toBeNull();
+		expect(c.paseoProviders?.[0]?.loggedIn).toBe(false);
+	});
+
+	test("every provider Paseo lists is reported, in Paseo's order (mm-210.84)", async () => {
+		const fake = new FakePaseo();
+		fake.providers[0] = {
+			...fake.providers[0],
+			provider: "claude",
+			models: ["opus", "sonnet"],
+		};
+		fake.providers.push({
+			provider: "codex",
+			status: "unavailable",
+			enabled: false,
+			defaultModeId: "auto-review",
+			error: "codex not found on PATH",
+		});
+		const c = await runChecks(s, { connect: fake.connect, exists: () => true });
+		expect(c.paseoProviders).toEqual([
+			{
+				name: "claude",
+				status: "ready",
+				enabled: true,
+				loggedIn: null,
+				defaultMode: "auto",
+				modes: ["default", "auto", "bypassPermissions"],
+				models: ["opus", "sonnet"],
+			},
+			{
+				name: "codex",
+				status: "unavailable",
+				enabled: false,
+				loggedIn: null,
+				defaultMode: "auto-review",
+				modes: [],
+				models: [],
+				error: "codex not found on PATH",
+			},
+		]);
+		// Only the runner's own providers count for readiness.
+		expect(c.providers).toEqual({ claude: true });
+		fake.down.add(undefined);
+		const down = await runChecks(s, {
+			connect: fake.connect,
+			exists: () => true,
+		});
+		expect(down.paseoProviders).toBeUndefined();
 	});
 });
 

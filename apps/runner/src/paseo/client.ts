@@ -27,6 +27,8 @@ export type ProviderState = {
 	/** The mode an agent gets when none is set; null: Paseo does not say. */
 	defaultMode: string | null;
 	modes: string[];
+	/** Model ids Paseo lists for it; empty: not known (yet). */
+	models: string[];
 	/** Paseo's reason when not ready (e.g. "agy not found on PATH"). */
 	error?: string;
 };
@@ -133,6 +135,7 @@ export function paseoOver(c: DaemonClient, where: string): Paseo {
 				enabled: e.enabled,
 				defaultMode: e.defaultModeId ?? null,
 				modes: (e.modes ?? []).map((m) => m.id),
+				models: (e.models ?? []).map((m) => m.id),
 				...(e.error ? { error: e.error } : {}),
 			}));
 		},
