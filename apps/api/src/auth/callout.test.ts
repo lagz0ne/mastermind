@@ -23,7 +23,14 @@ test("a service account may answer the doctor requests and direct offers of its 
 		"mm.u.alice.r.*.doctor",
 		"mm.u.alice.r.*.offer",
 	]);
-	expect(g.permissions?.pub?.allow).toEqual(["mm.u.alice.>"]);
+	expect(g.permissions?.pub?.allow).toEqual([
+		"mm.u.alice.>",
+		// Its account's files bucket only (mm-210.60).
+		"$O.mm_files_alice.>",
+		"$JS.API.STREAM.INFO.OBJ_mm_files_alice",
+		"$JS.API.STREAM.MSG.GET.OBJ_mm_files_alice",
+		"$JS.API.STREAM.PURGE.OBJ_mm_files_alice",
+	]);
 });
 
 describe("user JWT expiry", () => {

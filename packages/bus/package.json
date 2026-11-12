@@ -12,7 +12,9 @@
 	},
 	"dependencies": {
 		"@mastermind/core": "workspace:*",
+		"@nats-io/jetstream": "^3.4.0",
 		"@nats-io/kv": "^3.4.0",
-		"@nats-io/nats-core": "^3.4.0"
+		"@nats-io/nats-core": "^3.4.0",
+		"@nats-io/obj": "^3.4.0"
 	}
 }
