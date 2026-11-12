@@ -1,5 +1,6 @@
 // /environments: named box recipes, list + editor.
-// Frame "Environments — box recipe (mm-210.50)" (VWYybImf2j).
+// Frames "Environments — box recipe (mm-210.50)" (VWYybImf2j) and
+// "Environments — dev container (mm-210.62)" (Sa8OBFnaZD).
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -20,6 +21,7 @@ import {
 	removeEnvironment,
 	saveEnvironments,
 	setEnvironment,
+	type TextKey,
 	toForm,
 } from "./environments.ts";
 
@@ -98,7 +100,7 @@ function Editor({
 	onDelete: () => void;
 }) {
 	const set =
-		(key: keyof EnvForm) =>
+		(key: TextKey) =>
 		(
 			e: React.ChangeEvent<
 				HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
@@ -111,7 +113,7 @@ function Editor({
 	const bad = (key: keyof EnvForm) =>
 		errors[key] || (key === "name" && nameError) ? "border-destructive" : "";
 	const text = (
-		key: keyof EnvForm,
+		key: TextKey,
 		label: string,
 		opts: { placeholder?: string; code?: boolean } = {},
 	) => (
@@ -123,7 +125,7 @@ function Editor({
 			onChange={set(key)}
 		/>
 	);
-	const lines = (key: keyof EnvForm, label: string, placeholder: string) => (
+	const lines = (key: TextKey, label: string, placeholder: string) => (
 		<textarea
 			aria-label={label}
 			rows={2}
@@ -133,7 +135,7 @@ function Editor({
 			onChange={set(key)}
 		/>
 	);
-	const unit = (key: keyof EnvForm, label: string, u: string) => (
+	const unit = (key: TextKey, label: string, u: string) => (
 		<div className="relative">
 			{text(key, label)}
 			<span className="pointer-events-none absolute top-1.5 right-2 text-[11px] text-muted-foreground">
@@ -160,11 +162,70 @@ function Editor({
 				{text("description", "Description")}
 			</Field>
 
+			<Group title="Dev container" id="env-grp-dc">
+				<Field
+					label="Use"
+					error={errors.dcUse}
+					hint="The runner builds the box from devcontainer.json with the official devcontainer CLI. Never: always the image below."
+				>
+					<select
+						aria-label="Use a dev container"
+						className={cn(input, bad("dcUse"))}
+						value={form.dcUse}
+						onChange={set("dcUse")}
+					>
+						<option value="auto">From the repo, when it has one</option>
+						<option value="none">Never</option>
+					</select>
+				</Field>
+				<Field
+					label="Config path"
+					error={errors.dcConfigPath}
+					hint="A path to a .json file in the repo, or a folder name under .devcontainer/ (for example python)."
+				>
+					{text("dcConfigPath", "Config path", {
+						placeholder:
+							".devcontainer/devcontainer.json, then .devcontainer.json",
+						code: true,
+					})}
+				</Field>
+				<Field
+					label="Own config"
+					error={errors.dcConfig}
+					hint="devcontainer.json text. It wins over the repo's file. Host fields (runArgs, mounts, privileged...) are removed; Docker Compose is refused."
+				>
+					<textarea
+						aria-label="Own devcontainer.json"
+						rows={3}
+						className={cn(area, mono, bad("dcConfig"))}
+						placeholder='{ "image": "mcr.microsoft.com/devcontainers/base:debian", "postCreateCommand": "npm ci" }'
+						value={form.dcConfig}
+						onChange={set("dcConfig")}
+					/>
+				</Field>
+				<Field
+					label="Host"
+					error={errors.dcAllowInit}
+					hint="The spec runs it on the host, not in the box. Off: it never runs."
+				>
+					<label className="flex h-7 items-center gap-2 text-xs">
+						<input
+							type="checkbox"
+							checked={form.dcAllowInit}
+							onChange={(e) =>
+								onChange({ ...form, dcAllowInit: e.target.checked })
+							}
+						/>
+						Allow initializeCommand on the runner machine
+					</label>
+				</Field>
+			</Group>
+
 			<Group title="Box" id="env-grp-box">
 				<Field
 					label="Image"
 					error={errors.image}
-					hint="Base image. Empty: the default box image."
+					hint="Used when there is no dev container. An image here keeps the old recipe (image, tools)."
 				>
 					{text("image", "Image", {
 						placeholder: "default box image",
@@ -174,14 +235,14 @@ function Editor({
 				<Field
 					label="Tools"
 					error={errors.tools}
-					hint="One line each. Baked once into a cached image."
+					hint="One line each. Baked once into a cached image. Not used with a dev container."
 				>
 					{lines("tools", "Tools", "RUN apt-get install -y jq")}
 				</Field>
 				<Field
 					label="Setup"
 					error={errors.setup}
-					hint="One command per line. Runs in each new box, after the checkout."
+					hint="One command per line. Runs in each new box, after the checkout and the dev container commands."
 				>
 					{lines("setup", "Setup", "bun install")}
 				</Field>
@@ -506,7 +567,13 @@ export function EnvironmentsPage() {
 									{e.name || "unnamed"}
 								</span>
 								<span className="block truncate font-mono text-[11px] text-muted-foreground">
-									{e.image || "default image"} · {e.repo || "no repo"} @ {e.ref}
+									{e.devcontainer?.config
+										? "own devcontainer.json"
+										: e.image ||
+											(e.devcontainer?.use === "none"
+												? "default image"
+												: "devcontainer.json or default image")}{" "}
+									· {e.repo || "no repo"} @ {e.ref}
 								</span>
 							</span>
 							<span className="whitespace-nowrap text-[11px] text-muted-foreground tabular-nums">

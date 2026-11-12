@@ -214,6 +214,25 @@ th { font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; color:
 	<tr><td>/people, debug</td><td>The state and each failed check with its fix. <b>Add runner</b> shows one line: install, then <code>onboard ... --start</code>.</td></tr>
 </table>
 
+<h2 id="seven"><span class="n">7</span> The box from devcontainer.json (mm-210.62, 2026-11-12)</h2>
+<p>Your rule: clone the project, make sure it can be cloned, then use its devcontainer. Prior art: GitHub Codespaces and Ona (clone, then read the repo&rsquo;s devcontainer.json); the Dev Containers spec; the official <code>@devcontainers/cli</code>. The review is in <code>docs/design/prior-art.html</code>, section 1.</p>
+<div class="life" style="grid-template-columns: repeat(5, minmax(0,1fr));">
+	<div class="st"><b>access check</b><span><code>git ls-remote</code> with the environment&rsquo;s credential only. Fails: reason on the ticket, no box.</span></div>
+	<div class="st"><b>find config</b><span>Own config, configPath, <code>.devcontainer/devcontainer.json</code>, <code>.devcontainer.json</code>, else default image.</span></div>
+	<div class="st"><b>clean</b><span>Host fields removed (initializeCommand, runArgs, mounts, privileged...). No Compose.</span></div>
+	<div class="st"><b>build</b><span><code>devcontainer build</code> (CLI 0.90.0 through the runner&rsquo;s Bun), then the Mastermind layer (Paseo, Claude). Cached by config hash.</span></div>
+	<div class="st box"><b>box</b><span>Our driver: limits, network. Clone, lifecycle commands from the image metadata, setup, check, agent.</span></div>
+</div>
+<table>
+	<tr><th>Decision</th><th>Why</th></tr>
+	<tr><td>Build with the CLI, run with our driver</td><td><code>devcontainer up</code> makes the container with host mounts and <code>runArgs</code>, and always runs <code>initializeCommand</code> on the host. <code>devcontainer build</code> does not run it (tested with 0.90.0), and our driver keeps the limits, the network and the cleanup.</td></tr>
+	<tr><td>Lifecycle from the <code>devcontainer.metadata</code> label</td><td>The CLI writes the merged config of the features and the file there (spec: image metadata). We run onCreate, updateContent, postCreate and postStart in the order of the spec, as the remoteUser.</td></tr>
+	<tr><td><code>initializeCommand</code> only when the environment allows it</td><td>The spec runs it on the host. Codespaces runs it on a throwaway VM. We run it on the user&rsquo;s machine, so the owner must list it in <code>devcontainer.allowHost</code>.</td></tr>
+	<tr><td>Secret names</td><td><code>customizations.mastermind.secrets</code> are required. The top-level <code>secrets</code> (Codespaces) are recommended: a missing one is listed, it does not block.</td></tr>
+	<tr><td>Image with its own <code>image</code> field</td><td>An environment with an image and no devcontainer settings keeps the old recipe. Set <code>devcontainer.use: none</code> to never use one.</td></tr>
+</table>
+<p>Not in v1: Docker Compose, feature entrypoints and privileged features (docker-in-docker), Alpine images, network phases (open for setup, allow list for the agent).</p>
+
 </main>
 </body>
 </html>

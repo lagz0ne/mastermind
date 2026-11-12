@@ -203,6 +203,71 @@ The proxy runs with `node` or `bun` from the task's image. For an image without 
 `MM_BOX_PROXY_IMAGE` (for example `node:24-alpine`). On Podman the internal network has no
 DNS (the proxy is reached by address): this works without a user D-Bus.
 
+## Box from devcontainer.json
+
+Before any box is made, the runner does these steps on its own machine:
+
+1. **Access check.** It runs `git ls-remote --exit-code <repo> <ref>` with the environment's git
+   credential only (`GIT_TOKEN`, `GITHUB_TOKEN`, `GH_TOKEN` or `GIT_SSH_KEY`). It does not use this
+   machine's git config, credential helpers, SSH agent or keys. When the check fails, the task
+   fails with the reason, and no box is made. The reasons are: no access (the repo is private or
+   does not exist, or the credential cannot read it), ref missing, or network.
+2. **Find the config.** It fetches the ref without file contents (`--depth 1 --filter=blob:none`)
+   and uses the first config that it finds:
+
+   | Order | Config |
+   |---|---|
+   | 1 | The environment's own `devcontainer.config` (devcontainer.json text). Relative paths are relative to `.devcontainer/` of the repo. |
+   | 2 | `devcontainer.configPath`: a path to a .json file, or a folder name under `.devcontainer/`. |
+   | 3 | `.devcontainer/devcontainer.json` |
+   | 4 | `.devcontainer.json` |
+   | 5 | None: the old recipe (`image` + `tools`) or the default box image. |
+
+   An environment with an `image` and no `devcontainer` settings keeps its recipe. To never
+   use a devcontainer, set `devcontainer.use` to `none`.
+3. **Clean.** These fields reach the host, so the runner removes them: `initializeCommand`,
+   `runArgs`, `mounts`, `workspaceMount`, `privileged`, `capAdd`, `securityOpt`, `appPort`, and
+   `build.options`. The ticket names each removed field. The runner refuses Docker Compose
+   (`dockerComposeFile`). The box driver sets the limits and the network, as for every box.
+   `initializeCommand` runs on this machine only when the environment lists it in
+   `devcontainer.allowHost`.
+4. **Build.** The official CLI (`@devcontainers/cli` 0.90.0) runs `devcontainer build` (image or
+   `build.dockerfile`, and features). The runner starts the CLI with its own Bun
+   (`BUN_BE_BUN=1 <runner> x --bun @devcontainers/cli@0.90.0`), so the machine needs no Node.
+   To use another CLI, set `MM_DEVCONTAINER_CLI` (for example `devcontainer`). The CLI uses the
+   docker CLI that `MM_BOX_DOCKER_PATH` names. The default is `podman` when the engine is
+   Podman, else `docker`. That CLI must reach the same engine (and images) as the box driver.
+   Then the runner adds the Mastermind layer: it copies node, Paseo and Claude Code from the
+   default box image into `/opt/mastermind`. Only `paseo` and `claude` go first on `PATH`, so the
+   image's own node stays the one that is used. The daemon runs as the dev container's user.
+   The image is `mastermind-dc:<key>`. The key is a hash of the cleaned config, the git trees of
+   the config folder and the build context, the CLI version and the default image. A second task
+   with the same key does not build again.
+5. **In the box**, after the checkout: the lifecycle commands from the image's
+   `devcontainer.metadata` label, in the order of the spec. First every `onCreateCommand`
+   (features first), then every `updateContentCommand`, `postCreateCommand` and
+   `postStartCommand`. They run as `remoteUser` (else `containerUser`) in `/workspace`. Then the
+   environment's `setup` and `check`, the files, and the agent. `containerEnv` is in the image.
+   `remoteEnv` values that have no `${...}` become box env.
+
+Secret names in the file:
+
+- `customizations.mastermind.secrets: ["NAME"]` are required. When one is missing on the runner,
+  the task fails before the build.
+- The top-level `secrets: {"NAME": {...}}` (the GitHub Codespaces format) are recommended. The box
+  gets the ones that are set. The ticket lists the ones that are not set.
+
+`customizations.mastermind.instructions` is added to the prompt.
+
+Not in v1:
+
+- Feature `entrypoint`, `privileged`, `capAdd`, `securityOpt` and `mounts` (for example
+  docker-in-docker). The ticket names each one as not applied.
+- Images without glibc (Alpine). The copied node needs glibc.
+- Docker Compose.
+
+The git token stays out of the CLI and the build.
+
 ## Routing: which Paseo runs a dispatch
 
 The user who runs the runner decides where work runs. Put `routing.json` next to the

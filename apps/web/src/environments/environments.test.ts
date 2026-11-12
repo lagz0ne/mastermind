@@ -94,3 +94,40 @@ test("server errors map to form fields of one environment", () => {
 	});
 	expect([...erroredIndexes(errors)].sort()).toEqual([0, 1]);
 });
+
+test("dev container settings round-trip; errors map to their fields (mm-210.62)", () => {
+	const dc: Environment = {
+		...box,
+		devcontainer: {
+			use: "none",
+			configPath: "python",
+			config: '{"image": "debian"}',
+			allowHost: ["initializeCommand"],
+		},
+	};
+	expect(fromForm(toForm(dc))).toEqual(dc);
+	const f = toForm(box);
+	expect(f).toMatchObject({
+		dcUse: "auto",
+		dcConfigPath: "",
+		dcConfig: "",
+		dcAllowInit: false,
+	});
+	expect(fromForm(f)).not.toContainKey("devcontainer");
+	expect(
+		errorsFor(
+			[
+				{ field: "environments.0.devcontainer.config", message: "bad json" },
+				{ field: "environments.0.devcontainer.configPath", message: "no .." },
+				{ field: "environments.0.devcontainer.use", message: "auto or none" },
+				{ field: "environments.0.devcontainer.allowHost.0", message: "one of" },
+			],
+			0,
+		),
+	).toEqual({
+		dcConfig: "bad json",
+		dcConfigPath: "no ..",
+		dcUse: "auto or none",
+		dcAllowInit: "one of",
+	});
+});

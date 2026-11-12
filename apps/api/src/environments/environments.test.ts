@@ -169,6 +169,84 @@ describe("validate", () => {
 	});
 });
 
+describe("devcontainer settings (mm-210.62)", () => {
+	const base = { name: "dc", repo: "https://github.com/acme/dc.git" };
+	test("own config (JSONC), configPath, use and allowHost are kept; resolveEnv passes them", () => {
+		const config = '// own\n{"image": "debian", "postCreateCommand": "make",}';
+		const v = validate(
+			{
+				environments: [
+					{
+						...base,
+						devcontainer: {
+							config,
+							configPath: "python",
+							allowHost: ["initializeCommand"],
+							use: "auto",
+						},
+					},
+					{ ...base, name: "off", devcontainer: { use: "none" } },
+					{ ...base, name: "empty", devcontainer: { config: "", use: "auto" } },
+				],
+			},
+			"",
+		);
+		expect(v.ok).toBe(true);
+		if (!v.ok) return;
+		const [dc, off, empty] = v.doc.environments;
+		expect(dc?.devcontainer).toEqual({
+			config,
+			configPath: "python",
+			allowHost: ["initializeCommand"],
+		});
+		expect(off?.devcontainer).toEqual({ use: "none" });
+		expect(empty?.devcontainer).toBeUndefined();
+		const r = resolveEnv({ labels: ["env:dc"] }, v.doc);
+		expect(r.ok && r.env.devcontainer).toEqual(dc?.devcontainer ?? {});
+	});
+	test("bad settings are errors by field", () => {
+		const v = validate(
+			{
+				environments: [
+					{
+						...base,
+						devcontainer: {
+							use: "always",
+							config: "{ not json",
+							configPath: "../etc",
+							allowHost: ["runArgs"],
+						},
+					},
+					{
+						...base,
+						name: "c1",
+						devcontainer: { config: '{"dockerComposeFile": "x.yml"}' },
+					},
+					{
+						...base,
+						name: "c2",
+						devcontainer: { config: '{"name": "no image"}' },
+					},
+					{ ...base, name: "c3", devcontainer: "yes" },
+				],
+			},
+			"",
+		);
+		expect(v.ok).toBe(false);
+		if (v.ok) return;
+		expect(v.errors.map((e) => e.field)).toEqual([
+			"environments.0.devcontainer.use",
+			"environments.0.devcontainer.config",
+			"environments.0.devcontainer.configPath",
+			"environments.0.devcontainer.allowHost.0",
+			"environments.1.devcontainer.config",
+			"environments.2.devcontainer.config",
+			"environments.3.devcontainer",
+		]);
+		expect(v.errors[4]?.message).toContain("Docker Compose is not supported");
+	});
+});
+
 describe("recipeHash", () => {
 	test("stable for image + tools; any change in them changes it; other fields do not", () => {
 		const h = recipeHash(BOX);

@@ -4,7 +4,9 @@
  *   boxCheck     before the start: only the secrets (values from this machine;
  *                missing: decline with the names). Requirements, checkout,
  *                setup and check happen in the box, not on this machine.
- *   BoxLauncher  the AgentLauncher that runs the agent in the box.
+ *   BoxLauncher  the AgentLauncher that runs the agent in the box; before the
+ *                box, on this machine: the git access check and the
+ *                devcontainer image (devcontainer.ts).
  */
 import { type Dispatch, workOutputOf } from "@mastermind/core";
 import type { CheckResult } from "../check.ts";
@@ -18,6 +20,7 @@ import {
 import type { Decision } from "../routing.ts";
 import { missingReason, resolveSecrets } from "../secrets/needs.ts";
 import { SecretStore, secretsPath } from "../secrets/store.ts";
+import { prepareBox } from "./devcontainer.ts";
 import { DockerDriver } from "./docker.ts";
 import type { BoxDriver } from "./driver.ts";
 import type { BoxFiles } from "./files.ts";
@@ -131,6 +134,8 @@ export async function startBoxMode(i: BoxModeInput) {
 	const defaultImage =
 		i.image || i.env.MASTERMIND_BOX_IMAGE || DEFAULT_BOX_IMAGE;
 	i.log(`box mode: ${driver.name} (${engine}), default image ${defaultImage}`);
+	const dockerPath = boxDockerPath(i.env, engine);
+	const loadStore = () => new SecretStore(secretsPath()).load();
 	return {
 		driver,
 		check: boxCheck({ env: i.env }),
@@ -142,6 +147,36 @@ export async function startBoxMode(i: BoxModeInput) {
 			log: i.log,
 			...(i.onStep ? { onStep: i.onStep } : {}),
 			...(i.files ? { files: i.files } : {}),
+			prepare: (task, step, signal) =>
+				prepareBox(
+					task,
+					{
+						defaultImage,
+						dockerPath,
+						env: i.env,
+						lookupSecrets: async (names) =>
+							resolveSecrets(names, {
+								store: await loadStore().catch(() => ({})),
+								env: i.env,
+							}),
+					},
+					step,
+					signal,
+				),
 		}),
 	};
+}
+
+/**
+ * The docker CLI the devcontainer CLI uses: MM_BOX_DOCKER_PATH, else
+ * `podman` when the engine is Podman, else `docker`. It must reach the same
+ * engine (images) as the box driver.
+ */
+export function boxDockerPath(
+	env: Record<string, string | undefined>,
+	engine: string,
+): string {
+	const own = env.MM_BOX_DOCKER_PATH?.trim();
+	if (own) return own;
+	return /podman/i.test(engine) ? "podman" : "docker";
 }

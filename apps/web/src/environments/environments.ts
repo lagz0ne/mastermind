@@ -42,7 +42,21 @@ export type EnvForm = {
 	outputKind: EnvironmentOutput["kind"];
 	outputBase: string;
 	instructions: string;
+	// dev container (mm-210.62)
+	/** `auto`: the repo's devcontainer.json when it has one; `none`: never. */
+	dcUse: "auto" | "none";
+	/** A path in the repo or a folder name under .devcontainer/. */
+	dcConfigPath: string;
+	/** The environment's own devcontainer.json text. */
+	dcConfig: string;
+	/** Allow initializeCommand on the runner machine. */
+	dcAllowInit: boolean;
 };
+
+/** The form fields that hold text. */
+export type TextKey = {
+	[K in keyof EnvForm]: EnvForm[K] extends string ? K : never;
+}[keyof EnvForm];
 
 const words = (text: string) => [
 	...new Set(text.split(/[\s,]+/).filter(Boolean)),
@@ -75,6 +89,11 @@ export function toForm(e: Environment): EnvForm {
 		outputKind: e.output.kind,
 		outputBase: e.output.base ?? "",
 		instructions: e.instructions ?? "",
+		dcUse: e.devcontainer?.use === "none" ? "none" : "auto",
+		dcConfigPath: e.devcontainer?.configPath ?? "",
+		dcConfig: e.devcontainer?.config ?? "",
+		dcAllowInit:
+			e.devcontainer?.allowHost?.includes("initializeCommand") ?? false,
 	};
 }
 
@@ -115,6 +134,12 @@ export function fromForm(f: EnvForm): Environment {
 		e.provider = auth ? { name: provider, auth } : { name: provider };
 	if (f.mode.trim()) e.agent = { mode: f.mode.trim() };
 	if (f.instructions.trim()) e.instructions = f.instructions.trim();
+	const dc: NonNullable<Environment["devcontainer"]> = {};
+	if (f.dcUse === "none") dc.use = "none";
+	if (f.dcConfigPath.trim()) dc.configPath = f.dcConfigPath.trim();
+	if (f.dcConfig.trim()) dc.config = f.dcConfig.trim();
+	if (f.dcAllowInit) dc.allowHost = ["initializeCommand"];
+	if (Object.keys(dc).length) e.devcontainer = dc;
 	return e;
 }
 
@@ -222,6 +247,17 @@ function formKey(
 			return { key: sub === "provider" ? "provider" : "mode" };
 		case "output":
 			return { key: sub === "base" ? "outputBase" : "outputKind" };
+		case "devcontainer":
+			return {
+				key:
+					sub === "use"
+						? "dcUse"
+						: sub === "configPath"
+							? "dcConfigPath"
+							: sub === "allowHost"
+								? "dcAllowInit"
+								: "dcConfig",
+			};
 		default:
 			return { key: head as keyof EnvForm, item: sub };
 	}

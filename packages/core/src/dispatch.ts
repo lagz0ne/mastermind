@@ -19,6 +19,7 @@
  * `<account>` in turn); the runner accepts or declines with a reason.
  */
 import type {
+	DevcontainerSettings,
 	EnvironmentAgent,
 	EnvironmentLimits,
 	EnvironmentNetwork,
@@ -139,6 +140,8 @@ export type DispatchEnv = {
 	/** Provider and the name of its login secret (also listed in `secrets`). */
 	providerLogin?: EnvironmentProvider;
 	output?: EnvironmentOutput;
+	/** The box from a devcontainer.json; absent: see {@link DevcontainerSettings}. */
+	devcontainer?: DevcontainerSettings;
 };
 
 /** One unit of dispatched work: this bead, this stage, to this actor. */

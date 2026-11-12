@@ -7,11 +7,13 @@
  * Pure: validation and resolution. No I/O.
  */
 import {
+	ALLOW_HOST_FIELDS,
 	type Bead,
 	type BoxRecipe,
 	DEFAULT_LIMITS,
 	DEFAULT_NETWORK,
 	DEFAULT_OUTPUT,
+	type DevcontainerSettings,
 	type DispatchEnv,
 	type Environment,
 	type EnvironmentAgent,
@@ -267,11 +269,93 @@ export function validate(
 		}
 		const instructions = str("instructions", false);
 		if (instructions) env.instructions = instructions;
+		if (e.devcontainer !== undefined && e.devcontainer !== null) {
+			const dc = devcontainerOf(e.devcontainer, `${at}.devcontainer`, err);
+			if (dc) env.devcontainer = dc;
+		}
 		environments.push(env);
 	}
 	return errors.length
 		? { ok: false, errors }
 		: { ok: true, doc: { environments } };
+}
+
+/** Most bytes of an environment's own devcontainer.json. */
+export const MAX_DEVCONTAINER_CONFIG = 64 * 1024;
+
+/**
+ * The devcontainer settings of an environment. The own config must be a
+ * devcontainer.json object (JSON with comments) with image or build, and no
+ * Docker Compose. The runner checks it again and builds it.
+ */
+export function devcontainerOf(
+	v: unknown,
+	at: string,
+	err: (field: string, message: string) => void,
+): DevcontainerSettings | null {
+	if (!isObject(v)) {
+		err(at, "must be an object");
+		return null;
+	}
+	const dc: DevcontainerSettings = {};
+	if (v.use !== undefined && v.use !== null && v.use !== "auto") {
+		if (v.use !== "none") err(`${at}.use`, "auto or none");
+		else dc.use = "none";
+	}
+	if (typeof v.config === "string" && v.config.trim()) {
+		const text = v.config.trim();
+		let cfg: unknown;
+		try {
+			cfg = Bun.JSONC.parse(text);
+		} catch (error) {
+			err(
+				`${at}.config`,
+				`not valid JSON: ${error instanceof Error ? error.message : error}`,
+			);
+		}
+		if (text.length > MAX_DEVCONTAINER_CONFIG)
+			err(`${at}.config`, `at most ${MAX_DEVCONTAINER_CONFIG / 1024} KiB`);
+		else if (cfg !== undefined) {
+			if (!isObject(cfg)) err(`${at}.config`, "a devcontainer.json object");
+			else if ("dockerComposeFile" in cfg)
+				err(
+					`${at}.config`,
+					"Docker Compose is not supported in a box; use image or build.dockerfile",
+				);
+			else if (!("image" in cfg) && !("build" in cfg))
+				err(`${at}.config`, "needs image or build.dockerfile");
+			else dc.config = text;
+		}
+	} else if (v.config !== undefined && v.config !== null && v.config !== "")
+		err(`${at}.config`, "must be text");
+	if (typeof v.configPath === "string" && v.configPath.trim()) {
+		const p = v.configPath.trim();
+		if (!NO_SPACE.test(p) || p.startsWith("/") || p.split("/").includes(".."))
+			err(
+				`${at}.configPath`,
+				"a path in the repo (no spaces, no '..'), or a folder name under .devcontainer/",
+			);
+		else dc.configPath = p;
+	} else if (
+		v.configPath !== undefined &&
+		v.configPath !== null &&
+		v.configPath !== ""
+	)
+		err(`${at}.configPath`, "must be text");
+	if (v.allowHost !== undefined && v.allowHost !== null) {
+		const allowed: readonly string[] = ALLOW_HOST_FIELDS;
+		if (!Array.isArray(v.allowHost)) err(`${at}.allowHost`, "must be a list");
+		else {
+			const out: string[] = [];
+			for (const [j, f] of v.allowHost.entries()) {
+				if (typeof f !== "string" || !allowed.includes(f))
+					err(`${at}.allowHost.${j}`, `one of: ${allowed.join(", ")}`);
+				else out.push(f);
+			}
+			if (out.length) dc.allowHost = [...new Set(out)];
+		}
+	}
+	return Object.keys(dc).length ? dc : null;
 }
 
 /** Read a stored value leniently: a broken document defines nothing. */
@@ -366,5 +450,6 @@ export function resolveEnv(
 	};
 	if (agent.provider || agent.mode) env.agent = agent;
 	if (def.instructions) env.instructions = def.instructions;
+	if (def.devcontainer) env.devcontainer = def.devcontainer;
 	return { ok: true, env };
 }

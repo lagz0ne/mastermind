@@ -1,9 +1,12 @@
 /**
  * One task in one throwaway box (docs/design/box.html):
  *
- *   ensure image (cached by recipe hash) -> create box (limits, network, labels)
+ *   prepare (devcontainer.ts, on this machine: git access check; the repo's or
+ *   the environment's devcontainer.json built by the devcontainer CLI)
+ *   -> ensure image (cached by recipe hash) -> create box (limits, network, labels)
  *   -> clone repo at ref into /workspace -> secrets as env and files
- *   -> setup, then check (fail: the reason and the output tail)
+ *   -> devcontainer lifecycle commands (onCreate, updateContent, postCreate,
+ *   postStart) -> setup, then check (fail: the reason and the output tail)
  *   -> the item's input files into INPUTS_DIR (files.ts, mm-210.60)
  *   -> wait for the Paseo daemon in the box -> `paseo run` inside, mode bypass
  *   -> take out a patch of the work -> outputs to Mastermind (the patch, files
@@ -30,6 +33,7 @@ import {
 	RESULT_SCHEMA,
 	runFailure,
 } from "../launcher.ts";
+import type { PreparedBox } from "./devcontainer.ts";
 import {
 	BOX_LABEL,
 	type Box,
@@ -94,6 +98,15 @@ export type BoxRunOptions = {
 	githubApi?: string;
 	/** The item's files (inputs in, outputs out); null or absent: none. */
 	files?: () => BoxFiles | null;
+	/**
+	 * Before any box (devcontainer.ts prepareBox): the access check and the
+	 * devcontainer image. Throws the reason; null: the recipe or default image.
+	 */
+	prepare?: (
+		task: BoxTask,
+		step: (line: string) => void,
+		signal: AbortSignal,
+	) => Promise<PreparedBox | null>;
 };
 
 export type BoxRunResult = AgentResult & {
@@ -194,17 +207,31 @@ export async function runInBox(
 	try {
 		if (all.aborted) throw stopped();
 		const t0 = Date.now();
-		const image = await driver.ensureImage({
-			image: env.image || opts.defaultImage,
-			tools: env.tools ?? [],
-			...(env.recipeHash ? { hash: env.recipeHash } : {}),
-		});
+		let prep: PreparedBox | null = null;
+		if (opts.prepare)
+			try {
+				prep = await opts.prepare(task, step, all);
+			} catch (error) {
+				if (all.aborted) throw stopped();
+				throw new BoxStepError(
+					error instanceof Error ? error.message : String(error),
+				);
+			}
+		if (all.aborted) throw stopped();
+		const secrets = { ...task.secrets, ...prep?.secrets };
+		const image = prep
+			? prep.image
+			: await driver.ensureImage({
+					image: env.image || opts.defaultImage,
+					tools: env.tools ?? [],
+					...(env.recipeHash ? { hash: env.recipeHash } : {}),
+				});
 		if (all.aborted) throw stopped();
 
 		// Secrets: env vars of the box (the agent host and its agents inherit them)
 		// and files in SECRETS_DIR. Values never go into argv or logs.
 		const secretEnv: Record<string, string> = {};
-		for (const [k, v] of Object.entries(task.secrets))
+		for (const [k, v] of Object.entries(secrets))
 			if (ENV_NAME.test(k)) secretEnv[k] = v;
 		box = await driver.create({
 			image,
@@ -219,12 +246,12 @@ export async function runInBox(
 				...(env.limits?.memoryMb ? { memoryMb: env.limits.memoryMb } : {}),
 			},
 			network: env.network ?? "open",
-			env: { ...BOX_ENV, ...opts.boxEnv, ...secretEnv },
+			env: { ...BOX_ENV, ...prep?.env, ...opts.boxEnv, ...secretEnv },
 			...(opts.cmd ? { cmd: opts.cmd } : {}),
 		});
 		if (all.aborted) throw stopped();
 		const b = box;
-		let user = opts.user;
+		let user = prep?.user ?? opts.user;
 		type Where = { root?: boolean; workdir?: string };
 		const run = async (cmd: string[], o: Where = {}) => {
 			const as = o.root ? "root" : user;
@@ -265,7 +292,7 @@ export async function runInBox(
 			],
 			{ root: true },
 		);
-		const files = Object.entries(task.secrets).map(([name, data]) => ({
+		const files = Object.entries(secrets).map(([name, data]) => ({
 			name,
 			data,
 			mode: 0o444,
@@ -282,7 +309,7 @@ export async function runInBox(
 				[
 					"git init -q .",
 					// The credential (token file or deploy key) for clone and push.
-					gitCredentialScript(task.secrets, SECRETS_DIR),
+					gitCredentialScript(secrets, SECRETS_DIR),
 					'git remote add origin "$1"',
 					'git fetch -q --depth 1 origin "$2"',
 					"git checkout -q FETCH_HEAD",
@@ -298,6 +325,9 @@ export async function runInBox(
 			).stdout.trim();
 			step(`checked out ${env.repo} at ${env.ref} (${base.slice(0, 12)})`);
 		}
+		for (const l of prep?.lifecycle ?? []) await must(l.what, l.cmd);
+		if (prep?.lifecycle.length)
+			step(`devcontainer lifecycle: ${prep.lifecycle.length} commands passed`);
 		for (const cmd of env.setup ?? [])
 			await must(`setup \`${cmd}\``, ["sh", "-c", cmd]);
 		for (const cmd of env.check ?? [])
@@ -307,7 +337,9 @@ export async function runInBox(
 
 		// The item's files: inputs into INPUTS_DIR; the agent leaves outputs in OUTPUTS_DIR.
 		const io = opts.files?.() ?? null;
-		let prompt = task.prompt;
+		let prompt = prep?.instructions
+			? `${task.prompt}\n\n${prep.instructions}`
+			: task.prompt;
 		if (io) {
 			if (base)
 				await must("git exclude", [
@@ -403,7 +435,7 @@ export async function runInBox(
 					repo: env.repo,
 					ref: env.ref,
 					baseSha: base,
-					secrets: task.secrets,
+					secrets,
 					...(opts.fetch ? { fetch: opts.fetch } : {}),
 					...(opts.githubApi ? { githubApi: opts.githubApi } : {}),
 				});

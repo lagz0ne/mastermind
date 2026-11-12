@@ -37,6 +37,35 @@ export const OUTPUT_KINDS = ["pr", "branch", "none"] as const;
 /** Which agent an environment prefers (before box recipes; `mode` still applies). */
 export type EnvironmentAgent = { provider?: string; mode?: string };
 
+/**
+ * Where the box comes from (bead mm-210.62): a devcontainer.json, built with
+ * the official devcontainer CLI on the runner. Absent: the repo's own
+ * devcontainer.json when the environment has no image, else the recipe.
+ */
+export type DevcontainerSettings = {
+	/** `auto` (default): the lookup below; `none`: never a devcontainer. */
+	use?: "auto" | "none";
+	/**
+	 * The environment's own devcontainer.json text (JSONC). Wins over the repo's
+	 * file; relative paths are relative to .devcontainer/ of the repo.
+	 */
+	config?: string;
+	/**
+	 * A config in the repo: a path to a .json file, or the name of a folder
+	 * under .devcontainer/. Default: .devcontainer/devcontainer.json, then
+	 * .devcontainer.json.
+	 */
+	configPath?: string;
+	/**
+	 * Host fields the owner allows. Only `initializeCommand` (spec: runs on the
+	 * host): the runner then runs it on its machine before the build.
+	 */
+	allowHost?: string[];
+};
+
+/** Host fields an environment may allow (see {@link DevcontainerSettings}). */
+export const ALLOW_HOST_FIELDS = ["initializeCommand"] as const;
+
 export type Environment = {
 	/** A single NATS subject token: letters, digits, '_' and '-'. */
 	name: string;
@@ -64,6 +93,8 @@ export type Environment = {
 	provider?: EnvironmentProvider;
 	/** Older preference; `mode` is still passed to the runner. */
 	agent?: EnvironmentAgent;
+	/** The box from a devcontainer.json (repo or own); see {@link DevcontainerSettings}. */
+	devcontainer?: DevcontainerSettings;
 	// --- what comes out
 	output: EnvironmentOutput;
 	/** Text added to every prompt for this environment. */
