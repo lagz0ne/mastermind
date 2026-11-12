@@ -24,7 +24,7 @@ import { api } from "../work/api.ts";
 import { useBeadDetail } from "../work/detail.ts";
 import { ago, leaseView, useNow } from "../work/lease.ts";
 import { TimelineRows } from "../work/timeline-view.tsx";
-import { PriorityBadge } from "./bead-card.tsx";
+import { PriorityBadge, PrLink } from "./bead-card.tsx";
 import { COLUMN_LABELS } from "./group.ts";
 import { useLiveBoard } from "./live.ts";
 
@@ -249,6 +249,27 @@ export function BeadSheet() {
 					{bead?.status === "closed" && bead.closeReason && (
 						<Section title="Result">
 							<p className="whitespace-pre-wrap text-sm">{bead.closeReason}</p>
+						</Section>
+					)}
+					{bead?.output && (
+						<Section title="Output">
+							<p
+								data-output
+								className="flex flex-wrap items-center gap-x-2 text-sm"
+							>
+								<PrLink output={bead.output} className="text-sm" />
+								{bead.output.branch && (
+									<span className="font-mono text-xs">
+										{bead.output.branch}
+									</span>
+								)}
+								<span className="text-muted-foreground text-xs">
+									{bead.output.commits} commit
+									{bead.output.commits === 1 ? "" : "s"},{" "}
+									{bead.output.filesChanged} file
+									{bead.output.filesChanged === 1 ? "" : "s"} changed
+								</span>
+							</p>
 						</Section>
 					)}
 					{(detail?.bead.description ?? bead?.description) && (

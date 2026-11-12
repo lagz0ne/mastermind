@@ -93,49 +93,94 @@ export function FailedStartMark({ bead }: { bead: Pick<Bead, "labels"> }) {
 	);
 }
 
+/** `PR #7` for a GitHub-style pull request URL; else `PR`. */
+export function prLabel(prUrl: string): string {
+	const n = /\/pull\/(\d+)/.exec(prUrl)?.[1];
+	return n ? `PR #${n}` : "PR";
+}
+
+/** The pull request the work opened (box output); opens in a new tab. */
+export function PrLink({
+	output,
+	className,
+}: Pick<Bead, "output"> & { className?: string }) {
+	if (!output?.prUrl) return null;
+	return (
+		<a
+			href={output.prUrl}
+			target="_blank"
+			rel="noreferrer"
+			data-pr-link
+			title={`Pull request: ${output.prUrl}`}
+			className={cn(
+				"font-mono text-[11px] text-foreground underline underline-offset-2 hover:text-live",
+				className,
+			)}
+		>
+			{prLabel(output.prUrl)}
+		</a>
+	);
+}
+
 export function BeadCard({ bead }: { bead: Bead }) {
 	const queue = queueOf(bead);
 	const env = envNameOf(bead) || bead.labels.includes(ENV_TRIAGE_LABEL);
 	const failed = bead.labels.includes(FAILED_START_LABEL);
+	const pr = bead.output?.prUrl;
+	// The PR link sits over the card, not in it: a link in a link is not valid
+	// HTML. A hidden copy in the footer keeps its place.
 	return (
-		<Link
-			to="/board/$beadId"
-			params={{ beadId: bead.id }}
-			className="block rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring"
-		>
-			<Card className="transition-colors hover:border-foreground/40">
-				<CardHeader className="text-[11px] text-muted-foreground">
-					<span className="font-mono">{bead.id}</span>
-					<PriorityBadge priority={bead.priority} />
-					{queue ? (
-						<span className="ml-auto">{queue}</span>
-					) : (
-						<span
-							data-unrouted
-							title={`Unrouted: ${UNROUTED_REASON}. Nobody takes this bead until it has a queue.`}
-							className="ml-auto rounded-[var(--radius)] border border-dashed px-1"
+		<div className="relative">
+			<Link
+				to="/board/$beadId"
+				params={{ beadId: bead.id }}
+				className="block rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring"
+			>
+				<Card className="transition-colors hover:border-foreground/40">
+					<CardHeader className="text-[11px] text-muted-foreground">
+						<span className="font-mono">{bead.id}</span>
+						<PriorityBadge priority={bead.priority} />
+						{queue ? (
+							<span className="ml-auto">{queue}</span>
+						) : (
+							<span
+								data-unrouted
+								title={`Unrouted: ${UNROUTED_REASON}. Nobody takes this bead until it has a queue.`}
+								className="ml-auto rounded-[var(--radius)] border border-dashed px-1"
+							>
+								unrouted
+							</span>
+						)}
+					</CardHeader>
+					<CardTitle>{bead.title}</CardTitle>
+					{!queue && (
+						<p
+							data-unrouted-reason
+							className="text-[11px] text-muted-foreground"
 						>
-							unrouted
-						</span>
+							{UNROUTED_REASON}
+						</p>
 					)}
-				</CardHeader>
-				<CardTitle>{bead.title}</CardTitle>
-				{!queue && (
-					<p data-unrouted-reason className="text-[11px] text-muted-foreground">
-						{UNROUTED_REASON}
-					</p>
-				)}
-				{(bead.assignee || bead.lease || env || failed) && (
-					<CardFooter className="text-[11px] text-muted-foreground">
-						<EnvMark bead={bead} />
-						<FailedStartMark bead={bead} />
-						{bead.assignee && <span className="truncate">{bead.assignee}</span>}
-						<span className="ml-auto">
-							<LeaseMark lease={bead.lease} />
-						</span>
-					</CardFooter>
-				)}
-			</Card>
-		</Link>
+					{(bead.assignee || bead.lease || env || failed || pr) && (
+						<CardFooter className="text-[11px] text-muted-foreground">
+							<EnvMark bead={bead} />
+							<FailedStartMark bead={bead} />
+							{bead.assignee && (
+								<span className="truncate">{bead.assignee}</span>
+							)}
+							<span className="ml-auto flex items-center gap-1.5">
+								<LeaseMark lease={bead.lease} />
+								{pr && (
+									<span aria-hidden className="invisible font-mono">
+										{prLabel(pr)}
+									</span>
+								)}
+							</span>
+						</CardFooter>
+					)}
+				</Card>
+			</Link>
+			<PrLink output={bead.output} className="absolute right-2 bottom-2" />
+		</div>
 	);
 }

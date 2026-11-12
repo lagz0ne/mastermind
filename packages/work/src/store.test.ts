@@ -195,11 +195,15 @@ describe.skipIf(!natsAvailable())("NatsWork on nats-server", () => {
 		const w = await store();
 		const a = await w.create("ann", { title: "a" });
 		await w.claim(a.id, "ann/x");
-		await w.close(a.id, "ann/x", "r");
+		const output = { branch: "mm/x", commits: 1, filesChanged: 2 };
+		const closed = await w.close(a.id, "ann/x", "r", output);
+		expect(closed.output).toEqual(output);
+		expect((await w.get(a.id)).output).toEqual(output);
 		const re = await w.reopen(a.id, "ann");
 		expect(re.status).toBe("open");
 		expect(re.assignee).toBeUndefined();
 		expect(re.closeReason).toBeUndefined();
+		expect(re.output).toBeUndefined();
 		expect(w.get("mm-none")).rejects.toBeInstanceOf(NotFound);
 		expect(w.get("a.b")).rejects.toBeInstanceOf(NotFound);
 		expect(w.comment("mm-none", "ann", "x")).rejects.toBeInstanceOf(NotFound);

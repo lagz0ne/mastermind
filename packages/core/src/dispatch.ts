@@ -25,7 +25,7 @@ import type {
 	EnvironmentOutput,
 	EnvironmentProvider,
 } from "./environment.ts";
-import type { Bead, Lease } from "./work.ts";
+import type { Bead, Lease, WorkOutput } from "./work.ts";
 
 /**
  * One bead passes through up to three stages. Enrichment stages run an agent
@@ -213,8 +213,15 @@ export type HeartbeatReply = { lease: Lease };
 /** A progress line from the agent, shown on the board. */
 export type ReportRequest = { actor: string; message: string };
 
-/** The stage is done. */
-export type CompleteRequest = { actor: string; summary: string };
+/**
+ * The stage is done. `output`: what the work left on the git host (box output);
+ * Mastermind keeps it on the item, the board links the pull request.
+ */
+export type CompleteRequest = {
+	actor: string;
+	summary: string;
+	output?: WorkOutput;
+};
 
 /**
  * Give the bead back without finishing it. `startFailed`: the agent did not

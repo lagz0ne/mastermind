@@ -110,10 +110,12 @@ export function fakeWork(now: () => Date = () => new Date()): FakeWork {
 			delete b.lease;
 			return copy(b);
 		},
-		async close(id, _actor, _reason) {
+		async close(id, _actor, reason, output) {
 			const b = find(id);
 			b.status = "closed";
 			b.closedAt = now().toISOString();
+			if (reason) b.closeReason = reason;
+			if (output) b.output = output;
 			return copy(b);
 		},
 		async comment(id, actor, text) {

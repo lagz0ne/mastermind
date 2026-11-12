@@ -23,6 +23,7 @@ import type {
 	ReleaseRequest,
 	ReportRequest,
 	RunnerInfo,
+	WorkOutput,
 } from "@mastermind/core";
 import { errors, type NatsConnection } from "@nats-io/nats-core";
 
@@ -32,7 +33,13 @@ export interface MastermindClient {
 	next(queue: string): Promise<Dispatch | null>;
 	heartbeat(beadId: string, actor: string): Promise<Lease>;
 	report(beadId: string, actor: string, message: string): Promise<void>;
-	complete(beadId: string, actor: string, summary: string): Promise<void>;
+	/** `output`: the box output (branch, pull request) for the item. */
+	complete(
+		beadId: string,
+		actor: string,
+		summary: string,
+		output?: WorkOutput,
+	): Promise<void>;
 	/** `startFailed`: the agent did not start (Mastermind backs off, then holds the bead). */
 	release(
 		beadId: string,
@@ -87,10 +94,11 @@ export function natsClient(
 		async report(beadId, actor, message) {
 			await verb<ReportRequest, Ack>(beadId, "report", { actor, message });
 		},
-		async complete(beadId, actor, summary) {
+		async complete(beadId, actor, summary, output) {
 			await verb<CompleteRequest, Ack>(beadId, "complete", {
 				actor,
 				summary,
+				...(output ? { output } : {}),
 			});
 		},
 		async release(beadId, actor, reason, o) {

@@ -1,6 +1,6 @@
 // The work store as the dispatcher sees it: the NATS store (@mastermind/work)
 // in production, a fake in tests.
-import type { Bead, BeadComment } from "@mastermind/core";
+import type { Bead, BeadComment, WorkOutput } from "@mastermind/core";
 import type { ClaimResult } from "@mastermind/work";
 
 export type Work = {
@@ -12,7 +12,13 @@ export type Work = {
 	/** Pushes the lease forward and returns the bead with it. Only the holder may. */
 	heartbeat(id: string, actor: string): Promise<Bead>;
 	release(id: string, actor: string): Promise<Bead>;
-	close(id: string, actor: string, reason: string): Promise<Bead>;
+	/** `output`: what the work left on the git host; kept on the bead. */
+	close(
+		id: string,
+		actor: string,
+		reason: string,
+		output?: WorkOutput,
+	): Promise<Bead>;
 	comment(id: string, actor: string, text: string): Promise<unknown>;
 	/** Replaces the whole label set. */
 	setLabels(id: string, actor: string, labels: string[]): Promise<Bead>;

@@ -16,7 +16,12 @@
  * until {@link Runner.takeOffer} starts the dispatch or {@link Runner.dropOffer}
  * gives the slot back.
  */
-import type { DirectOffer, Dispatch, RunnerInFlight } from "@mastermind/core";
+import type {
+	DirectOffer,
+	Dispatch,
+	RunnerInFlight,
+	WorkOutput,
+} from "@mastermind/core";
 import { NO_BOX_REPORT } from "./box/run.ts";
 import { type CheckResult, checkDispatch, type SetupMemory } from "./check.ts";
 import {
@@ -27,7 +32,7 @@ import {
 	type MastermindClient,
 } from "./client.ts";
 import type { RunnerSettings } from "./config.ts";
-import type { AgentLauncher } from "./launcher.ts";
+import type { AgentLauncher, AgentResult } from "./launcher.ts";
 import {
 	type Decision,
 	decisionLine,
@@ -461,7 +466,7 @@ export class Runner {
 			}
 			if (this.#o.noBox) await this.#safe(d, "report", NO_BOX_REPORT);
 			await this.#safe(d, "report", decisionLine(decision, settings.id));
-			let result: { status: "done" | "failed"; summary: string };
+			let result: AgentResult;
 			let startFailed = false;
 			try {
 				result = await launcher.run(
@@ -498,7 +503,13 @@ export class Runner {
 			}
 			this.#log(`${id}: agent ${result.status}`);
 			if (result.status === "done")
-				await this.#safe(d, "complete", result.summary || "done");
+				await this.#safe(
+					d,
+					"complete",
+					result.summary || "done",
+					false,
+					result.output,
+				);
 			else
 				await this.#safe(
 					d,
@@ -565,6 +576,7 @@ export class Runner {
 		verb: "report" | "complete" | "release",
 		text: string,
 		startFailed = false,
+		output?: WorkOutput,
 	): Promise<void> {
 		for (let attempt = 1; attempt <= 3; attempt++) {
 			try {
@@ -572,7 +584,9 @@ export class Runner {
 					await this.#o.client.release(d.bead.id, d.actor, text, {
 						startFailed,
 					});
-				else await this.#o.client[verb](d.bead.id, d.actor, text);
+				else if (verb === "complete")
+					await this.#o.client.complete(d.bead.id, d.actor, text, output);
+				else await this.#o.client.report(d.bead.id, d.actor, text);
 				return;
 			} catch (error) {
 				if (isLostClaim(error) || attempt === 3) {

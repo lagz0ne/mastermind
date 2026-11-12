@@ -120,6 +120,20 @@ describe("Runner", () => {
 		expect(spec?.executionId).toStartWith("mm-1-");
 	});
 
+	test("done with box output: complete carries the branch and the PR", async () => {
+		const mm = new FakeMastermind();
+		const output = {
+			branch: "mm/mm-1",
+			prUrl: "https://github.com/o/r/pull/3",
+			commits: 1,
+			filesChanged: 2,
+		};
+		mm.push(dispatch("mm-1"));
+		make(mm, new FakeLauncher({ status: "done", summary: "ok", output }));
+		await until(() => mm.verbs("complete").length === 1);
+		expect(mm.verbs("complete")[0]?.output).toEqual(output);
+	});
+
 	test("the launcher gets the dispatch's environment as the box recipe", async () => {
 		const mm = new FakeMastermind();
 		const agents = new FakeLauncher({ status: "done", summary: "ok" });

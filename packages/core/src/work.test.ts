@@ -6,6 +6,7 @@ import {
 	leaseState,
 	queueLabel,
 	queueOf,
+	workOutputOf,
 } from "./work.ts";
 
 test("columnOf maps every bd status to a column or parks it", () => {
@@ -47,4 +48,29 @@ test("leaseState compares the expiry with now", () => {
 	expect(leaseState(lease("2026-11-10T06:05:00Z"), now)).toBe("live");
 	expect(leaseState(lease("2026-11-10T06:00:00Z"), now)).toBe("expired");
 	expect(leaseState(lease("2026-11-10T05:55:00Z"), now)).toBe("expired");
+});
+
+test("workOutputOf keeps counts, branch and an http(s) prUrl; rejects the rest", () => {
+	expect(
+		workOutputOf({
+			kind: "pr",
+			branch: "mm/x",
+			prUrl: "https://github.com/o/r/pull/1",
+			commits: 1,
+			filesChanged: 4,
+			line: "PR",
+		}),
+	).toEqual({
+		branch: "mm/x",
+		prUrl: "https://github.com/o/r/pull/1",
+		commits: 1,
+		filesChanged: 4,
+	});
+	expect(
+		workOutputOf({ prUrl: "javascript:alert(1)", commits: 0, filesChanged: 0 }),
+	).toEqual({ commits: 0, filesChanged: 0 });
+	expect(workOutputOf({ commits: -1, filesChanged: 0 })).toBeNull();
+	expect(workOutputOf({ commits: 1 })).toBeNull();
+	expect(workOutputOf("x")).toBeNull();
+	expect(workOutputOf(undefined)).toBeNull();
 });

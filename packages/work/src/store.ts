@@ -26,6 +26,7 @@ import {
 	type Probe,
 	queueLabel,
 	queueOf,
+	type WorkOutput,
 } from "@mastermind/core";
 import {
 	type ConsumerMessages,
@@ -720,13 +721,20 @@ export class NatsWork {
 		return bead;
 	}
 
-	async close(id: string, actor: string, reason?: string): Promise<Bead> {
+	/** `output`: what the work left on the git host (box output). */
+	async close(
+		id: string,
+		actor: string,
+		reason?: string,
+		output?: WorkOutput,
+	): Promise<Bead> {
 		const { bead } = await this.#mutate(id, "close", actor, (b, at) => {
 			if (b.status === "closed") return null;
 			b.status = "closed";
 			b.closedAt = at.toISOString();
 			b.updatedAt = b.closedAt;
 			if (reason) b.closeReason = reason;
+			if (output) b.output = output;
 			delete b.lease;
 			return { bead: b };
 		});
@@ -740,6 +748,7 @@ export class NatsWork {
 			b.status = "open";
 			delete b.closedAt;
 			delete b.closeReason;
+			delete b.output;
 			delete b.assignee;
 			delete b.lease;
 			b.updatedAt = at.toISOString();

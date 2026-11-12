@@ -46,7 +46,54 @@ export type Bead = {
 	closedAt?: string;
 	/** Why it was closed; for completed work, the agent's result. */
 	closeReason?: string;
+	/** What the work left on the git host (box output); set when it completes. */
+	output?: WorkOutput;
 };
+
+/**
+ * What a completed item left on the git host: the branch the runner pushed and
+ * the pull request, when it opened or found one.
+ */
+export type WorkOutput = {
+	/** Branch on the git host; absent when nothing was pushed. */
+	branch?: string;
+	/** The pull request (http or https URL). */
+	prUrl?: string;
+	/** Commits on top of the base. */
+	commits: number;
+	filesChanged: number;
+};
+
+const OUTPUT_TEXT_MAX = 500;
+
+/**
+ * A clean WorkOutput from untrusted input (the runner), or null when it is not
+ * one. A prUrl that is not http(s) is dropped: the UI renders it as a link.
+ */
+export function workOutputOf(v: unknown): WorkOutput | null {
+	if (!v || typeof v !== "object") return null;
+	const o = v as Record<string, unknown>;
+	const count = (n: unknown) =>
+		typeof n === "number" && Number.isInteger(n) && n >= 0 ? n : null;
+	const commits = count(o.commits);
+	const filesChanged = count(o.filesChanged);
+	if (commits === null || filesChanged === null) return null;
+	const out: WorkOutput = { commits, filesChanged };
+	if (
+		typeof o.branch === "string" &&
+		o.branch.trim() &&
+		o.branch.length <= OUTPUT_TEXT_MAX
+	)
+		out.branch = o.branch.trim();
+	if (typeof o.prUrl === "string" && o.prUrl.length <= OUTPUT_TEXT_MAX) {
+		try {
+			const url = new URL(o.prUrl);
+			if (url.protocol === "https:" || url.protocol === "http:")
+				out.prUrl = url.href;
+		} catch {}
+	}
+	return out;
+}
 
 /** A comment on a bead: a runner's report or a human note. */
 export type BeadComment = {

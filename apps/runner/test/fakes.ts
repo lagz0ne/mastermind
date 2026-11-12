@@ -3,7 +3,12 @@ import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BusError } from "@mastermind/bus";
-import type { Dispatch, Lease, ReadyNotice } from "@mastermind/core";
+import type {
+	Dispatch,
+	Lease,
+	ReadyNotice,
+	WorkOutput,
+} from "@mastermind/core";
 import type { MastermindClient } from "../src/client.ts";
 import type { AgentLauncher, AgentResult, AgentSpec } from "../src/launcher.ts";
 
@@ -42,6 +47,7 @@ export type Call = {
 	actor: string;
 	text?: string;
 	startFailed?: boolean;
+	output?: WorkOutput;
 };
 
 /** Hands out queued dispatches; `next` on an empty queue answers null after `waitMs`. */
@@ -88,8 +94,19 @@ export class FakeMastermind implements MastermindClient {
 	async report(bead: string, actor: string, text: string) {
 		this.calls.push({ verb: "report", bead, actor, text });
 	}
-	async complete(bead: string, actor: string, text: string) {
-		this.calls.push({ verb: "complete", bead, actor, text });
+	async complete(
+		bead: string,
+		actor: string,
+		text: string,
+		output?: WorkOutput,
+	) {
+		this.calls.push({
+			verb: "complete",
+			bead,
+			actor,
+			text,
+			...(output ? { output } : {}),
+		});
 	}
 	async release(
 		bead: string,

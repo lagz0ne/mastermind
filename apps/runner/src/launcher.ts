@@ -5,7 +5,7 @@
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { DispatchEnv } from "@mastermind/core";
+import type { DispatchEnv, WorkOutput } from "@mastermind/core";
 import type { AgentSettings } from "./config.ts";
 
 export type AgentSpec = {
@@ -30,8 +30,15 @@ export type AgentSpec = {
 	recipe?: DispatchEnv;
 };
 
-/** What the agent says it did. Completion comes from the agent, not from idle. */
-export type AgentResult = { status: "done" | "failed"; summary: string };
+/**
+ * What the agent says it did. Completion comes from the agent, not from idle.
+ * `output`: what left the box through the git host (box launcher only).
+ */
+export type AgentResult = {
+	status: "done" | "failed";
+	summary: string;
+	output?: WorkOutput;
+};
 
 export interface AgentLauncher {
 	/** Start the agent, wait for it, return its result. Abort stops it. */
@@ -81,7 +88,8 @@ export function runFailure(res: {
 	return `paseo run exited ${res.code}: ${text.slice(-500)}${fix}`;
 }
 
-export function parseResult(stdout: string): AgentResult {
+/** The agent's own answer: status and summary (the box adds the output). */
+export function parseResult(stdout: string): Omit<AgentResult, "output"> {
 	let v: unknown;
 	try {
 		v = JSON.parse(stdout.trim());

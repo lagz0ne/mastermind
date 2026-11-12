@@ -59,6 +59,7 @@ import {
 	TO_LABEL_PREFIX,
 	toLabel,
 	toOf,
+	workOutputOf,
 } from "@mastermind/core";
 import {
 	fallbackOf,
@@ -439,10 +440,11 @@ export class Dispatcher {
 	): Promise<Ack> {
 		const actor = checkActor(account, req?.actor);
 		const summary = text(req.summary, "summary");
+		const output = workOutputOf(req.output) ?? undefined;
 		const bead = await this.#held(beadId, actor);
 		if (bead.status !== "closed")
 			await this.#work
-				.close(beadId, actor, summary)
+				.close(beadId, actor, summary, output)
 				.catch((e) => Promise.reject(busError(e)));
 		this.#forget(beadId);
 		this.#see({ kind: "done", actor, beadId });

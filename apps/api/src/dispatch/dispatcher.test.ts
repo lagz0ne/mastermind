@@ -195,6 +195,40 @@ describe("bead verbs", () => {
 		);
 	});
 
+	test("complete keeps the box output on the item; a bad prUrl is dropped", async () => {
+		const { d, work } = await held();
+		await d.complete("alice", "mm-1.2", {
+			actor,
+			summary: "done",
+			output: {
+				branch: "mm/mm-1.2",
+				prUrl: "https://github.com/o/r/pull/7",
+				commits: 2,
+				filesChanged: 3,
+			},
+		});
+		expect(work.beads.get("mm-1.2")?.output).toEqual({
+			branch: "mm/mm-1.2",
+			prUrl: "https://github.com/o/r/pull/7",
+			commits: 2,
+			filesChanged: 3,
+		});
+		const second = await held();
+		await second.d.complete("alice", "mm-1.2", {
+			actor,
+			summary: "done",
+			output: {
+				prUrl: "javascript:alert(1)",
+				commits: 0,
+				filesChanged: 0,
+			},
+		});
+		expect(second.work.beads.get("mm-1.2")?.output).toEqual({
+			commits: 0,
+			filesChanged: 0,
+		});
+	});
+
 	test("report comments, complete closes", async () => {
 		const { d, work } = await held();
 		expect(

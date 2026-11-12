@@ -6,7 +6,7 @@
  *                setup and check happen in the box, not on this machine.
  *   BoxLauncher  the AgentLauncher that runs the agent in the box.
  */
-import type { Dispatch } from "@mastermind/core";
+import { type Dispatch, workOutputOf } from "@mastermind/core";
 import type { CheckResult } from "../check.ts";
 import type { RunnerSettings } from "../config.ts";
 import {
@@ -93,7 +93,8 @@ export class BoxLauncher implements AgentLauncher {
 		if (res.output) summary += `\n\n${res.output.line}`;
 		if (res.patch)
 			summary += `\n\n(patch of the work on the runner: ${res.patch})`;
-		return { status: res.status, summary };
+		const output = workOutputOf(res.output);
+		return { status: res.status, summary, ...(output ? { output } : {}) };
 	}
 }
 
