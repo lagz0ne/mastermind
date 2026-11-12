@@ -177,6 +177,25 @@ secret name, and that token is readable by the agent.
   shows it. A failed push or pull request fails the task with the reason. Closing the item
   merges nothing.
 
+### The agent never sees the model credential
+
+Like Claude Code on the web ("the key itself stays outside the VM") and Codex cloud (a
+placeholder in the program, the real value added by the proxy), the Claude credential
+(`CLAUDE_CODE_OAUTH_TOKEN`, else `ANTHROPIC_API_KEY`) does not go into the box:
+
+- A proxy box `<box>-proxy` next to the box (the allow-list proxy box, or with `open` a proxy
+  box on the default network) holds the credential in a file. Its model route on port 3129
+  forwards `/<random path>/...` to `https://api.anthropic.com` and sets the auth header:
+  `Authorization: Bearer` for an OAuth token, `x-api-key` for an API key. Other paths: 404.
+- The box gets `ANTHROPIC_BASE_URL=http://<proxy>:3129/<random path>` and the same secret
+  name with the value `mastermind-model-proxy-placeholder`. No TLS interception.
+- The proxy logs failed calls (method, path, status), never a header value.
+- `network: none`: no route, so the box gets neither the credential nor the placeholder.
+
+The agent can still make model calls through the route while the box lives (as with any
+agent that holds a key); it cannot take the credential out. Proof: `test/box/model.integration.test.ts`
+(env and argv of every process, every file the box wrote, the proxy log).
+
 ## Box files: inputs in, outputs out
 
 Files attached to a ticket go into the box. Files the agent makes come back to the ticket.
@@ -212,8 +231,8 @@ For an allow list the runner makes three things, and deletes all three with the 
 
 A tool that does not use the proxy (for example `ssh`, or git over ssh) has no network.
 Entries: `host` (any port), `host:port`, `*.host` (subdomains only, not `host` itself).
-List the hosts the agent needs, for example the model API of the agent (for Claude Code:
-`api.anthropic.com`).
+List the hosts the agent needs. Claude Code does not need `api.anthropic.com` in the list:
+its model calls use the model route of the proxy box (next section).
 
 An allow list has two phases (prior art: Codex cloud turns internet on for setup and off or
 allow-listed for the agent; the Copilot agent firewall covers only the agent):

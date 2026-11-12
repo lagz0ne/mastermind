@@ -3,6 +3,7 @@ import { generateKeyPairSync } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { EnvironmentNetwork } from "@mastermind/core";
 import type { HostRun } from "../../src/box/devcontainer.ts";
 import { BOX_LABEL, type ExecResult } from "../../src/box/driver.ts";
 import { CLONE_CRED_DIR } from "../../src/box/output.ts";
@@ -169,14 +170,16 @@ describe("runInBox", () => {
 		});
 		expect(spec?.limits).toEqual({ cpu: 2, memoryMb: 2048 });
 		expect(spec?.network).toBe("open");
-		// secrets: env-safe names as box env; every secret as a file
-		expect(spec?.env).toEqual({ ...BOX_ENV, CLAUDE_CODE_OAUTH_TOKEN: SECRET });
+		// secrets: env-safe names as box env; every secret as a file. The
+		// model credential goes to the driver (its proxy box), not the box.
+		expect(spec?.env).toEqual(BOX_ENV);
+		expect(spec?.model).toEqual({
+			secret: "CLAUDE_CODE_OAUTH_TOKEN",
+			header: "authorization",
+			value: `Bearer ${SECRET}`,
+		});
 		expect(d.copiedIn).toEqual([
-			{
-				box: "box1",
-				dir: SECRETS_DIR,
-				names: ["CLAUDE_CODE_OAUTH_TOKEN", "deploy.key"],
-			},
+			{ box: "box1", dir: SECRETS_DIR, names: ["deploy.key"] },
 		]);
 
 		const lines = cmdLines(d);
@@ -370,6 +373,40 @@ describe("runInBox", () => {
 		expect(cmdLines(d).some((l) => l.startsWith("paseo"))).toBe(false);
 	});
 
+	test("model credential (mm-210.70): only to the driver; never box env, a secret file or a ticket line", async () => {
+		const networks: EnvironmentNetwork[] = ["open", { allow: ["github.com"] }];
+		for (const network of networks) {
+			const d = new FakeDriver();
+			const base = task();
+			const steps: string[] = [];
+			await runInBox(
+				task({
+					env: {
+						...base.env,
+						network,
+					},
+					secrets: { ANTHROPIC_API_KEY: "sk-ant-value", OTHER: "o" },
+				}),
+				{ ...opts(d), onStep: (l) => steps.push(l) },
+				never,
+			);
+			const spec = d.created[0];
+			expect(spec?.model).toEqual({
+				secret: "ANTHROPIC_API_KEY",
+				header: "x-api-key",
+				value: "sk-ant-value",
+			});
+			expect(spec?.env).toEqual({ ...BOX_ENV, OTHER: "o" });
+			expect(d.copiedIn[0]?.names).toEqual(["OTHER"]);
+			expect(
+				JSON.stringify([d.execs, d.copiedIn, steps, spec?.env]),
+			).not.toContain("sk-ant-value");
+			expect(steps.join("\n")).toContain(
+				"ANTHROPIC_API_KEY: stays outside the box",
+			);
+		}
+	});
+
 	test("git credential: only in the env of the clone command; never box env, a secret file or the agent's env", async () => {
 		const d = new FakeDriver();
 		const base = task();
@@ -388,13 +425,9 @@ describe("runInBox", () => {
 				: Response.json([])) as unknown as typeof globalThis.fetch;
 		await runInBox(t, { ...opts(d), fetch, hostRun: host.run }, never);
 		const spec = d.created[0];
-		expect(spec?.env).toEqual({ ...BOX_ENV, CLAUDE_CODE_OAUTH_TOKEN: SECRET });
+		expect(spec?.env).toEqual(BOX_ENV);
 		expect(d.copiedIn).toEqual([
-			{
-				box: "box1",
-				dir: SECRETS_DIR,
-				names: ["CLAUDE_CODE_OAUTH_TOKEN", "deploy.key"],
-			},
+			{ box: "box1", dir: SECRETS_DIR, names: ["deploy.key"] },
 			// the deploy key: in CLONE_CRED_DIR for the clone, then removed
 			{ box: "box1", dir: CLONE_CRED_DIR, names: ["key.in"] },
 		]);
@@ -624,14 +657,8 @@ describe("runInBox: GitHub App token per task (mm-210.69)", () => {
 		expect(pr.map((c) => c.auth)).toEqual(["Bearer ghs_1", "Bearer ghs_1"]);
 		expect(res.output?.prUrl).toBe("https://github.com/acme/web/pull/3");
 		// never in the box (env, files, argv) nor in a log or ticket line
-		expect(d.created[0]?.env).toEqual({
-			...BOX_ENV,
-			CLAUDE_CODE_OAUTH_TOKEN: SECRET,
-		});
-		expect(d.copiedIn[0]?.names).toEqual([
-			"CLAUDE_CODE_OAUTH_TOKEN",
-			"deploy.key",
-		]);
+		expect(d.created[0]?.env).toEqual(BOX_ENV);
+		expect(d.copiedIn[0]?.names).toEqual(["deploy.key"]);
 		const everything = JSON.stringify([
 			d.created,
 			d.copiedIn,

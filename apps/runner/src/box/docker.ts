@@ -18,6 +18,12 @@ import {
 	imageHash,
 } from "./driver.ts";
 import {
+	MODEL_AUTH_FILE,
+	MODEL_READY,
+	type ModelAuth,
+	modelEnv,
+	modelPath,
+	modelProxyEnv,
 	PROXY_JS,
 	PROXY_READY,
 	PROXY_RULES,
@@ -377,8 +383,86 @@ export class DockerDriver implements BoxDriver {
 	async create(spec: BoxSpec): Promise<Box> {
 		const net = spec.network ?? "open";
 		if (typeof net === "object") return this.#createAllow(spec, net.allow);
+		if (net === "open" && spec.model) return this.#createOpenModel(spec);
 		const id = await this.#run(spec, net === "none" ? "none" : undefined);
 		return new DockerBox(this, id, spec.name);
+	}
+
+	/**
+	 * Start the proxy box of a box (allow list and/or model route). With a
+	 * model credential: the route's random path in its env, the credential in
+	 * {@link MODEL_AUTH_FILE} (copied in, never env or argv).
+	 */
+	async #startProxy(
+		spec: BoxSpec,
+		labels: Record<string, string>,
+		allow: string[],
+		path: string | undefined,
+	): Promise<string> {
+		const proxyImage = this.#proxyImage
+			? await this.ensureImage({ image: this.#proxyImage })
+			: spec.image;
+		const id = await this.#run(
+			{
+				image: proxyImage,
+				name: `${spec.name}-proxy`,
+				labels: { ...labels, [ROLE_LABEL]: "proxy" },
+				limits: { cpu: 0.5, memoryMb: 256 },
+				cmd: [],
+				env: {
+					MM_PROXY_JS: PROXY_JS,
+					MM_PROXY_ALLOW: allow.join(","),
+					...(path ? modelProxyEnv(path) : {}),
+				},
+			},
+			undefined,
+			{
+				entrypoint: ["/bin/sh", "-c", PROXY_SH],
+				user: "65534:65534",
+				capDropAll: true,
+			},
+		);
+		if (spec.model) {
+			const slash = MODEL_AUTH_FILE.lastIndexOf("/");
+			try {
+				await new DockerBox(this, id, "proxy").copyIn(
+					MODEL_AUTH_FILE.slice(0, slash),
+					[
+						{
+							name: MODEL_AUTH_FILE.slice(slash + 1),
+							data: JSON.stringify(modelAuthFile(spec.model)),
+							mode: 0o444,
+						},
+					],
+				);
+			} catch (error) {
+				await this.#delete(id).catch(() => {});
+				throw error;
+			}
+		}
+		return id;
+	}
+
+	/**
+	 * Open network with a model credential: a proxy box on the default network
+	 * that only serves the model route (its forward proxy allows nothing); the
+	 * task box stays on the default network with its own route out.
+	 */
+	async #createOpenModel(spec: BoxSpec): Promise<Box> {
+		const path = modelPath();
+		const proxy = await this.#startProxy(spec, spec.labels, [], path);
+		try {
+			const ip = await this.#proxyReady(proxy, null, true);
+			this.#log(`box: ${spec.name}-proxy serves the model route (${ip})`);
+			const id = await this.#run({
+				...spec,
+				env: { ...spec.env, ...modelEnv(ip, path, model(spec)) },
+			});
+			return new DockerBox(this, id, spec.name, [proxy]);
+		} catch (error) {
+			await this.#delete(proxy).catch(() => {});
+			throw error;
+		}
 	}
 
 	/** Create and start one container; delete it again when the start fails. */
@@ -436,36 +520,28 @@ export class DockerDriver implements BoxDriver {
 			const netId = await this.#internalNetwork(netName, spec.labels);
 			made.net = netId;
 			const labels = { ...spec.labels, [NETWORK_LABEL]: netId };
-			const proxyImage = this.#proxyImage
-				? await this.ensureImage({ image: this.#proxyImage })
-				: spec.image;
-			const proxyName = `${spec.name}-proxy`;
-			made.proxy = await this.#run(
-				{
-					image: proxyImage,
-					name: proxyName,
-					labels: { ...labels, [ROLE_LABEL]: "proxy" },
-					limits: { cpu: 0.5, memoryMb: 256 },
-					cmd: [],
-					env: { MM_PROXY_JS: PROXY_JS, MM_PROXY_ALLOW: allow.join(",") },
-				},
-				undefined,
-				{
-					entrypoint: ["/bin/sh", "-c", PROXY_SH],
-					user: "65534:65534",
-					capDropAll: true,
-				},
-			);
+			const path = spec.model ? modelPath() : undefined;
+			made.proxy = await this.#startProxy(spec, labels, allow, path);
 			await this.#fetch("POST", `/networks/${netId}/connect`, {
 				body: { Container: made.proxy },
 			});
-			const ip = await this.#proxyReady(made.proxy, netName, netId);
-			this.#log(`box: ${proxyName} allows ${allow.join(", ")} (${ip})`);
+			const ip = await this.#proxyReady(
+				made.proxy,
+				{ name: netName, id: netId },
+				!!path,
+			);
+			this.#log(
+				`box: ${spec.name}-proxy allows ${allow.join(", ")}${path ? " and serves the model route" : ""} (${ip})`,
+			);
 			const id = await this.#run(
 				{
 					...spec,
 					labels,
-					env: { ...spec.env, ...proxyEnv(ip) },
+					env: {
+						...spec.env,
+						...proxyEnv(ip, path ? [ip] : []),
+						...(path ? modelEnv(ip, path, model(spec)) : {}),
+					},
 				},
 				netId,
 			);
@@ -555,11 +631,14 @@ export class DockerDriver implements BoxDriver {
 		return ((await res.json()) as { Id: string }).Id;
 	}
 
-	/** Wait until the proxy listens; its address on the internal network. */
+	/**
+	 * Wait until the proxy listens (and its model route, with `model`); its
+	 * address on network `net`, else on its first network.
+	 */
 	async #proxyReady(
 		id: string,
-		netName: string,
-		netId: string,
+		net: { name: string; id: string } | null,
+		model = false,
 	): Promise<string> {
 		const until = Date.now() + this.#proxyMs;
 		for (;;) {
@@ -568,22 +647,27 @@ export class DockerDriver implements BoxDriver {
 			).json()) as {
 				State?: { Running?: boolean };
 				NetworkSettings?: {
+					IPAddress?: string;
 					Networks?: Record<string, { IPAddress?: string; NetworkID?: string }>;
 				};
 			};
 			const logs = await this.logsOf(id, 50);
 			if (!info.State?.Running)
 				throw new BoxError(
-					`network allow list: the proxy box stopped: ${logs.trim().slice(-500)}`,
+					`box proxy: the proxy box stopped: ${logs.trim().slice(-500)}`,
 				);
 			const nets = info.NetworkSettings?.Networks ?? {};
-			const ip =
-				nets[netName]?.IPAddress ||
-				Object.values(nets).find((n) => n.NetworkID === netId)?.IPAddress;
-			if (ip && logs.includes(PROXY_READY)) return ip;
+			const ip = net
+				? nets[net.name]?.IPAddress ||
+					Object.values(nets).find((n) => n.NetworkID === net.id)?.IPAddress
+				: Object.values(nets).find((n) => n.IPAddress)?.IPAddress ||
+					info.NetworkSettings?.IPAddress;
+			const ready =
+				logs.includes(PROXY_READY) && (!model || logs.includes(MODEL_READY));
+			if (ip && ready) return ip;
 			if (Date.now() > until)
 				throw new BoxError(
-					`network allow list: the proxy box is not ready after ${this.#proxyMs / 1000} s (address ${ip || "none"}): ${logs.trim().slice(-500)}`,
+					`box proxy: the proxy box is not ready after ${this.#proxyMs / 1000} s (address ${ip || "none"}): ${logs.trim().slice(-500)}`,
 				);
 			await Bun.sleep(100);
 		}
@@ -674,6 +758,16 @@ export class DockerDriver implements BoxDriver {
 	): Promise<Response> {
 		return this.#fetch(method, path, init);
 	}
+}
+
+function model(spec: BoxSpec): ModelAuth {
+	if (!spec.model) throw new BoxError("box proxy: no model credential");
+	return spec.model;
+}
+
+/** The content of {@link MODEL_AUTH_FILE}: the header only, not the secret name. */
+function modelAuthFile(m: ModelAuth): { header: string; value: string } {
+	return { header: m.header, value: m.value };
 }
 
 async function demux(res: Response): Promise<Demux> {

@@ -8,6 +8,7 @@
  *   box.exec / copyIn / copyOut / logs
  *   box.destroy()                  (always; a startup sweep catches crashes)
  */
+import type { ModelAuth } from "./proxy.ts";
 
 /** What goes into the box image. Built once per {@link imageHash}. */
 export type ImageRecipe = {
@@ -43,6 +44,13 @@ export type BoxSpec = {
 	env?: Record<string, string>;
 	/** OCI runtime name of the engine, for example `runsc` (gVisor). Absent: the engine's default. */
 	runtime?: string;
+	/**
+	 * The model credential (mm-210.70). The driver keeps the value OUT of the
+	 * box: a proxy box next to it adds the auth header, and the box gets
+	 * ANTHROPIC_BASE_URL plus a placeholder (proxy.ts modelEnv). Network
+	 * `none`: no route, the box gets nothing.
+	 */
+	model?: ModelAuth;
 };
 
 /** The engine runtime of each environment runtime (mm-210.63). */

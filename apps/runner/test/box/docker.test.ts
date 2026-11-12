@@ -413,6 +413,116 @@ describe("DockerDriver (fake engine)", () => {
 		expect(networks.size).toBe(0);
 	});
 
+	test("model route, open network: proxy box on the default network holds the credential in a file; the box only the placeholder (mm-210.70)", async () => {
+		proxyLogs =
+			"mm-proxy listening on 3128\nmm-proxy model on 3129 to api.anthropic.com\n";
+		const box = await driver().create({
+			image: "img",
+			name: "mm-box-1",
+			labels: { "mastermind.runner": "laptop" },
+			network: "open",
+			env: { A: "1" },
+			model: {
+				secret: "CLAUDE_CODE_OAUTH_TOKEN",
+				header: "authorization",
+				value: "Bearer SECRET-1",
+			},
+		});
+		expect(reqs.some((r) => r.path === "/networks/create")).toBe(false);
+		const [proxy, task] = reqs.filter((r) =>
+			r.path.startsWith("/containers/create"),
+		);
+		expect(proxy?.path).toBe("/containers/create?name=mm-box-1-proxy");
+		const pb = proxy?.body as {
+			Env: string[];
+			HostConfig: Record<string, unknown>;
+		};
+		expect(pb.Env).toContain("MM_PROXY_ALLOW=");
+		const mp = pb.Env.find((e) => e.startsWith("MM_MODEL_PATH="))?.slice(14);
+		expect(mp).toMatch(/^[0-9a-f]{36}$/);
+		expect(pb.HostConfig.NetworkMode).toBeUndefined();
+		// The credential goes into the proxy box as a file, never env or argv.
+		const put = reqs.find(
+			(r) => r.method === "PUT" && r.path.startsWith("/containers/c1/archive"),
+		);
+		expect(put?.path).toContain(encodeURIComponent("/tmp"));
+		expect(new TextDecoder().decode(put?.raw)).toContain(
+			'{"header":"authorization","value":"Bearer SECRET-1"}',
+		);
+		const bodies = JSON.stringify(reqs.map((r) => [r.path, r.body]));
+		expect(bodies).not.toContain("SECRET-1");
+		const env = (task?.body as { Env: string[] } | undefined)?.Env ?? [];
+		expect(env).toContain("A=1");
+		expect(env).toContain(`ANTHROPIC_BASE_URL=http://10.88.0.5:3129/${mp}`);
+		expect(env).toContain(
+			"CLAUDE_CODE_OAUTH_TOKEN=mastermind-model-proxy-placeholder",
+		);
+		expect(env.some((e) => e.startsWith("HTTPS_PROXY="))).toBe(false);
+		expect(
+			(task?.body as { HostConfig: Record<string, unknown> } | undefined)
+				?.HostConfig.NetworkMode,
+		).toBeUndefined();
+		await box.destroy();
+		expect(containers.size).toBe(0);
+	});
+
+	test("model route, allow list: the same proxy box serves it; the proxy address skips the forward proxy", async () => {
+		proxyLogs =
+			"mm-proxy listening on 3128\nmm-proxy model on 3129 to api.anthropic.com\n";
+		await driver().create({
+			image: "img",
+			name: "mm-box-1",
+			labels: {},
+			network: { allow: ["github.com"] },
+			model: {
+				secret: "ANTHROPIC_API_KEY",
+				header: "x-api-key",
+				value: "SECRET-2",
+			},
+		});
+		const creates = reqs.filter((r) => r.path.startsWith("/containers/create"));
+		expect(creates.length).toBe(2);
+		const env = (creates[1]?.body as { Env: string[] } | undefined)?.Env ?? [];
+		expect(env).toContain(
+			"ANTHROPIC_API_KEY=mastermind-model-proxy-placeholder",
+		);
+		expect(env.find((e) => e.startsWith("ANTHROPIC_BASE_URL="))).toMatch(
+			/^ANTHROPIC_BASE_URL=http:\/\/10\.89\.0\.2:3129\/[0-9a-f]{36}$/,
+		);
+		expect(env).toContain("NO_PROXY=localhost,127.0.0.1,::1,10.89.0.2");
+		expect(JSON.stringify(reqs.map((r) => r.body))).not.toContain("SECRET-2");
+	});
+
+	test("model route: waits for the model listener, not only the forward proxy", async () => {
+		const d = new DockerDriver({
+			env: { DOCKER_HOST: `unix://${sock}` },
+			proxyTimeoutMs: 300,
+		});
+		await expect(
+			d.create({
+				image: "img",
+				name: "mm-box-1",
+				labels: {},
+				model: { secret: "ANTHROPIC_API_KEY", header: "x-api-key", value: "S" },
+			}),
+		).rejects.toThrow("not ready");
+		expect(containers.size).toBe(0);
+	});
+
+	test("model route, network none: no proxy, no credential, no placeholder", async () => {
+		await driver().create({
+			image: "img",
+			name: "mm-box-1",
+			labels: {},
+			network: "none",
+			model: { secret: "ANTHROPIC_API_KEY", header: "x-api-key", value: "S" },
+		});
+		const creates = reqs.filter((r) => r.path.startsWith("/containers/create"));
+		expect(creates.length).toBe(1);
+		const env = (creates[0]?.body as { Env: string[] } | undefined)?.Env ?? [];
+		expect(env.some((e) => e.startsWith("ANTHROPIC"))).toBe(false);
+	});
+
 	test("runtimes: from /info; on a local Podman socket only installed ones (mm-210.63)", async () => {
 		expect(await driver().runtimes()).toEqual(["crun", "runc", "runsc"]);
 		engineName = "Podman Engine";

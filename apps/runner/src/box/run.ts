@@ -61,7 +61,7 @@ import {
 	redact,
 	splitGitSecrets,
 } from "./output.ts";
-import { networkPhases } from "./proxy.ts";
+import { networkPhases, splitModelSecrets } from "./proxy.ts";
 import { untar } from "./tar.ts";
 
 export const WORKSPACE = "/workspace";
@@ -272,7 +272,9 @@ export async function runInBox(
 		// The git credential stays on this machine; the rest goes into the box.
 		const split = splitGitSecrets({ ...taskSecrets(), ...prep?.secrets });
 		let gitSecrets = split.git;
-		const secrets = split.box;
+		// The model credential stays out of the box too (mm-210.70): the
+		// driver's proxy box adds it; the box gets a placeholder.
+		const { model, box: secrets } = splitModelSecrets(split.box);
 		const image = prep
 			? prep.image
 			: await driver.ensureImage({
@@ -306,6 +308,7 @@ export async function runInBox(
 			...(runtime ? { runtime } : {}),
 			env: { ...BOX_ENV, ...prep?.env, ...opts.boxEnv, ...secretEnv },
 			...(opts.cmd ? { cmd: opts.cmd } : {}),
+			...(model ? { model } : {}),
 		});
 		if (all.aborted) throw stopped();
 		const b = box;
@@ -369,6 +372,8 @@ export async function runInBox(
 		}));
 		if (files.length) await b.copyIn(SECRETS_DIR, files);
 		step(`box ${b.name} ready in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+		if (model)
+			step(`${model.secret}: stays outside the box; the box proxy adds it`);
 
 		// Checkout. Repo and ref go in as arguments to a fixed script. The git
 		// credential is in the env of this one command (and a deploy key in

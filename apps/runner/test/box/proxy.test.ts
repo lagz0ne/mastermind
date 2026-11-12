@@ -4,6 +4,11 @@ import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	MODEL_PLACEHOLDER,
+	MODEL_PORT,
+	MODEL_READY,
+	modelEnv,
+	modelPath,
 	networkPhases,
 	PROXY_JS,
 	PROXY_READY,
@@ -12,6 +17,7 @@ import {
 	proxyEnv,
 	repoHost,
 	SETUP_REGISTRIES,
+	splitModelSecrets,
 } from "../../src/box/proxy.ts";
 
 describe("networkPhases", () => {
@@ -224,3 +230,147 @@ for (const bin of bins)
 			}
 		}, 20_000);
 	});
+
+describe("model route (mm-210.70)", () => {
+	test("splitModelSecrets: OAuth wins as Bearer, API key as x-api-key; both leave the box", () => {
+		const both = splitModelSecrets({
+			CLAUDE_CODE_OAUTH_TOKEN: "oat",
+			ANTHROPIC_API_KEY: "key",
+			OTHER: "x",
+		});
+		expect(both.box).toEqual({ OTHER: "x" });
+		expect(both.model).toEqual({
+			secret: "CLAUDE_CODE_OAUTH_TOKEN",
+			header: "authorization",
+			value: "Bearer oat",
+		});
+		expect(splitModelSecrets({ ANTHROPIC_API_KEY: "key" }).model).toEqual({
+			secret: "ANTHROPIC_API_KEY",
+			header: "x-api-key",
+			value: "key",
+		});
+		expect(splitModelSecrets({ OTHER: "x" })).toEqual({
+			model: null,
+			box: { OTHER: "x" },
+		});
+	});
+	test("modelEnv: base URL with the random path and only the placeholder", () => {
+		const path = modelPath();
+		expect(path).toMatch(/^[0-9a-f]{36}$/);
+		expect(modelPath()).not.toBe(path);
+		expect(
+			modelEnv("10.89.0.2", path, { secret: "CLAUDE_CODE_OAUTH_TOKEN" }),
+		).toEqual({
+			ANTHROPIC_BASE_URL: `http://10.89.0.2:${MODEL_PORT}/${path}`,
+			CLAUDE_CODE_OAUTH_TOKEN: MODEL_PLACEHOLDER,
+		});
+	});
+
+	// A fake upstream that echoes what it got (streamed in two parts).
+	const seen: {
+		path: string;
+		headers: Record<string, string>;
+		body: string;
+	}[] = [];
+	const upstream = Bun.serve({
+		port: 0,
+		hostname: "127.0.0.1",
+		async fetch(req) {
+			const u = new URL(req.url);
+			seen.push({
+				path: `${u.pathname}${u.search}`,
+				headers: Object.fromEntries(req.headers),
+				body: await req.text(),
+			});
+			const stream = new ReadableStream({
+				async start(c) {
+					c.enqueue(new TextEncoder().encode("event: a\n\n"));
+					await Bun.sleep(50);
+					c.enqueue(new TextEncoder().encode("event: b\n\n"));
+					c.close();
+				},
+			});
+			return new Response(stream, {
+				status: u.pathname.endsWith("/bad") ? 401 : 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		},
+	});
+	afterAll(() => upstream.stop(true));
+
+	for (const bin of bins)
+		test(`under ${bin}: swaps the auth header, keeps the rest, refuses other paths, logs no value`, async () => {
+			const dir = mkdtempSync(join(tmpdir(), "mm-model-"));
+			const authFile = join(dir, "auth.json");
+			writeFileSync(
+				authFile,
+				JSON.stringify({ header: "authorization", value: "Bearer REAL-1" }),
+			);
+			const port = 20000 + Math.floor(Math.random() * 20000);
+			const mport = port + 1;
+			const path = modelPath();
+			const p = Bun.spawn([bin, "-e", PROXY_JS], {
+				env: {
+					...process.env,
+					MM_PROXY_ALLOW: "",
+					MM_PROXY_PORT: String(port),
+					MM_MODEL_PORT: String(mport),
+					MM_MODEL_PATH: path,
+					MM_MODEL_UPSTREAM: `http://127.0.0.1:${upstream.port}`,
+					MM_MODEL_AUTH_FILE: authFile,
+				},
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			try {
+				const reader = p.stdout.getReader();
+				let log = "";
+				while (!log.includes(MODEL_READY)) {
+					const { value, done } = await reader.read();
+					if (done) throw new Error(`proxy ended: ${log}`);
+					log += new TextDecoder().decode(value);
+				}
+				const base = `http://127.0.0.1:${mport}`;
+				seen.length = 0;
+				const r = await fetch(`${base}/${path}/v1/messages?beta=true`, {
+					method: "POST",
+					headers: {
+						authorization: `Bearer ${MODEL_PLACEHOLDER}`,
+						"x-api-key": MODEL_PLACEHOLDER,
+						"anthropic-beta": "oauth-2025-04-20",
+						"content-type": "application/json",
+					},
+					body: '{"model":"m"}',
+				});
+				expect(r.status).toBe(200);
+				expect(await r.text()).toBe("event: a\n\nevent: b\n\n");
+				expect(seen[0]?.path).toBe("/v1/messages?beta=true");
+				expect(seen[0]?.headers.authorization).toBe("Bearer REAL-1");
+				expect(seen[0]?.headers["x-api-key"]).toBeUndefined();
+				expect(seen[0]?.headers["anthropic-beta"]).toBe("oauth-2025-04-20");
+				expect(seen[0]?.body).toBe('{"model":"m"}');
+				// An upstream error passes through and is logged without values.
+				const bad = await fetch(`${base}/${path}/v1/bad`);
+				expect(bad.status).toBe(401);
+				await bad.text();
+				// Wrong or no path: refused, nothing sent upstream.
+				seen.length = 0;
+				for (const u of [`${base}/v1/messages`, `${base}/${path}x/v1/messages`])
+					expect((await fetch(u)).status).toBe(404);
+				expect(seen).toEqual([]);
+				p.kill();
+				for (;;) {
+					const { value, done } = await reader.read();
+					if (done) break;
+					log += new TextDecoder().decode(value);
+				}
+				expect(log).toContain("mm-proxy model: GET /v1/bad 401");
+				expect(log).toContain("refused GET (unknown path)");
+				expect(log).not.toContain("REAL-1");
+				expect(log).not.toContain(path);
+			} finally {
+				p.kill();
+				rmSync(dir, { recursive: true, force: true });
+			}
+		}, 20_000);
+});

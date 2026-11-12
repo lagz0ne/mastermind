@@ -18,6 +18,15 @@
  * driver writes the agent list into {@link PROXY_RULES} in the proxy box; the
  * proxy reloads it, closes the tunnels that the new list does not allow and
  * logs `mm-proxy allow <generation>`. No restart, the address stays.
+ *
+ * The model route (mm-210.70; prior art: Claude Code on the web, "the key
+ * itself stays outside the VM"; Codex cloud, a placeholder in the program and
+ * the real value put in by the proxy): the box gets ANTHROPIC_BASE_URL =
+ * http://<proxy>:{@link MODEL_PORT}/<random path> and a placeholder token. The
+ * proxy box forwards that path to {@link MODEL_UPSTREAM} and replaces the auth
+ * header with the runner's credential, which it reads from
+ * {@link MODEL_AUTH_FILE} in the proxy box. No TLS interception. Only that one
+ * upstream, and only for a request that knows the random path.
  */
 
 /** Port of the proxy inside the proxy box. */
@@ -133,24 +142,117 @@ export function parseAllow(allow: readonly string[]): string[] | string {
 	return out;
 }
 
-/** The environment of the task box that sends its traffic to the proxy. */
-export function proxyEnv(ip: string): Record<string, string> {
+/**
+ * The environment of the task box that sends its traffic to the proxy.
+ * `direct`: more hosts that skip it (the model route of the proxy box itself).
+ */
+export function proxyEnv(
+	ip: string,
+	direct: readonly string[] = [],
+): Record<string, string> {
 	const url = `http://${ip}:${PROXY_PORT}`;
+	const no = [NO_PROXY, ...direct].join(",");
 	return {
 		HTTP_PROXY: url,
 		HTTPS_PROXY: url,
 		http_proxy: url,
 		https_proxy: url,
-		NO_PROXY,
-		no_proxy: NO_PROXY,
+		NO_PROXY: no,
+		no_proxy: no,
 		// Node 24 fetch only uses HTTP(S)_PROXY with this.
 		NODE_USE_ENV_PROXY: "1",
 	};
 }
 
+/** Port of the model route in the proxy box. */
+export const MODEL_PORT = 3129;
+
+/** The line the proxy logs when the model route listens. */
+export const MODEL_READY = "mm-proxy model on";
+
+/** Where the model route sends requests. */
+export const MODEL_UPSTREAM = "https://api.anthropic.com";
+
+/** The credential of the model route, in the proxy box only: `{header, value}` JSON. */
+export const MODEL_AUTH_FILE = "/tmp/mm-model-auth.json";
+
+/** What the box holds in place of the model credential. */
+export const MODEL_PLACEHOLDER = "mastermind-model-proxy-placeholder";
+
+/** The model credential secrets, in order of use (the onboarding stores one of them). */
+export const MODEL_SECRETS = [
+	"CLAUDE_CODE_OAUTH_TOKEN",
+	"ANTHROPIC_API_KEY",
+] as const;
+
+/**
+ * The model credential of a box: the secret's name (the box gets that name
+ * with {@link MODEL_PLACEHOLDER}) and the header the proxy sets upstream.
+ */
+export type ModelAuth = {
+	secret: (typeof MODEL_SECRETS)[number];
+	header: "authorization" | "x-api-key";
+	value: string;
+};
+
+/**
+ * Split the model credential (all {@link MODEL_SECRETS}; the first one given
+ * is used) from the rest of the box secrets. An OAuth token (`claude
+ * setup-token`) goes upstream as `Authorization: Bearer`, an API key as
+ * `x-api-key`: the same header Claude Code sends with the placeholder.
+ */
+export function splitModelSecrets(secrets: Record<string, string>): {
+	model: ModelAuth | null;
+	box: Record<string, string>;
+} {
+	const box: Record<string, string> = {};
+	for (const [k, v] of Object.entries(secrets))
+		if (!(MODEL_SECRETS as readonly string[]).includes(k)) box[k] = v;
+	const secret = MODEL_SECRETS.find((n) => secrets[n]);
+	if (!secret) return { model: null, box };
+	const value = secrets[secret] ?? "";
+	return {
+		model:
+			secret === "CLAUDE_CODE_OAUTH_TOKEN"
+				? { secret, header: "authorization", value: `Bearer ${value}` }
+				: { secret, header: "x-api-key", value },
+		box,
+	};
+}
+
+/** A fresh random path of the model route of one box. */
+export function modelPath(): string {
+	return Buffer.from(crypto.getRandomValues(new Uint8Array(18))).toString(
+		"hex",
+	);
+}
+
+/** The environment of a box whose model credential stays in its proxy box. */
+export function modelEnv(
+	ip: string,
+	path: string,
+	model: Pick<ModelAuth, "secret">,
+): Record<string, string> {
+	return {
+		ANTHROPIC_BASE_URL: `http://${ip}:${MODEL_PORT}/${path}`,
+		[model.secret]: MODEL_PLACEHOLDER,
+	};
+}
+
+/** The proxy box environment of the model route (no secret value). */
+export function modelProxyEnv(path: string): Record<string, string> {
+	return {
+		MM_MODEL_PATH: path,
+		MM_MODEL_UPSTREAM: MODEL_UPSTREAM,
+		MM_MODEL_AUTH_FILE: MODEL_AUTH_FILE,
+	};
+}
+
 /**
  * The proxy program. Env: MM_PROXY_ALLOW (comma separated, from
- * {@link parseAllow}), MM_PROXY_PORT. Logs every refusal.
+ * {@link parseAllow}), MM_PROXY_PORT. Logs every refusal. With MM_MODEL_PATH
+ * also the model route on MM_MODEL_PORT (see {@link modelProxyEnv}): it logs
+ * method, path and status of failed calls, never a header value.
  */
 export const PROXY_JS = `
 const net = require("node:net");
@@ -241,6 +343,50 @@ net.createServer((c) => {
   };
   c.on("data", onData);
 }).listen(port, "0.0.0.0", () => console.log("${PROXY_READY} on " + port + " for " + allow.join(",")));
+if (process.env.MM_MODEL_PATH) {
+  const http = require("node:http");
+  const https = require("node:https");
+  const prefix = "/" + process.env.MM_MODEL_PATH;
+  const upstream = new URL(process.env.MM_MODEL_UPSTREAM || "${MODEL_UPSTREAM}");
+  const client = upstream.protocol === "http:" ? http : https;
+  const authFile = process.env.MM_MODEL_AUTH_FILE || "${MODEL_AUTH_FILE}";
+  const mport = Number(process.env.MM_MODEL_PORT || ${MODEL_PORT});
+  const hop = ["host", "connection", "keep-alive", "proxy-connection", "proxy-authorization", "te", "upgrade", "authorization", "x-api-key"];
+  let auth = null;
+  const fail = (res, status, text) => {
+    if (res.headersSent) { res.destroy(); return; }
+    res.writeHead(status, { "content-type": "text/plain", connection: "close" });
+    res.end("mastermind model proxy: " + text + "\\n");
+  };
+  http.createServer((req, res) => {
+    const url = req.url || "/";
+    const path = url.split("?")[0];
+    if (path !== prefix && !path.startsWith(prefix + "/")) {
+      console.log("mm-proxy model: refused " + req.method + " (unknown path)");
+      return fail(res, 404, "unknown path");
+    }
+    const rest = url.slice(prefix.length) || "/";
+    const shown = req.method + " " + rest.split("?")[0];
+    try { auth = auth || JSON.parse(fs.readFileSync(authFile, "utf8")); }
+    catch { console.log("mm-proxy model: no credential for " + shown); return fail(res, 503, "no model credential"); }
+    const headers = {};
+    for (const [k, v] of Object.entries(req.headers)) if (!hop.includes(k)) headers[k] = v;
+    headers[auth.header] = auth.value;
+    const up = client.request({
+      protocol: upstream.protocol, hostname: upstream.hostname, port: upstream.port || undefined,
+      method: req.method, path: (upstream.pathname.replace(/\\/$/, "") + rest) || "/", headers,
+    }, (ur) => {
+      if ((ur.statusCode || 0) >= 400) console.log("mm-proxy model: " + shown + " " + ur.statusCode);
+      const h = { ...ur.headers };
+      delete h.connection; delete h["keep-alive"];
+      res.writeHead(ur.statusCode || 502, h);
+      ur.pipe(res);
+    });
+    up.on("error", (e) => { console.log("mm-proxy model: " + shown + ": " + e.message); fail(res, 502, e.message); });
+    res.on("close", () => { if (!res.writableFinished) up.destroy(); });
+    req.pipe(up);
+  }).listen(mport, "0.0.0.0", () => console.log("${MODEL_READY} " + mport + " to " + upstream.host));
+}
 `;
 
 /** Shell entrypoint of the proxy box: node, else bun, else a clear error. */
