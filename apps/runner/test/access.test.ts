@@ -121,6 +121,39 @@ describe("checkEnvironmentsAccess", () => {
 		});
 	});
 
+	test("GitHub App secrets on a non-GitHub repo: the secrets go as they are", async () => {
+		let got: Record<string, string> = {};
+		await checkEnvironmentsAccess(
+			input({
+				needs: {
+					at: needs.at,
+					environments: [
+						{
+							name: "lab",
+							secrets: ["GIT_TOKEN", "GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY"],
+							repo: "https://gitlab.com/x/lab.git",
+							ref: "main",
+						},
+					],
+				},
+				store: {
+					GIT_TOKEN: "t",
+					GITHUB_APP_ID: "1",
+					GITHUB_APP_PRIVATE_KEY: "k",
+				},
+				check: async (_r, _f, secrets) => {
+					got = secrets;
+					return { ok: true };
+				},
+			}),
+		);
+		expect(got).toEqual({
+			GIT_TOKEN: "t",
+			GITHUB_APP_ID: "1",
+			GITHUB_APP_PRIVATE_KEY: "k",
+		});
+	});
+
 	test("unknown environments: nothing to check", async () => {
 		expect(await checkEnvironmentsAccess(input({ needs: null }))).toEqual({});
 	});

@@ -10,6 +10,7 @@
  * this process; the reasons are redacted by checkAccess.
  */
 import { type AccessResult, checkAccess } from "./box/devcontainer.ts";
+import { appToken } from "./box/output.ts";
 import { fail, pass, type StepResult } from "./onboard.ts";
 import type { Routing } from "./routing.ts";
 import type { Needs } from "./secrets/needs.ts";
@@ -41,8 +42,10 @@ export type AccessInput = {
 		signal: AbortSignal,
 	) => Promise<AccessResult>;
 	/**
-	 * Turn the environment's secrets into the ones git uses (a GitHub App
-	 * installation token, mm-210.69). May throw: the message is the reason.
+	 * Turn the environment's secrets into the ones git uses. Default: with
+	 * GitHub App secrets and a github.com repo, an installation token as
+	 * GIT_TOKEN (appToken, mm-210.69), as before each task. May throw: the
+	 * message is the reason.
 	 */
 	mint?: (
 		secrets: Record<string, string>,
@@ -50,6 +53,14 @@ export type AccessInput = {
 	) => Promise<Record<string, string>>;
 	timeoutMs?: number;
 };
+
+/** The secrets with a GitHub App installation token, when the app secrets are there. */
+async function mintAppToken(
+	secrets: Record<string, string>,
+	repo: string,
+): Promise<Record<string, string>> {
+	return (await appToken(secrets, repo))?.secrets ?? secrets;
+}
 
 /** Environments this runner may be offered: the bound ones, else all known. */
 export function candidateEnvironments(
@@ -110,7 +121,7 @@ export async function checkEnvironmentsAccess(
 				const ms = i.timeoutMs ?? ACCESS_TIMEOUT_MS;
 				const signal = AbortSignal.timeout(ms);
 				try {
-					const secrets = i.mint ? await i.mint(values, repo) : values;
+					const secrets = await (i.mint ?? mintAppToken)(values, repo);
 					r = await check(repo, ref, secrets, signal);
 					if (!r.ok && signal.aborted)
 						r = {
