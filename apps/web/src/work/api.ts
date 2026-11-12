@@ -19,7 +19,7 @@ export class ApiError extends Error {
 
 let csrf: Promise<string | null> | null = null;
 
-function csrfToken(): Promise<string | null> {
+export function csrfToken(): Promise<string | null> {
 	csrf ??= fetch("/api/auth/me")
 		.then(async (res) =>
 			res.ok ? (((await res.json()) as { csrf?: string }).csrf ?? null) : null,

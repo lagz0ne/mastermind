@@ -19,6 +19,7 @@ import {
 	SheetTitle,
 } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
+import { Attachments, FILES_ASIDE } from "../files/attachments.tsx";
 import { QueuePicker } from "../routing/queue-picker.tsx";
 import { api } from "../work/api.ts";
 import { useBeadDetail } from "../work/detail.ts";
@@ -270,6 +271,14 @@ export function BeadSheet() {
 									{bead.output.filesChanged === 1 ? "" : "s"} changed
 								</span>
 							</p>
+						</Section>
+					)}
+					{bead && (
+						<Section title="Files" aside={FILES_ASIDE}>
+							<Attachments
+								beadId={beadId}
+								version={live.status === "live" ? live.state.entries.length : 0}
+							/>
 						</Section>
 					)}
 					{(detail?.bead.description ?? bead?.description) && (
