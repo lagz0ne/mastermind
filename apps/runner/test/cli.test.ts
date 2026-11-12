@@ -253,7 +253,11 @@ describe("enroll, status, check", () => {
 	});
 
 	test("doctor names each problem with a fix", async () => {
-		const t = io({ MASTERMIND_URL: "http://127.0.0.1:1" });
+		// DOCKER_HOST: never the real engine of the test host (a pull would hang the test).
+		const t = io({
+			MASTERMIND_URL: "http://127.0.0.1:1",
+			DOCKER_HOST: "tcp://127.0.0.1:1",
+		});
 		const code = await main(
 			["doctor", "--workdir", "/no/such/dir-mm", "--paseo-host", "127.0.0.1:1"],
 			t.io,
@@ -266,6 +270,24 @@ describe("enroll, status, check", () => {
 		expect(text).toContain("workdir /no/such/dir-mm does not exist");
 		expect(text).toContain("fix:");
 		expect(text).toContain("SKIP e. agent");
+		expect(text).toContain("FAIL g. box");
+		expect(text).toContain("--no-box at your own risk");
+	});
+
+	test("doctor --no-box skips the box step", async () => {
+		const t = io({ MASTERMIND_URL: "http://127.0.0.1:1" });
+		await main(
+			[
+				"doctor",
+				"--no-box",
+				"--workdir",
+				"/no/such/dir-mm",
+				"--paseo-host",
+				"127.0.0.1:1",
+			],
+			t.io,
+		);
+		expect(t.out.join("\n")).toContain("SKIP g. box");
 	});
 
 	test("check reports missing capabilities", async () => {
