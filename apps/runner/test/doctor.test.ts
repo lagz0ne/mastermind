@@ -246,13 +246,12 @@ describe("runner doctor", () => {
 		expect(c.fix).toContain("--mode auto");
 	});
 
-	test("version mismatch warns with the install command", async () => {
+	test("version mismatch warns with the update command (mm-210.77)", async () => {
 		const { deps } = world({ server: "def456" });
 		const a = step(await runDoctor(input(), deps), "a");
 		expect(a.status).toBe("warn");
-		expect(a.fix).toBe(
-			"update the runner: curl -fsSL https://mm.example/install.sh | sh",
-		);
+		expect(a.detail.join("\n")).toContain("is older than the server def456");
+		expect(a.fix).toBe("mastermind-runner update");
 	});
 
 	test("a revoked credential fails a and skips b", async () => {

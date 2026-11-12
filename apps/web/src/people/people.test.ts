@@ -4,6 +4,7 @@ import {
 	ago,
 	groupByAccount,
 	outdated,
+	outdatedNotice,
 	readinessOf,
 	runnerCommand,
 	statsOf,
@@ -124,6 +125,10 @@ test("outdated: a connected runner on another commit than the server", () => {
 	expect(outdated(runner("a", "r"), "abc")).toBe(true);
 	expect(outdated(runner("a", null), "abc")).toBe(false);
 	expect(outdated(runner("a", "r", { version: "old" }), undefined)).toBe(false);
+	expect(outdated(runner("a", "r", { version: "dev" }), "abc")).toBe(false);
+	expect(outdatedNotice(runner("a", "r", { version: "old" }), "abc")).toBe(
+		"runner old is older than the server abc: run mastermind-runner update",
+	);
 });
 
 describe("readinessOf: service account lifecycle (mm-210.66)", () => {

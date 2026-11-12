@@ -216,6 +216,8 @@ export class Diagnostics {
 	lastDoctor: DoctorReport | null = null;
 	/** Worker readiness (readiness.ts); null: not evaluated (older callers). */
 	readiness: RunnerReadiness | null = null;
+	/** The version notice (update.ts); null: same version as the server or unknown. */
+	update: string | null = null;
 	readonly #errors: string[] = [];
 	readonly #listeners = new Set<() => void>();
 
@@ -260,6 +262,7 @@ export class Diagnostics {
 	}
 
 	snapshot(): RunnerDiagnostics & {
+		update?: string;
 		secrets?: SecretsDiagnostics;
 		lastDoctor?: DoctorReport;
 	} {
@@ -281,6 +284,7 @@ export class Diagnostics {
 			lastDecision: this.loop?.lastDecision ?? null,
 			checks: this.checks,
 			lastErrors: [...this.#errors],
+			...(this.update ? { update: this.update } : {}),
 			...(this.secrets ? { secrets: this.secrets } : {}),
 			...(this.lastDoctor ? { lastDoctor: this.lastDoctor } : {}),
 			...(this.readiness

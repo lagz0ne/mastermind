@@ -49,6 +49,11 @@ export type ReadinessFacts = {
 	routing: Pick<Routing, "environments" | "implicit">;
 	/** Git access per environment (access.ts); undefined: not checked yet. */
 	access?: AccessMap;
+	/**
+	 * Set while --auto-update drains the runner before it updates and
+	 * restarts (update.ts): no new work (mm-210.77).
+	 */
+	updating?: string | null;
 	/** The state before this evaluation (ready vs degraded). */
 	previous?: RunnerReadiness | null;
 	now?: () => Date;
@@ -62,6 +67,12 @@ export function evaluate(f: ReadinessFacts): RunnerReadiness {
 			check: "onboard",
 			problem: "onboarding has not finished on this machine",
 			fix: "mastermind-runner onboard",
+		});
+	if (f.updating)
+		failed.push({
+			check: "update",
+			problem: f.updating,
+			fix: "none needed: the runner restarts by itself when no task runs",
 		});
 	if (f.box && !f.box.ok)
 		failed.push({ check: "engine", problem: f.box.problem, fix: f.box.fix });

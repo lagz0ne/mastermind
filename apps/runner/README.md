@@ -22,10 +22,40 @@ curl -fsSL <mastermind url>/install.sh | sh \
 
 `install.sh` downloads `<url>/download/mastermind-runner?os=&arch=`, checks it against
 `<url>/download/mastermind-runner.sha256?os=&arch=`, and installs nothing on a mismatch.
-`MASTERMIND_RUNNER_DIR` changes the directory (default `~/.local/bin`). The runner reports
-its commit (`mastermind-runner --version`); `/people` marks a runner on another commit
-than the server as `old version`: run the install line again. The image build compiles
-the targets in `RUNNER_TARGETS` (build arg, default `all`; ~45 MiB gzipped each).
+`MASTERMIND_RUNNER_DIR` changes the directory (default `~/.local/bin`). The image build
+compiles the targets in `RUNNER_TARGETS` (build arg, default `all`; ~45 MiB gzipped each).
+
+## Update: the server's version
+
+The runner reports its commit (`mastermind-runner --version`). At start and every 5 minutes
+the running runner reads the server's version (`GET <url>/api/health`). When they differ, it
+says one line, once per server version:
+
+```
+warning: runner 2f22252 is older than the server ce20fc6: run mastermind-runner update
+```
+
+The same line is in `mastermind-runner status`, `doctor` (step a, a warning), on `/people`
+(`old version: run mastermind-runner update`) and in the operator's `debug state`.
+
+```bash
+mastermind-runner update --check   # only report
+mastermind-runner update           # replace this executable, then restart the runner
+```
+
+`update` uses the same files as `install.sh`: `<url>/download/mastermind-runner?os=&arch=` and
+its `.sha256`. It writes the new binary next to the executable, checks the sha256, runs
+`<new> --version`, then renames it over the old one (atomic: a crash leaves the old or the new
+binary). On any failure nothing is replaced. A runner run from source (`dev`) is not updated.
+Prior art: `bun upgrade`, `rustup self update`.
+
+**`start --auto-update`** (or `--auto-update --save`): when the server is at another version,
+the runner takes no new work (readiness `degraded`, check `update`), waits until no task runs,
+updates, and starts the new binary in the same process (same arguments). If the update fails,
+it keeps running and takes work again. This is how the GitHub Actions self-hosted runner
+updates. **It is off by default** because the runner runs on the user's own machine: a new
+binary should come in only when the owner allows it, and an update stops taking work for a
+while. Turn it on for a machine that only runs the runner.
 
 ## Onboarding: no work before the checks pass
 

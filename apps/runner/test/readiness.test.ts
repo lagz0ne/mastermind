@@ -75,6 +75,18 @@ const facts = (over: Partial<ReadinessFacts> = {}): ReadinessFacts => ({
 });
 
 describe("evaluate", () => {
+	test("auto-update draining: degraded, no environment ready (mm-210.77)", () => {
+		const r = evaluate(
+			facts({ secrets: secrets([]), updating: "updating to ce20fc6" }),
+		);
+		expect(r.state).toBe("degraded");
+		expect(r.readyEnvironments).toEqual([]);
+		expect(r.failedChecks[0]).toMatchObject({
+			check: "update",
+			problem: "updating to ce20fc6",
+		});
+		expect(evaluate(facts({ secrets: secrets([]) })).state).toBe("ready");
+	});
 	test("not onboarded: onboarding, nothing ready", () => {
 		const r = evaluate(facts({ onboarded: false }));
 		expect(r.state).toBe("onboarding");

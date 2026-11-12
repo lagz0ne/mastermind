@@ -14,6 +14,7 @@ import {
 	groupByAccount,
 	type LoginApproval,
 	outdated,
+	outdatedNotice,
 	type People,
 	RUNNER_BIN,
 	readinessOf,
@@ -348,9 +349,9 @@ function RunnerRow({
 				{outdated(r, serverVersion) && (
 					<span
 						className="font-normal text-[11px] text-signal"
-						title={`runner ${r.version ?? "unknown"}, server ${serverVersion}: install it again`}
+						title={outdatedNotice(r, serverVersion) ?? undefined}
 					>
-						old version
+						old version: run mastermind-runner update
 					</span>
 				)}
 				{ready.lines.map((l) => (

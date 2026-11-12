@@ -4,6 +4,10 @@
  * Bearer operator key).
  * The key is never printed.
  */
+import {
+	runnerVersionNotice,
+	shortVersion,
+} from "../../packages/core/src/runner-version.ts";
 
 export type DebugArgs =
 	| { what: "state"; json: boolean }
@@ -246,7 +250,9 @@ export function formatState(s: Any): string {
 				`${r.account}/${r.runner}`,
 				r.online ? "yes" : "NO",
 				ago(r.lastSeenAt, now),
-				r.version ?? "-",
+				r.version
+					? `${shortVersion(r.version)}${runnerVersionNotice(r.version, s.version) ? " OLD" : ""}`
+					: "-",
 				list(r.queues),
 				r.capacity == null ? "-" : String(r.capacity),
 				list(r.running),
@@ -261,6 +267,12 @@ export function formatState(s: Any): string {
 			]),
 		),
 	);
+	if (!isErr(s.runners))
+		for (const r of s.runners as Any[]) {
+			// The runner's own wording (mm-210.77).
+			const notice = runnerVersionNotice(r.version, s.version);
+			if (notice) out.push(`  ${r.account}/${r.runner}: ${notice}`);
+		}
 	if (!isErr(s.runners))
 		for (const r of s.runners as Any[])
 			for (const c of r.diagnostics?.readiness?.failedChecks ?? [])

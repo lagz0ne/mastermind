@@ -111,6 +111,11 @@ describe("debug cli", () => {
 		expect(text).toContain(
 			"duke/laptop not ready for api: missing secrets: GITHUB_TOKEN (fix: mastermind-runner secrets set GITHUB_TOKEN)",
 		);
+		// Runner v1, server abc: the runner's own update line (mm-210.77).
+		expect(text).toContain("v1 OLD");
+		expect(text).toContain(
+			"duke/laptop: runner v1 is older than the server abc: run mastermind-runner update",
+		);
 		expect(text).toContain("ERROR: timed out after 5000ms");
 		expect(text).toContain("unrouted (open, no queue): mm-1");
 		expect(text).toContain("main   duke");

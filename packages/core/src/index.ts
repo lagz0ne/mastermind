@@ -20,5 +20,6 @@ export * from "./dispatch.ts";
 export * from "./environment.ts";
 export * from "./files.ts";
 export * from "./people.ts";
+export * from "./runner-version.ts";
 export * from "./timeline.ts";
 export * from "./work.ts";

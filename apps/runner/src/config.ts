@@ -46,6 +46,11 @@ export type RunnerSettings = {
 	 * runner remotely (`debug doctor --deep`). Off by default.
 	 */
 	allowRemoteProbe?: boolean;
+	/**
+	 * `start`: when the server is at another version, take no new work, wait
+	 * until no task runs, update and restart (update.ts). Off by default.
+	 */
+	autoUpdate?: boolean;
 };
 
 export type RunnerConfig = {

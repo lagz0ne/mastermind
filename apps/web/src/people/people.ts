@@ -2,11 +2,12 @@
  * /people data: accounts, the live runner list, and the writes (approve a login, add a
  * runner, revoke) that go to /api/auth.
  */
-import type {
-	AccountsReply,
-	AccountView,
-	RunnersReply,
-	RunnerView,
+import {
+	type AccountsReply,
+	type AccountView,
+	type RunnersReply,
+	type RunnerView,
+	runnerVersionNotice,
 } from "@mastermind/core";
 import { useEffect, useState } from "react";
 import { send } from "../session/session.ts";
@@ -255,9 +256,22 @@ export function readinessOf(r: RunnerView): {
 	};
 }
 
-/** The runner reports a commit other than the server's: reinstall it. */
+/**
+ * A connected runner on another commit than the server's: the one notice
+ * (core runnerVersionNotice, mm-210.77); null: up to date, run from source,
+ * or no server version.
+ */
+export function outdatedNotice(
+	r: RunnerView,
+	serverVersion?: string,
+): string | null {
+	if (!r.runner || !serverVersion) return null;
+	return runnerVersionNotice(r.version ?? "unknown", serverVersion);
+}
+
+/** The runner reports a commit other than the server's: update it. */
 export function outdated(r: RunnerView, serverVersion?: string): boolean {
-	return Boolean(r.runner && serverVersion && r.version !== serverVersion);
+	return outdatedNotice(r, serverVersion) !== null;
 }
 
 /** What the approver sees after an approval, to spot a stranger's code. */

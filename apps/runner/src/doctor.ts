@@ -22,7 +22,7 @@
  */
 import { existsSync, statSync } from "node:fs";
 import { type ConnectOptions, connect, subjects } from "@mastermind/bus";
-import type { Dispatch } from "@mastermind/core";
+import { type Dispatch, runnerVersionNotice } from "@mastermind/core";
 import type { Box, BoxDriver } from "./box/driver.ts";
 import { BOX_LABEL, ENGINE_RUNTIME } from "./box/driver.ts";
 import { DEFAULT_BOX_IMAGE } from "./box/image.ts";
@@ -402,8 +402,9 @@ export async function runDoctor(
 		else if (server === input.version) st.ok(`server and runner ${server}`);
 		else
 			st.warn(
-				`runner ${input.version} differs from server ${server}`,
-				`update the runner: ${install}`,
+				runnerVersionNotice(input.version, server) ??
+					`runner ${input.version} differs from server ${server}`,
+				"mastermind-runner update",
 			);
 	});
 

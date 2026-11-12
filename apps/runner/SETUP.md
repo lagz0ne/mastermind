@@ -144,6 +144,11 @@ mastermind-runner status           # what the running runner does
 mastermind-runner doctor --deep    # test the whole path again
 ```
 
+After Mastermind is deployed again, the runner says
+`runner <old> is older than the server <new>: run mastermind-runner update` (within 5 minutes).
+Run `mastermind-runner update`, then start the runner again. With `start --auto-update` the
+runner does this by itself when no task runs (off by default: your machine, your choice).
+
 ## When something fails
 
 | You see | Do this |
@@ -155,6 +160,7 @@ mastermind-runner doctor --deep    # test the whole path again
 | `GitHub refused the code` | The code works once and for 1 hour. Run `onboard` again. |
 | `missing: NAME` (env test) | `mastermind-runner secrets set NAME` |
 | `no access` (env test) | Install the GitHub App on the repo, or give the token Contents: read. |
+| `runner ... is older than the server ...` | `mastermind-runner update`, then start the runner again. |
 
 ## Prior art
 

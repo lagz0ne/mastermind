@@ -19,12 +19,14 @@
  *   mastermind-runner status [--json]
  *   mastermind-runner doctor [--deep] [--json] [settings]
  *   mastermind-runner secrets [list|set NAME|unset NAME|check] [--json]
+ *   mastermind-runner update [--check]
  *   mastermind-runner --version
  *
  * Settings: --queue <q> (repeat), --capacity <n|unlimited>, --capability <c> (repeat),
  * --providers a,b, --workdir <dir>, --repo <url>=<dir> (repeat), --id <id>,
  * --provider <p>, --model <m>, --mode <m>, --assistant-provider <p>,
- * --allow-setup, --allow-remote-probe (the operator may run doctor --deep remotely), --paseo-host <host>, --routing <file>.
+ * --allow-setup, --allow-remote-probe (the operator may run doctor --deep remotely), --paseo-host <host>, --routing <file>,
+ * --auto-update (start: update and restart when idle; update.ts).
  * start: every task runs in a throwaway box (Docker API: DOCKER_HOST or the default socket;
  * --box-image <ref> or MASTERMIND_BOX_IMAGE for environments without an image);
  * --no-box runs agents on this machine instead, at the owner's risk.
@@ -122,6 +124,13 @@ import { Runner } from "./runner.ts";
 import { readSecretFromStdin, secretsCommand } from "./secrets/command.ts";
 import { type SecretsState, secretsState } from "./secrets/state.ts";
 import { SecretStore, secretsPath } from "./secrets/store.ts";
+import {
+	selfUpdate,
+	serverVersion,
+	UpdateError,
+	updateLine,
+	versionWatch,
+} from "./update.ts";
 
 /**
  * The Mastermind commit this runner was built from. The api build (apps/api/build.ts)
@@ -130,7 +139,14 @@ import { SecretStore, secretsPath } from "./secrets/store.ts";
 export const VERSION = process.env.MASTERMIND_RUNNER_VERSION || "dev";
 
 /** Exit codes. */
-export const EXIT = { ok: 0, error: 1, usage: 2, revoked: 3 } as const;
+/** restart: `start --auto-update` updated the binary; the caller starts it again. */
+export const EXIT = {
+	ok: 0,
+	error: 1,
+	usage: 2,
+	revoked: 3,
+	restart: 75,
+} as const;
 
 const OPTIONS = {
 	url: { type: "string" },
@@ -148,6 +164,8 @@ const OPTIONS = {
 	"assistant-provider": { type: "string" },
 	"allow-setup": { type: "boolean" },
 	"allow-remote-probe": { type: "boolean" },
+	"auto-update": { type: "boolean" },
+	check: { type: "boolean" },
 	"paseo-host": { type: "string" },
 	"no-box": { type: "boolean" },
 	"no-paseo-link": { type: "boolean" },
@@ -221,12 +239,17 @@ const USAGE = `usage:
   mastermind-runner secrets set <NAME>        value from stdin or a hidden prompt
   mastermind-runner secrets unset <NAME>
   mastermind-runner secrets check             exit 1 when a needed one is missing
+  mastermind-runner update [--check]
+      downloads the runner of the server's version (sha256 checked) and
+      replaces this executable; --check only reports
   mastermind-runner --version
 
 settings: --queue <q>... --capacity <n|unlimited> --capability <c>... --providers a,b
   --workdir <dir> --repo <url>=<dir>... --id <id> --provider <p> --model <m>
   --mode <m> --assistant-provider <p> --allow-setup --allow-remote-probe --paseo-host <host>
   --routing <file> (default: routing.json next to the config)
+  --auto-update (start: when the server is at another version, take no new work,
+    wait until no task runs, update and restart; off by default)
 env: MASTERMIND_URL, MASTERMIND_NATS_URL, MASTERMIND_RUNNER_CONFIG,
   MASTERMIND_RUNNER_ROUTING, MASTERMIND_RUNNER_SECRETS`;
 
@@ -263,6 +286,7 @@ export function applyFlags(
 		s.assistant = { ...s.assistant, provider: f["assistant-provider"] };
 	if (f["allow-setup"]) s.allowSetup = true;
 	if (f["allow-remote-probe"]) s.allowRemoteProbe = true;
+	if (f["auto-update"]) s.autoUpdate = true;
 	if (s.workdir && !isAbsolute(s.workdir))
 		throw new UsageError("workdir must be absolute");
 	return s;
@@ -383,6 +407,10 @@ type Io = {
 	ask?: (prompt: string, signal?: AbortSignal) => Promise<string>;
 	/** onboard: may it ask (default: stdin is a terminal)? */
 	interactive?: boolean;
+	/** update: the executable to replace (tests; default: process.execPath). */
+	exe?: string;
+	/** update: `<exe> --version` of the new binary (tests). */
+	runVersion?: (exe: string) => Promise<string>;
 };
 
 /** The secrets state of this runner: needed names from Mastermind, values looked up locally. */
@@ -476,6 +504,8 @@ export async function main(argv: string[], io: Io): Promise<number> {
 				return await cmdSecrets(path, rest, f, io);
 			case "env":
 				return await cmdEnv(path, rest, f, io);
+			case "update":
+				return await cmdUpdate(path, f, io);
 			default:
 				throw new UsageError(`unknown command ${cmd}`);
 		}
@@ -491,7 +521,8 @@ export async function main(argv: string[], io: Io): Promise<number> {
 		if (
 			error instanceof ConfigError ||
 			error instanceof EnrolError ||
-			error instanceof EnvInitError
+			error instanceof EnvInitError ||
+			error instanceof UpdateError
 		) {
 			io.err(error.message);
 			return EXIT.error;
@@ -509,6 +540,24 @@ async function readStatus(path: string): Promise<RunnerDiagnostics | null> {
 	} catch {
 		return null;
 	}
+}
+
+/** `update [--check]`: the runner of the server's version replaces this one (update.ts). */
+async function cmdUpdate(path: string, f: Flags, io: Io): Promise<number> {
+	const cfg = await loadConfig(path).catch(() => null);
+	const url = f.url ?? io.env.MASTERMIND_URL ?? cfg?.mastermindUrl;
+	if (!url)
+		throw new UsageError("update needs --url <mastermind url> (not enrolled)");
+	const r = await selfUpdate({
+		url,
+		version: VERSION,
+		check: f.check === true,
+		fetch: io.fetch,
+		...(io.exe ? { exe: io.exe } : {}),
+		...(io.runVersion ? { runVersion: io.runVersion } : {}),
+	});
+	io.out(updateLine(r));
+	return EXIT.ok;
 }
 
 /** The config and the last status the running runner wrote. */
@@ -564,6 +613,8 @@ async function cmdStatus(path: string, f: Flags, io: Io): Promise<number> {
 				.join(", ") || "-"
 		}`,
 	);
+	const update = (d as { update?: string }).update;
+	if (update) io.out(`warning: ${update}`);
 	const sec = (d as { secrets?: SecretsState["diagnostics"] }).secrets;
 	if (sec)
 		io.out(
@@ -1176,6 +1227,9 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 	// Readiness: the runner asks for work only when it is ready (readiness.ts).
 	let secrets: SecretsState | undefined;
 	let access: AccessMap | undefined;
+	/** Set while --auto-update drains before it restarts (update.ts). */
+	let updating: string | null = null;
+	let restart = false;
 	let publishNow = async () => {};
 	const reevaluate = () => {
 		const r = evaluate({
@@ -1184,6 +1238,7 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 			box: boxCheck,
 			secrets,
 			access,
+			updating,
 			settings,
 			routing,
 			previous: diag.readiness,
@@ -1365,8 +1420,46 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 			}
 			reevaluate();
 		};
-		void learnSecrets();
-		const secretsTimer = setInterval(() => void learnSecrets(), RECHECK_MS);
+		// The server's version: at start and every re-check; with
+		// --auto-update, update and restart when no task runs (mm-210.77).
+		const watch = versionWatch({
+			version: VERSION,
+			serverVersion: () => serverVersion(mastermindUrl, io.fetch),
+			autoUpdate: settings.autoUpdate === true,
+			idle: () => (runner?.inFlight().length ?? 0) === 0,
+			waitIdle: async (signal) => {
+				while (!signal?.aborted && (runner?.inFlight().length ?? 0) > 0)
+					await Bun.sleep(2_000);
+			},
+			update: () =>
+				selfUpdate({
+					url: mastermindUrl,
+					version: VERSION,
+					fetch: io.fetch,
+					...(io.exe ? { exe: io.exe } : {}),
+					...(io.runVersion ? { runVersion: io.runVersion } : {}),
+				}),
+			restart: () => {
+				restart = true;
+				stopping.abort();
+			},
+			onNotice: (n) => {
+				diag.update = n;
+				diag.changed();
+			},
+			onDraining: (why) => {
+				updating = why;
+				reevaluate();
+			},
+			log,
+			signal: stopping.signal,
+		});
+		const recheck = () => {
+			void learnSecrets();
+			void watch.tick();
+		};
+		recheck();
+		const secretsTimer = setInterval(recheck, RECHECK_MS);
 		stopping.signal.addEventListener("abort", () =>
 			clearInterval(secretsTimer),
 		);
@@ -1389,7 +1482,7 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 		await reporter.stop();
 		if (why === "stop") {
 			await nc.drain().catch(() => {});
-			return EXIT.ok;
+			return restart ? EXIT.restart : EXIT.ok;
 		}
 		// NATS refuses the credential also while the auth callout is down (a
 		// NATS restart): only Mastermind's own answer marks the runner revoked.
@@ -1419,5 +1512,15 @@ if (import.meta.main) {
 		err: (l) => console.error(l),
 		cwd: process.cwd(),
 	});
+	if (code === EXIT.restart) {
+		// --auto-update replaced this executable: run it in this process.
+		const exe = process.execPath;
+		console.error(`${stamp()} restarting: ${exe}`);
+		if (!process.execve) {
+			console.error("cannot restart here: start mastermind-runner again");
+			process.exit(EXIT.ok);
+		}
+		process.execve(exe, [exe, ...Bun.argv.slice(2)], process.env);
+	}
 	process.exit(code);
 }
