@@ -40,7 +40,11 @@ import { Duplex } from "node:stream";
 import { createHostClient } from "@getpaseo/client/node";
 import type { DockerEndpoint } from "./docker.ts";
 import { BOX_LABEL, type Box, type BoxDriver, type BoxSpec } from "./driver.ts";
-import type { AgentClient, TerminalClient } from "./paseo-control.ts";
+import type {
+	AgentClient,
+	FileClient,
+	TerminalClient,
+} from "./paseo-control.ts";
 import { BOX_ENV } from "./run.ts";
 
 /** Host label prefix and metadata keys of the hosts this runner registers. */
@@ -127,6 +131,7 @@ export type PaseoLinkOptions = {
 
 /** The persistent SDK connection to a box daemon. */
 export type BoxClient = AgentClient &
+	FileClient &
 	TerminalClient & {
 		fetchAgents(o?: object): Promise<unknown>;
 		close(): Promise<void>;

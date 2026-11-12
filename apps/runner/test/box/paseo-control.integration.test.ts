@@ -17,8 +17,11 @@ import { join } from "node:path";
 import { DockerDriver, dockerEndpoint } from "../../src/box/docker.ts";
 import { BOX_LABEL } from "../../src/box/driver.ts";
 import {
+	listFilesOverPaseo,
+	readFileOverPaseo,
 	runAgentOverPaseo,
 	runCommandOverPaseo,
+	writeFileOverPaseo,
 } from "../../src/box/paseo-control.ts";
 import {
 	dockerExecStream,
@@ -93,6 +96,53 @@ describe.skipIf(!host)("box control over Paseo on a real engine", () => {
 		const c = await paseoLinkOf(box)?.client();
 		if (!c) throw new Error("no link");
 		const tConnect = performance.now() - t0;
+
+		// Files (mm-210.75): input in with writeFile, output out with readFile.
+		const sha = (b: Uint8Array) =>
+			new Bun.CryptoHasher("sha256").update(b).digest("hex");
+		await box.exec(
+			[
+				"sh",
+				"-c",
+				"mkdir -p /workspace/.mastermind/in /workspace/.mastermind/out && head -c 52428800 /dev/urandom > /workspace/.mastermind/out/big.bin && ln -s /etc/passwd /workspace/.mastermind/out/link && chown -R paseo /workspace",
+			],
+			{ user: "root" },
+		);
+		const input = crypto.getRandomValues(new Uint8Array(200 * 1024));
+		let tf = performance.now();
+		expect(
+			await writeFileOverPaseo(c, "/workspace/.mastermind/in", "in.bin", input),
+		).toBe(true);
+		const tIn = performance.now() - tf;
+		const inSha = (
+			await box.exec(["sha256sum", "/workspace/.mastermind/in/in.bin"])
+		).stdout.split(" ")[0];
+		expect(inSha).toBe(sha(input));
+		const names = await listFilesOverPaseo(c, "/workspace/.mastermind/out");
+		expect(names).toEqual(["big.bin"]);
+		tf = performance.now();
+		const outF = await readFileOverPaseo(
+			c,
+			"/workspace/.mastermind/out/big.bin",
+		);
+		const outBytes = new Uint8Array(
+			await new Response(outF?.data).arrayBuffer(),
+		);
+		const tOut = performance.now() - tf;
+		const outSha =
+			(
+				await box.exec(["sha256sum", "/workspace/.mastermind/out/big.bin"])
+			).stdout.split(" ")[0] ?? "";
+		expect(sha(outBytes)).toBe(outSha);
+		tf = performance.now();
+		const viaDocker = await box.copyOutStream?.(
+			"/workspace/.mastermind/out/big.bin",
+		);
+		await new Response(viaDocker?.data).arrayBuffer();
+		const tDocker = performance.now() - tf;
+		console.log(
+			`box files: 200 KiB in (writeFile) ${Math.round(tIn)} ms; 50 MiB out readFile ${Math.round(tOut)} ms vs Docker copy ${Math.round(tDocker)} ms`,
+		);
 
 		// Setup/check commands through a terminal vs Docker exec (mm-210.74).
 		const cmds = [

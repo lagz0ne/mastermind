@@ -112,6 +112,12 @@ export type BoxRunOptions = {
 		cmd: string,
 		o: { cwd: string; signal: AbortSignal },
 	) => Promise<ExecResult | null>;
+	/**
+	 * The item's files through another path than the Docker copy (mm-210.75:
+	 * Paseo readFile/writeFile/listDirectory, paseo-control.ts). Each says
+	 * undefined/false when it cannot; then the Docker copy runs.
+	 */
+	boxFiles?: BoxFileHooks;
 	/** Waits for the agent host in the box; default `paseo status`. null: no wait. */
 	readyCommand?: string[] | null;
 	/** How long the agent host may take to be ready. Default 60 s. */
@@ -152,6 +158,24 @@ export type BoxRunResult = AgentResult & {
 	/** What left the box through the git host (output pr or branch). */
 	output?: OutputResult;
 };
+
+/** See {@link BoxRunOptions.boxFiles}. Errors count as "cannot". */
+export type BoxFileHooks = {
+	/** Regular file names in `dir`; undefined: cannot. */
+	list(box: Box, dir: string): Promise<string[] | undefined>;
+	/** The file at `path`; null: none; undefined: cannot. */
+	take(
+		box: Box,
+		path: string,
+	): Promise<
+		{ size: number; data: ReadableStream<Uint8Array> } | null | undefined
+	>;
+	/** Put a small file (at most {@link FILE_HOOK_MAX}) into `dir`; false: cannot. */
+	put(box: Box, dir: string, name: string, bytes: Uint8Array): Promise<boolean>;
+};
+
+/** Inputs up to this size go through {@link BoxFileHooks.put}. */
+export const FILE_HOOK_MAX = 1024 * 1024;
 
 /** Thrown when the box cannot be made or filled; the agent did not start. */
 export class BoxStepError extends LaunchError {
@@ -491,11 +515,13 @@ export async function runInBox(
 					"printf '.mastermind/\\n' >> .git/info/exclude",
 				]);
 			await must("files dirs", ["mkdir", "-p", INPUTS_DIR, OUTPUTS_DIR]);
-			const names = await filesIn(b, io, task.beadId).catch((error) => {
-				throw new BoxStepError(
-					`files in: ${error instanceof Error ? error.message : error}`,
-				);
-			});
+			const names = await filesIn(b, io, task.beadId, opts.boxFiles).catch(
+				(error) => {
+					throw new BoxStepError(
+						`files in: ${error instanceof Error ? error.message : error}`,
+					);
+				},
+			);
 			if (names.length)
 				step(
 					`files in: ${names.map((f) => `${f.name} (${formatBytes(f.size)})`).join(", ")} at ${INPUTS_DIR}`,
@@ -528,7 +554,7 @@ export async function runInBox(
 		const sendOut = async (patch: boolean) => {
 			if (!io) return;
 			try {
-				const sent = await filesOut(b, io, task.beadId, {
+				const sent = await filesOut(b, io, task.beadId, opts.boxFiles, {
 					log: `${r.stdout}${r.stderr}`,
 					patch: patch && base ? PATCH : null,
 				});
@@ -670,12 +696,28 @@ async function takeFromBox(
 }
 
 /** Copy the item's inputs into INPUTS_DIR; returns name and size per file. */
-async function filesIn(b: Box, io: BoxFiles, beadId: string) {
+async function filesIn(
+	b: Box,
+	io: BoxFiles,
+	beadId: string,
+	hooks?: BoxFileHooks,
+) {
 	const done: { name: string; size: number }[] = [];
 	for (const f of await io.stage(beadId)) {
 		const got = await io.read(beadId, f.name);
 		if (!got) throw new Error(`${f.name} is gone from the bucket`);
-		await putInBox(b, INPUTS_DIR, { name: f.name, ...got });
+		if (hooks && got.size <= FILE_HOOK_MAX) {
+			const bytes = new Uint8Array(await new Response(got.data).arrayBuffer());
+			const ok = await hooks
+				.put(b, INPUTS_DIR, f.name, bytes)
+				.catch(() => false);
+			if (!ok)
+				await putInBox(b, INPUTS_DIR, {
+					name: f.name,
+					size: bytes.length,
+					data: new Blob([bytes]).stream(),
+				});
+		} else await putInBox(b, INPUTS_DIR, { name: f.name, ...got });
 		done.push({ name: f.name, size: got.size });
 	}
 	return done;
@@ -690,11 +732,13 @@ async function filesOut(
 	b: Box,
 	io: BoxFiles,
 	beadId: string,
+	hooks: BoxFileHooks | undefined,
 	o: { log: string; patch: string | null },
 ): Promise<string[]> {
 	const sent: { name: string; size: number }[] = [];
 	const send = async (name: string, path: string) => {
-		const f = await takeFromBox(b, path);
+		const viaHook = await hooks?.take(b, path).catch(() => undefined);
+		const f = viaHook === undefined ? await takeFromBox(b, path) : viaHook;
 		if (!f || (name === "changes.patch" && f.size === 0)) {
 			await f?.data.cancel();
 			return;
@@ -703,17 +747,20 @@ async function filesOut(
 		sent.push({ name, size: f.size });
 	};
 	if (o.patch) await send("changes.patch", o.patch);
-	const listed = await b.exec(
-		[
-			"sh",
-			"-c",
-			// biome-ignore lint/suspicious/noTemplateCurlyInString: a shell script
-			'for f in "$1"/*; do [ -f "$f" ] && [ ! -L "$f" ] && printf \'%s\\n\' "${f##*/}"; done; true',
-			"list",
-			OUTPUTS_DIR,
-		],
-		{ workdir: "/" },
-	);
+	const hooked = await hooks?.list(b, OUTPUTS_DIR).catch(() => undefined);
+	const listed = hooked
+		? { stdout: hooked.join("\n") }
+		: await b.exec(
+				[
+					"sh",
+					"-c",
+					// biome-ignore lint/suspicious/noTemplateCurlyInString: a shell script
+					'for f in "$1"/*; do [ -f "$f" ] && [ ! -L "$f" ] && printf \'%s\\n\' "${f##*/}"; done; true',
+					"list",
+					OUTPUTS_DIR,
+				],
+				{ workdir: "/" },
+			);
 	const names = listed.stdout
 		.split("\n")
 		.filter((n) => n && safeFileName(n) === n && n !== "agent.log")

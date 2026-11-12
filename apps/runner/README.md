@@ -368,6 +368,11 @@ environment to the agent: the model credential stays in the proxy box.
   the runner reads the terminal until the marker and kills it. stdout and stderr come mixed, a
   line over 500 characters wraps, no stdin: the ticket gets the same output tail as before.
   Measured: 100-300 ms per command, against 0.7-8.9 s through Docker exec on rootless Podman.
+- The item's files go over the same connection: outputs are listed with `listDirectory`
+  (regular files only, no symlinks) and taken out with `readFile` (up to 64 MiB; larger ones
+  and the patch in /tmp through the Docker copy); inputs up to 1 MiB go in with `writeFile`
+  (mode 0644, not 0444), larger ones through the Docker copy. Measured: 200 KiB in 75 ms;
+  50 MiB out 280 ms with `readFile`, 226 ms with the Docker copy.
 - No connection to the box daemon: the ticket says so and the agent runs through exec.
 - Docker stays for the box lifecycle, the git clone and push with the credential, and big files.
 - Measured on rootless Podman, one agent step with Paseo's mock agent: 6.1 s over the

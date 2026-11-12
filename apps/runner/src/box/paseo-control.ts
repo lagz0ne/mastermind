@@ -322,3 +322,116 @@ export async function runCommandOverPaseo(
 		await c.killTerminal(id).catch(() => {});
 	}
 }
+
+/** The SDK calls the item's files use (a fake in tests). */
+export type FileClient = Pick<
+	DaemonClient,
+	| "readFile"
+	| "writeFile"
+	| "createFileEntry"
+	| "listDirectory"
+	| "getLastServerInfoMessage"
+>;
+
+/** Paseo's writeFile limit (server MAX_EDITABLE_FILE_BYTES). */
+export const PASEO_WRITE_MAX = 1024 * 1024;
+/** Larger outputs go through the Docker stream (readFile holds a file in memory). */
+export const PASEO_READ_MAX = 64 * 1024 * 1024;
+
+/** Box path -> path in the workspace; null when outside it (Paseo cannot reach it). */
+function inWorkspace(path: string): string | null {
+	const p = path.replace(/\/+$/, "");
+	return p.startsWith(`${BOX_WORKSPACE}/`) && !p.split("/").includes("..")
+		? p.slice(BOX_WORKSPACE.length + 1)
+		: null;
+}
+
+/**
+ * The regular files in `dir` (names), like the exec listing (mm-210.75).
+ * undefined: not through Paseo (outside the workspace).
+ */
+export async function listFilesOverPaseo(
+	c: FileClient,
+	dir: string,
+): Promise<string[] | undefined> {
+	const rel = inWorkspace(dir);
+	if (rel === null) return undefined;
+	try {
+		const d = await c.listDirectory(BOX_WORKSPACE, rel);
+		return (d.entries ?? [])
+			.filter((e: { kind?: string }) => e.kind === "file")
+			.map((e: { name: string }) => e.name);
+	} catch (error) {
+		if (/ENOENT/.test(String(error))) return [];
+		throw error;
+	}
+}
+
+/**
+ * One file out of the box with readFile. null: no such file. undefined: not
+ * through Paseo (outside the workspace, or over {@link PASEO_READ_MAX}).
+ */
+export async function readFileOverPaseo(
+	c: FileClient,
+	path: string,
+): Promise<
+	{ size: number; data: ReadableStream<Uint8Array> } | null | undefined
+> {
+	const rel = inWorkspace(path);
+	if (rel === null) return undefined;
+	try {
+		const f = await c.readFile(BOX_WORKSPACE, rel, undefined, PASEO_READ_MAX);
+		return { size: f.size, data: new Blob([f.bytes]).stream() };
+	} catch (error) {
+		const m = String(error);
+		if (/ENOENT/.test(m)) return null;
+		if (/too large/i.test(m)) return undefined;
+		throw error;
+	}
+}
+
+/**
+ * One file into directory `dir` of the box with writeFile (new file, then
+ * the bytes with the version it has; one retry on a conflict). false: not
+ * through Paseo (over {@link PASEO_WRITE_MAX}, outside the workspace, or a
+ * daemon without byte writes).
+ */
+export async function writeFileOverPaseo(
+	c: FileClient,
+	dir: string,
+	name: string,
+	bytes: Uint8Array,
+): Promise<boolean> {
+	const rel = inWorkspace(dir);
+	const features = c.getLastServerInfoMessage()?.features as
+		| Record<string, unknown>
+		| undefined;
+	if (
+		rel === null ||
+		bytes.length > PASEO_WRITE_MAX ||
+		features?.fileByteWrites !== true
+	)
+		return false;
+	const path = `${rel}/${name}`;
+	const made = await c.createFileEntry({
+		cwd: BOX_WORKSPACE,
+		parentPath: rel,
+		name,
+		kind: "file",
+	});
+	if (!made.success && !/exist/i.test(made.error ?? "")) return false;
+	const content = Buffer.from(bytes).toString("base64");
+	for (let i = 0; i < 2; i++) {
+		const cur = await c.readFile(BOX_WORKSPACE, path);
+		const w = await c.writeFile({
+			cwd: BOX_WORKSPACE,
+			path,
+			content,
+			contentEncoding: "base64",
+			expectedModifiedAt: cur.modifiedAt,
+			...(cur.revision ? { expectedRevision: cur.revision } : {}),
+		});
+		if ((w as { status?: string }).status === "written") return true;
+	}
+	return false;
+}

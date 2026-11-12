@@ -23,10 +23,16 @@ import { missingReason, resolveSecrets } from "../secrets/needs.ts";
 import { SecretStore, secretsPath } from "../secrets/store.ts";
 import { prepareBox } from "./devcontainer.ts";
 import { DockerDriver, dockerEndpoint } from "./docker.ts";
-import type { BoxDriver } from "./driver.ts";
+import type { Box, BoxDriver } from "./driver.ts";
 import type { BoxFiles } from "./files.ts";
 import { DEFAULT_BOX_IMAGE } from "./image.ts";
-import { runAgentOverPaseo, runCommandOverPaseo } from "./paseo-control.ts";
+import {
+	listFilesOverPaseo,
+	readFileOverPaseo,
+	runAgentOverPaseo,
+	runCommandOverPaseo,
+	writeFileOverPaseo,
+} from "./paseo-control.ts";
 import {
 	dockerExecStream,
 	linkDriver,
@@ -34,7 +40,13 @@ import {
 	paseoLinkOf,
 	sweepPaseoLinks,
 } from "./paseo-link.ts";
-import { type BoxRunOptions, runInBox, sweepBoxes, WORKSPACE } from "./run.ts";
+import {
+	type BoxFileHooks,
+	type BoxRunOptions,
+	runInBox,
+	sweepBoxes,
+	WORKSPACE,
+} from "./run.ts";
 
 export type BoxCheckDeps = {
 	/** Stored secret values; default: the runner's secret store. */
@@ -219,6 +231,32 @@ export function paseoRunCommand(): NonNullable<BoxRunOptions["runCommand"]> {
 }
 
 /**
+ * The item's files over the box's Paseo connection (mm-210.75): listing and
+ * outputs with listDirectory/readFile, inputs up to 1 MiB with writeFile.
+ * No connection, or a file Paseo cannot take: the Docker copy.
+ */
+export function paseoBoxFiles(): BoxFileHooks {
+	const client = async (box: Box) =>
+		(await paseoLinkOf(box)
+			?.client()
+			.catch(() => null)) ?? null;
+	return {
+		list: async (box, dir) => {
+			const c = await client(box);
+			return c ? listFilesOverPaseo(c, dir) : undefined;
+		},
+		take: async (box, path) => {
+			const c = await client(box);
+			return c ? readFileOverPaseo(c, path) : undefined;
+		},
+		put: async (box, dir, name, bytes) => {
+			const c = await client(box);
+			return c ? writeFileOverPaseo(c, dir, name, bytes) : false;
+		},
+	};
+}
+
+/**
  * The agent step over the box's Paseo connection. No connection: the ticket
  * says so and the agent runs through exec (null).
  */
@@ -275,7 +313,11 @@ export async function startBoxMode(i: BoxModeInput) {
 			...(i.onStep ? { onStep: i.onStep } : {}),
 			...(i.files ? { files: i.files } : {}),
 			...(control
-				? { runAgent: paseoRunAgent(i.onStep), runCommand: paseoRunCommand() }
+				? {
+						runAgent: paseoRunAgent(i.onStep),
+						runCommand: paseoRunCommand(),
+						boxFiles: paseoBoxFiles(),
+					}
 				: {}),
 			prepare: (task, step, signal) =>
 				prepareBox(

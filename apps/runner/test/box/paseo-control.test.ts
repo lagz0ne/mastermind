@@ -2,17 +2,30 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { FileInfo } from "@mastermind/bus";
+import { OUTPUTS_DIR } from "@mastermind/core";
+import type { BoxFiles } from "../../src/box/files.ts";
 import { paseoRunAgent } from "../../src/box/launcher.ts";
 import {
 	type AgentClient,
+	listFilesOverPaseo,
+	PASEO_READ_MAX,
+	PASEO_WRITE_MAX,
 	providerModel,
+	readFileOverPaseo,
 	readResult,
 	runAgentOverPaseo,
 	runCommandOverPaseo,
 	structuredPrompt,
+	writeFileOverPaseo,
 } from "../../src/box/paseo-control.ts";
 import { type BoxClient, linkDriver } from "../../src/box/paseo-link.ts";
-import { type BoxTask, runInBox } from "../../src/box/run.ts";
+import {
+	type BoxFileHooks,
+	type BoxTask,
+	FILE_HOOK_MAX,
+	runInBox,
+} from "../../src/box/run.ts";
 import { FakeDriver } from "./fake-driver.ts";
 
 const out = mkdtempSync(join(tmpdir(), "mm-pc-"));
@@ -465,5 +478,209 @@ describe("runInBox with runCommand (mm-210.74)", () => {
 		expect(d.execs.some((e) => e.cmd.join(" ") === "sh -c bun install")).toBe(
 			true,
 		);
+	});
+});
+
+/** A fake file client over an in-memory workspace (paths relative to /workspace). */
+function fakeFs(files: Record<string, Uint8Array> = {}, byteWrites = true) {
+	const calls: string[] = [];
+	const meta: Record<string, number> = {};
+	const c = {
+		getLastServerInfoMessage: () => ({
+			features: byteWrites ? { fileByteWrites: true } : {},
+		}),
+		listDirectory: async (_cwd: string, rel: string) => {
+			calls.push(`ls ${rel}`);
+			return {
+				entries: [
+					...Object.keys(files)
+						.filter((p) => p.startsWith(`${rel}/`))
+						.map((p) => ({ name: p.slice(rel.length + 1), kind: "file" })),
+					{ name: "sub", kind: "directory" },
+				],
+			};
+		},
+		readFile: async (_cwd: string, rel: string, _r?: string, max?: number) => {
+			calls.push(`read ${rel}`);
+			const f = files[rel];
+			if (!f) throw new Error(`ENOENT: no such file, open '/workspace/${rel}'`);
+			if (max !== undefined && f.length > max)
+				throw new Error("File is too large to display");
+			meta[rel] ??= 1;
+			return {
+				bytes: f,
+				size: f.length,
+				modifiedAt: `t${meta[rel]}`,
+				revision: `r${meta[rel]}`,
+			};
+		},
+		createFileEntry: async (i: { parentPath: string; name: string }) => {
+			const p = `${i.parentPath}/${i.name}`;
+			calls.push(`create ${p}`);
+			files[p] ??= new Uint8Array();
+			return { success: true, error: null };
+		},
+		writeFile: async (i: {
+			path: string;
+			content: string;
+			expectedModifiedAt: string;
+		}) => {
+			calls.push(`write ${i.path} at ${i.expectedModifiedAt}`);
+			files[i.path] = new Uint8Array(Buffer.from(i.content, "base64"));
+			meta[i.path] = (meta[i.path] ?? 1) + 1;
+			return { status: "written" };
+		},
+	};
+	return { c: c as unknown as BoxClient, calls, files };
+}
+
+describe("files over Paseo (mm-210.75)", () => {
+	const enc = (s: string) => new TextEncoder().encode(s);
+
+	test("list: regular files only; outside the workspace: not through Paseo", async () => {
+		const { c } = fakeFs({ ".mastermind/out/a.md": enc("a") });
+		expect(await listFilesOverPaseo(c, "/workspace/.mastermind/out")).toEqual([
+			"a.md",
+		]);
+		expect(await listFilesOverPaseo(c, "/tmp")).toBeUndefined();
+		expect(await listFilesOverPaseo(c, "/workspace/../etc")).toBeUndefined();
+	});
+
+	test("read: bytes; missing: null; too large or outside: undefined", async () => {
+		const { c } = fakeFs({
+			".mastermind/out/a.md": enc("hello"),
+			".mastermind/out/huge": new Uint8Array(PASEO_READ_MAX + 1),
+		});
+		const f = await readFileOverPaseo(c, "/workspace/.mastermind/out/a.md");
+		expect(f?.size).toBe(5);
+		expect(await new Response(f?.data).text()).toBe("hello");
+		expect(
+			await readFileOverPaseo(c, "/workspace/.mastermind/out/nope"),
+		).toBeNull();
+		expect(
+			await readFileOverPaseo(c, "/workspace/.mastermind/out/huge"),
+		).toBeUndefined();
+		expect(await readFileOverPaseo(c, "/tmp/x.patch")).toBeUndefined();
+	});
+
+	test("write: create, then the bytes at the version it has", async () => {
+		const { c, calls, files } = fakeFs();
+		expect(
+			await writeFileOverPaseo(
+				c,
+				"/workspace/.mastermind/in",
+				"d.csv",
+				enc("a,b"),
+			),
+		).toBe(true);
+		expect(calls).toEqual([
+			"create .mastermind/in/d.csv",
+			"read .mastermind/in/d.csv",
+			"write .mastermind/in/d.csv at t1",
+		]);
+		expect(new TextDecoder().decode(files[".mastermind/in/d.csv"])).toBe("a,b");
+	});
+
+	test("write: over 1 MiB, outside, or no byte writes: not through Paseo", async () => {
+		const big = new Uint8Array(PASEO_WRITE_MAX + 1);
+		expect(
+			await writeFileOverPaseo(fakeFs().c, "/workspace/in", "b", big),
+		).toBe(false);
+		expect(await writeFileOverPaseo(fakeFs().c, "/tmp", "b", enc("x"))).toBe(
+			false,
+		);
+		expect(
+			await writeFileOverPaseo(
+				fakeFs({}, false).c,
+				"/workspace/in",
+				"b",
+				enc("x"),
+			),
+		).toBe(false);
+	});
+});
+
+class FakeFiles implements BoxFiles {
+	written: { name: string; text: string }[] = [];
+	constructor(readonly inputs: Record<string, string>) {}
+	async stage() {
+		return Object.entries(this.inputs).map(([name, t]) => ({
+			name,
+			dir: "in" as const,
+			size: t.length,
+			sha256: "x",
+			mtime: "",
+		}));
+	}
+	async read(_b: string, name: string) {
+		const t = this.inputs[name];
+		return t === undefined
+			? null
+			: { size: t.length, data: new Blob([t]).stream() };
+	}
+	async write(_b: string, name: string, data: ReadableStream<Uint8Array>) {
+		this.written.push({ name, text: await new Response(data).text() });
+		return { name } as FileInfo;
+	}
+	async out() {
+		return [];
+	}
+}
+
+describe("runInBox with boxFiles (mm-210.75)", () => {
+	const big = "x".repeat(FILE_HOOK_MAX + 1);
+	const run = (d: FakeDriver, io: FakeFiles, hooks: BoxFileHooks) =>
+		runInBox(
+			task(),
+			{
+				driver: d,
+				defaultImage: "img",
+				outDir: out,
+				readyCommand: null,
+				files: () => io,
+				boxFiles: hooks,
+			},
+			never,
+		);
+
+	test("small inputs and outputs through the hooks; big inputs and /tmp through Docker", async () => {
+		const d = new FakeDriver();
+		const io = new FakeFiles({ "small.csv": "a,b", "big.bin": big });
+		const put: string[] = [];
+		const took: string[] = [];
+		await run(d, io, {
+			list: async () => ["report.md"],
+			take: async (_b, path) => {
+				took.push(path);
+				return path.startsWith("/workspace/")
+					? { size: 2, data: new Blob(["ok"]).stream() }
+					: undefined;
+			},
+			put: async (_b, _dir, name) => {
+				put.push(name);
+				return true;
+			},
+		});
+		expect(put).toEqual(["small.csv"]);
+		expect(d.copiedIn.flatMap((c) => c.names)).toContain("big.bin");
+		expect(d.copiedIn.flatMap((c) => c.names)).not.toContain("small.csv");
+		expect(took).toContain(`${OUTPUTS_DIR}/report.md`);
+		expect(io.written.find((w) => w.name === "report.md")?.text).toBe("ok");
+		// The outputs listing did not go through exec.
+		expect(d.execs.some((e) => e.cmd[3] === "list")).toBe(false);
+	});
+
+	test("hooks that cannot (or fail): everything through Docker", async () => {
+		const d = new FakeDriver();
+		const io = new FakeFiles({ "small.csv": "a,b" });
+		await run(d, io, {
+			list: async () => undefined,
+			take: async () => {
+				throw new Error("socket closed");
+			},
+			put: async () => false,
+		});
+		expect(d.copiedIn.flatMap((c) => c.names)).toContain("small.csv");
+		expect(d.execs.some((e) => e.cmd[3] === "list")).toBe(true);
 	});
 });
