@@ -175,8 +175,10 @@ names the decision, so the bead timeline shows where the work runs:
 Per dispatch, after routing: the checkout is the binding's `dir` (a dispatch without a
 bound environment uses `--workdir`, or `--repo <url>=<dir>` when it names a repo);
 `env.requires` (`os:`, `arch:`, `<tool>`, `<tool>>=<version>`, opaque `ns:x`) must be
-capabilities of the runner; the secrets must resolve (they go to the agent with
-`paseo run --env`, so they are visible in the local process list while the CLI runs);
+capabilities of the runner; the secrets must resolve (in a box they are box env and files
+under `/run/mastermind/secrets`; with `--no-box` the agent gets a private dir (0700) whose
+path is `$MASTERMIND_SECRETS_DIR`, with `$MASTERMIND_ENV_FILE` to source; values are never on
+a command line; a `--no-box` task with secrets for a Paseo host on another machine is refused);
 `env.setup` runs once per checkout and per setup (hash of the commands, kept in
 `setup-state.json` next to the config) and only when the binding has `allowSetup`
 (`--allow-setup` without a binding); `env.check` runs before every start. A failed step
