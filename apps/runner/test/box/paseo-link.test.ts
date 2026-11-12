@@ -178,6 +178,44 @@ describe("PaseoLink", () => {
 		await link.stop();
 	});
 
+	test("default readiness: HTTP server_info, then paseo ls through the relay", async () => {
+		// A fake box daemon: answers every request with server_info.
+		const daemon = net.createServer((c) => {
+			c.on("error", () => {});
+			c.once("data", () =>
+				c.end(
+					'HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{"status":"server_info"}',
+				),
+			);
+		});
+		await new Promise<void>((r) => daemon.listen(0, "127.0.0.1", () => r()));
+		const port = (daemon.address() as net.AddressInfo).port;
+		const calls: string[][] = [];
+		let wsUp = false;
+		const paseo: PaseoCall = async (args) => {
+			calls.push(args);
+			if (args[0] === "ls") {
+				const ok = wsUp;
+				wsUp = true; // the WebSocket answers one round later than HTTP
+				return { code: ok ? 0 : 1, stdout: "[]", stderr: "" };
+			}
+			return fakePaseo().call(args);
+		};
+		const o = opts(paseo, {
+			open: async () => net.connect(port, "127.0.0.1"),
+		});
+		delete o.ready;
+		const link = new PaseoLink(o, fakeBox(), "mm-7", "e1");
+		await link.start();
+		expect(calls.map((c) => (c[0] === "ls" ? `ls ${c[2]}` : c[1]))).toEqual([
+			`ls unix://${link.socketPath}`,
+			`ls unix://${link.socketPath}`,
+			"add",
+		]);
+		await link.stop();
+		await new Promise<void>((r) => daemon.close(() => r()));
+	}, 15_000);
+
 	test("stopped before the daemon is up: no host at all", async () => {
 		const p = fakePaseo();
 		const link = new PaseoLink(

@@ -317,15 +317,19 @@ While a task runs, the box's Paseo daemon is a connected host of this machine's 
 `mastermind:<item>` to see the agent live and to steer it. The ticket shows
 `watch in Paseo: host mastermind:<item>`.
 
-- The runner adds the host when the box daemon answers (`paseo host add`, metadata
-  `mastermind.item`, `mastermind.runner`, `mastermind.execution`), and removes it
-  before it deletes the box (`paseo host rm`).
+- The runner adds the host when the box daemon answers a WebSocket call
+  (`paseo ls` through the socket; HTTP alone answers 1-4 s too early), with
+  `paseo host add` (metadata `mastermind.item`, `mastermind.runner`,
+  `mastermind.execution`). It removes the host before it deletes the box (`paseo host rm`).
+- The host is for your view (the agents of the box: list, create, prompt, status).
+  The runner itself does not control the box through it.
 - At start, the runner removes the hosts that an earlier run of this runner left
   (for example after a crash). `paseo host ls` shows them.
 - Transport: a unix socket in `~/.config/mastermind/paseo-link/` (directory 0700,
   socket 0600). The runner relays it over a Docker exec stream to the box daemon at
-  `127.0.0.1:6767` inside the box. No password, no published port. It also works on
-  the internal network of an allow list and with Docker Desktop on macOS.
+  `127.0.0.1:6767` inside the box. No password, no published port: Paseo's
+  `hosts.json` keeps only the socket path, and no secret goes into argv. It also
+  works on the internal network of an allow list and with Docker Desktop on macOS.
 - On by default with Docker or Podman. Off: `--no-paseo-link` or
   `MASTERMIND_PASEO_LINK=0`. If this machine's Paseo does not answer at start,
   the runner logs it and runs without the link. The task does not depend on the link.

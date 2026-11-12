@@ -101,7 +101,7 @@ export type PaseoLinkOptions = {
 	/** A byte stream to the bridge in a box (default: Docker exec, {@link dockerExecStream}). */
 	open: OpenStream;
 	paseo?: PaseoCall;
-	/** Is the box daemon up? Default: {@link daemonAnswers}. */
+	/** Is the box daemon up? Default: HTTP {@link daemonAnswers}, then `paseo ls` through the relay. */
 	ready?: (box: Box) => Promise<boolean>;
 	/** How long the box daemon may take to start. Default 120 s. */
 	readyTimeoutMs?: number;
@@ -192,16 +192,6 @@ export class PaseoLink {
 	}
 
 	async #start(): Promise<void> {
-		const ready =
-			this.o.ready ?? ((box: Box) => daemonAnswers(this.o.open, box));
-		const until = Date.now() + (this.o.readyTimeoutMs ?? 120_000);
-		while (!(await ready(this.box).catch(() => false))) {
-			if (this.#stopped) return;
-			if (Date.now() > until)
-				throw new Error("the box daemon did not start; no Paseo host");
-			await Bun.sleep(2000);
-		}
-		if (this.#stopped) return;
 		await mkdir(this.o.dir, { recursive: true, mode: 0o700 });
 		await chmod(this.o.dir, 0o700);
 		await rm(this.socketPath, { force: true });
@@ -212,6 +202,14 @@ export class PaseoLink {
 			server.listen(this.socketPath, () => resolve());
 		});
 		await chmod(this.socketPath, 0o600);
+		const ready = this.o.ready ?? ((box: Box) => this.#answers(box));
+		const until = Date.now() + (this.o.readyTimeoutMs ?? 120_000);
+		while (!(await ready(this.box).catch(() => false))) {
+			if (this.#stopped) return;
+			if (Date.now() > until)
+				throw new Error("the box daemon did not start; no Paseo host");
+			await Bun.sleep(2000);
+		}
 		if (this.#stopped) return;
 		const r = await (this.o.paseo ?? paseoCall)([
 			"host",
@@ -241,6 +239,22 @@ export class PaseoLink {
 			this.item,
 			`watch in Paseo: host ${this.label} (connected to this runner's Paseo)`,
 		);
+	}
+
+	/**
+	 * Default readiness: the box daemon answers HTTP (cheap) AND a WebSocket
+	 * call through this relay (`paseo ls`): the WebSocket answers 503 for 1-4 s
+	 * after HTTP is up (mm-210.71).
+	 */
+	async #answers(box: Box): Promise<boolean> {
+		if (!(await daemonAnswers(this.o.open, box))) return false;
+		const r = await (this.o.paseo ?? paseoCall)([
+			"ls",
+			"--host",
+			`unix://${this.socketPath}`,
+			"--json",
+		]);
+		return r.code === 0;
 	}
 
 	#relay(client: net.Socket): void {
