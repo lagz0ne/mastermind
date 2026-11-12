@@ -281,6 +281,91 @@ describe("runInBox", () => {
 		expect(res).toMatchObject({ status: "failed", summary: "no" });
 		expect(cmdLines(d).some((l) => l.startsWith("paseo"))).toBe(false);
 	});
+
+	test("output pr: credential before the clone, push and pull request after the agent, line in the result", async () => {
+		const d = new FakeDriver();
+		d.handler = (cmd) => {
+			if (cmd[0] !== "git") return undefined;
+			if (cmd[1] === "rev-list") return { code: 0, stdout: "2\n", stderr: "" };
+			if (cmd[1] === "diff" && cmd[2] === "--name-only")
+				return { code: 0, stdout: "a\nb\n", stderr: "" };
+			return undefined;
+		};
+		const calls: string[] = [];
+		const fetch = (async (url: string, init: RequestInit = {}) => {
+			calls.push(`${init.method} ${url}`);
+			return init.method === "POST"
+				? Response.json({ html_url: "https://github.com/acme/web/pull/3" })
+				: Response.json([]);
+		}) as unknown as typeof globalThis.fetch;
+		const base = task();
+		const t = task({
+			env: { ...base.env, output: { kind: "pr" } },
+			secrets: { ...base.secrets, GITHUB_TOKEN: "ghp_value" },
+		});
+		const steps: string[] = [];
+		const res = await runInBox(
+			t,
+			{ ...opts(d), fetch, onStep: (l) => steps.push(l) },
+			never,
+		);
+		expect(res.status).toBe("done");
+		expect(res.output?.prUrl).toBe("https://github.com/acme/web/pull/3");
+		expect(steps).toContain(res.output?.line ?? "?");
+		const lines = cmdLines(d);
+		const at = (s: string) => lines.findIndex((l) => l.includes(s));
+		expect(at("credential.helper")).toBeGreaterThan(-1);
+		expect(at("credential.helper")).toBeLessThan(at("git fetch") + 1);
+		expect(at("paseo run")).toBeLessThan(at("git push"));
+		expect(lines.at(at("git push"))).toBe(
+			"git push -q --force origin HEAD:refs/heads/mm/mm-1",
+		);
+		for (const l of lines) expect(l).not.toContain("ghp_value");
+		expect(calls).toEqual([
+			"GET https://api.github.com/repos/acme/web/pulls?state=open&head=acme%3Amm%2Fmm-1",
+			"POST https://api.github.com/repos/acme/web/pulls",
+		]);
+		expect(d.boxes.size).toBe(0);
+	});
+
+	test("a failing push fails the task with the reason; the box is deleted", async () => {
+		const d = new FakeDriver();
+		d.handler = (cmd) => {
+			if (cmd[0] !== "git") return undefined;
+			if (cmd[1] === "rev-list") return { code: 0, stdout: "1\n", stderr: "" };
+			if (cmd[1] === "diff" && cmd[2] === "--name-only")
+				return { code: 0, stdout: "a\n", stderr: "" };
+			if (cmd[1] === "push")
+				return { code: 128, stdout: "", stderr: "Permission denied" };
+			return undefined;
+		};
+		const base = task();
+		const t = task({ env: { ...base.env, output: { kind: "branch" } } });
+		const res = await runInBox(t, opts(d), never);
+		expect(res.status).toBe("failed");
+		expect(res.summary).toContain("did it");
+		expect(res.summary).toContain(
+			"output failed: git push mm/mm-1: exited 128: Permission denied",
+		);
+		expect(d.boxes.size).toBe(0);
+	});
+
+	test("a failed agent pushes nothing", async () => {
+		const d = new FakeDriver();
+		d.handler = (cmd) =>
+			cmd[1] === "run"
+				? {
+						code: 0,
+						stdout: JSON.stringify({ status: "failed", summary: "no" }),
+						stderr: "",
+					}
+				: undefined;
+		const base = task();
+		const t = task({ env: { ...base.env, output: { kind: "pr" } } });
+		const res = await runInBox(t, opts(d), never);
+		expect(res.output).toBeUndefined();
+		expect(cmdLines(d).some((l) => l.startsWith("git push"))).toBe(false);
+	});
 });
 
 describe("paseoRun", () => {

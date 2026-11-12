@@ -88,9 +88,10 @@ export class BoxLauncher implements AgentLauncher {
 			},
 			signal,
 		);
-		const summary = res.patch
-			? `${res.summary}\n\n(patch of the work on the runner: ${res.patch})`
-			: res.summary;
+		let summary = res.summary;
+		if (res.output) summary += `\n\n${res.output.line}`;
+		if (res.patch)
+			summary += `\n\n(patch of the work on the runner: ${res.patch})`;
 		return { status: res.status, summary };
 	}
 }

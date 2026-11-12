@@ -5,7 +5,8 @@
  *   -> clone repo at ref into /workspace -> secrets as env and files
  *   -> setup, then check (fail: the reason and the output tail)
  *   -> wait for the Paseo daemon in the box -> `paseo run` inside, mode bypass
- *   -> take out a patch of the work -> DELETE the box (on every exit path)
+ *   -> take out a patch of the work -> push a branch / open a pull request
+ *   (output.ts, when the environment asks) -> DELETE the box (on every exit path)
  *
  * The agent runs inside the box with no prompts: the box is the limit.
  * Secret values go only into the box: never into argv, logs or reports.
@@ -28,6 +29,11 @@ import {
 	BoxError,
 	type ExecResult,
 } from "./driver.ts";
+import {
+	deliverOutput,
+	gitCredentialScript,
+	type OutputResult,
+} from "./output.ts";
 import { untar } from "./tar.ts";
 
 export const WORKSPACE = "/workspace";
@@ -72,11 +78,17 @@ export type BoxRunOptions = {
 	/** Progress lines for the ticket (no secret values). */
 	onStep?: (line: string) => void;
 	log?: (line: string) => void;
+	/** For the GitHub API (output pr); default: global fetch. */
+	fetch?: typeof fetch;
+	/** GitHub REST API base; default https://api.github.com. */
+	githubApi?: string;
 };
 
 export type BoxRunResult = AgentResult & {
 	/** Path of the patch on the runner machine, when there was a change. */
 	patch?: string;
+	/** What left the box through the git host (output pr or branch). */
+	output?: OutputResult;
 };
 
 /** Thrown when the box cannot be made or filled; the agent did not start. */
@@ -252,7 +264,16 @@ export async function runInBox(
 			await must(`clone ${env.repo} at ${env.ref}`, [
 				"sh",
 				"-c",
-				'git init -q . && git remote add origin "$1" && git fetch -q --depth 1 origin "$2" && git checkout -q FETCH_HEAD',
+				[
+					"git init -q .",
+					// The credential (token file or deploy key) for clone and push.
+					gitCredentialScript(task.secrets, SECRETS_DIR),
+					'git remote add origin "$1"',
+					'git fetch -q --depth 1 origin "$2"',
+					"git checkout -q FETCH_HEAD",
+				]
+					.filter(Boolean)
+					.join(" && "),
 				"clone",
 				env.repo,
 				env.ref || "HEAD",
@@ -312,6 +333,34 @@ export async function runInBox(
 					step(`patch taken out: ${file.data.length} bytes`);
 				}
 			} else log(`${task.beadId}: box: no patch: ${tail(p, 300)}`);
+		}
+
+		// Code leaves through the git host: branch mm/<item>, pull request.
+		if (base && result.status === "done") {
+			try {
+				const out = await deliverOutput({
+					exec: (cmd) => run(cmd),
+					itemId: task.beadId,
+					title: task.title,
+					output: env.output,
+					repo: env.repo,
+					ref: env.ref,
+					baseSha: base,
+					secrets: task.secrets,
+					...(opts.fetch ? { fetch: opts.fetch } : {}),
+					...(opts.githubApi ? { githubApi: opts.githubApi } : {}),
+				});
+				if (out) {
+					result.output = out;
+					step(out.line);
+				}
+			} catch (error) {
+				if (all.aborted) throw stopped();
+				const why = error instanceof Error ? error.message : String(error);
+				step(`output failed: ${why}`);
+				result.status = "failed";
+				result.summary = `${result.summary}\n\noutput failed: ${why}`;
+			}
 		}
 		return result;
 	} catch (error) {

@@ -95,6 +95,26 @@ mastermind-runner secrets check            # exit 1 when a needed secret is miss
 - `doctor` step f fails for each missing secret, with the fix line. `status` and the
   operator debug view (`runners[].diagnostics.secrets`) show the needed and missing names.
 
+## Box output: branch and pull request
+
+The environment's `output` says how code leaves the box. After the agent says `done`:
+
+| output | What the runner does in the box |
+|---|---|
+| `none` | Nothing. The patch stays on the runner (`results/<execution>.patch`). |
+| `branch` | Commit what the agent left (message: the item title), then `git push --force origin HEAD:mm/<item>`. |
+| `pr` | As `branch`, then on GitHub: open a pull request into `output.base` (default: the ref; a commit ref: the repo's default branch), or find the open one of an earlier try. Other git hosts: push only, and the ticket says so. |
+
+- No change against the checked-out commit: `no changes: nothing pushed`.
+- A retry starts again from the base and force-pushes the same branch: the pull request is updated.
+- The git credential is one of the environment's secrets: `GIT_TOKEN`, `GITHUB_TOKEN` or
+  `GH_TOKEN` (the first one given; also used for the GitHub API), or `GIT_SSH_KEY` (a deploy
+  key). It is set on the checkout before the clone, so a private repo clones with it too. git
+  reads the token file only when it asks: the value is never in a URL, argv or `.git/config`.
+- The line (`pull request opened: <url> (...)`) is added to the completion summary: the ticket
+  shows it. A failed push or pull request fails the task with the reason. Closing the item
+  merges nothing.
+
 ## Routing: which Paseo runs a dispatch
 
 The user who runs the runner decides where work runs. Put `routing.json` next to the
