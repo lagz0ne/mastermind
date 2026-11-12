@@ -3,9 +3,16 @@ import { rmSync } from "node:fs";
 import { NO_BOX_REPORT } from "../src/box/run.ts";
 import type { CheckResult } from "../src/check.ts";
 import { defaultSettings, type RunnerSettings } from "../src/config.ts";
+import type { AgentLauncher } from "../src/launcher.ts";
 import { PaseoLauncher } from "../src/launcher.ts";
 import { parseRouting, type Routing } from "../src/routing.ts";
-import { agentPrompt, executionId, Runner } from "../src/runner.ts";
+import {
+	agentPrompt,
+	executionId,
+	MAX_PROGRESS,
+	Runner,
+	scrub,
+} from "../src/runner.ts";
 import {
 	dispatch,
 	FAKE_PASEO,
@@ -140,6 +147,84 @@ describe("Runner", () => {
 		await until(() => mm.verbs("complete").length === 1);
 		expect(mm.verbs("report")[0]?.text).toBe(NO_BOX_REPORT);
 		expect(NO_BOX_REPORT).toBe("ran WITHOUT a box (owner's risk)");
+	});
+
+	test("box progress lines reach the ticket in order, before the result, without secret values (mm-210.57)", async () => {
+		const mm = new FakeMastermind();
+		mm.push(dispatch("mm-1"));
+		const steps: AgentLauncher = {
+			async run(spec) {
+				runner?.progress(spec.beadId, "box mm-box-1 ready in 1.2 s");
+				runner?.progress(
+					spec.beadId,
+					"checked out https://x:tok@github.com/o/r at main (abc)",
+				);
+				runner?.progress(spec.beadId, "setup printed s3cr3t-value");
+				runner?.progress("mm-other", "not this bead");
+				runner?.progress(spec.beadId, "box mm-box-1 deleted");
+				return { status: "done", summary: "used s3cr3t-value" };
+			},
+		};
+		runner = new Runner({
+			client: mm,
+			launcher: steps,
+			settings: settings(),
+			check: async () => ({
+				ok: true,
+				cwd: "/work",
+				env: { TOKEN: "s3cr3t-value" },
+			}),
+			idleMs: 10,
+			heartbeatMs: 20,
+		});
+		runner.start();
+		await until(() => mm.verbs("complete").length === 1);
+		const verbs = mm.calls.map((c) => c.verb);
+		expect(verbs.lastIndexOf("report")).toBeLessThan(verbs.indexOf("complete"));
+		expect(mm.verbs("report").map((c) => c.text)).toEqual([
+			"target default on local, provider claude, mode auto (runner laptop, rule 1)",
+			"box mm-box-1 ready in 1.2 s",
+			"checked out https://***@github.com/o/r at main (abc)",
+			"setup printed ***",
+			"box mm-box-1 deleted",
+		]);
+		expect(mm.verbs("complete")[0]?.text).toBe("used ***");
+	});
+
+	test("progress lines are capped per execution", async () => {
+		const mm = new FakeMastermind();
+		mm.push(dispatch("mm-1"));
+		const logs: string[] = [];
+		runner = new Runner({
+			client: mm,
+			launcher: {
+				async run(spec) {
+					for (let i = 0; i < MAX_PROGRESS + 5; i++)
+						runner?.progress(spec.beadId, `line ${i}`);
+					return { status: "done", summary: "ok" };
+				},
+			},
+			settings: settings(),
+			check: pass,
+			log: (l) => logs.push(l),
+			idleMs: 10,
+			heartbeatMs: 20,
+		});
+		runner.start();
+		await until(() => mm.verbs("complete").length === 1);
+		// The routing line plus MAX_PROGRESS lines.
+		expect(mm.verbs("report")).toHaveLength(MAX_PROGRESS + 1);
+		expect(
+			logs.filter((l) => l.includes("progress lines go only")),
+		).toHaveLength(1);
+	});
+
+	test("scrub: secret values and URL credentials", () => {
+		expect(scrub("git@x and ssh://u:p@h/r", ["abc"])).toBe(
+			"git@x and ssh://***@h/r",
+		);
+		expect(scrub("a abcdef b abcd", ["abcd", "abcdef"])).toBe("a *** b ***");
+		expect(scrub("short ab", ["ab"])).toBe("short ab");
 	});
 
 	test("failed: releases the bead with the agent's reason", async () => {

@@ -142,7 +142,24 @@ type Execution = {
 	done: Promise<void>;
 	startedAt: string;
 	target: string | null;
+	/** Progress reports of this execution, in order (see {@link Runner.progress}). */
+	reports: Promise<void>;
+	/** Progress lines taken so far. */
+	progress: number;
+	/** Secret values of this execution: never reported. */
+	secrets: string[];
 };
+
+/** Most progress lines one execution reports to Mastermind; the rest go to the log. */
+export const MAX_PROGRESS = 20;
+
+/** A line without secret values and without credentials in URLs. */
+export function scrub(line: string, secrets: readonly string[] = []): string {
+	let out = line.replace(/([a-z][a-z0-9+.-]*:\/\/)[^/@\s]+@/gi, "$1***@");
+	for (const v of [...secrets].sort((a, b) => b.length - a.length))
+		if (v.length >= 4) out = out.split(v).join("***");
+	return out;
+}
 
 /** Read at call time (the heartbeat sets `why` concurrently). */
 const lost = (e: Execution) => e.why === "lost";
@@ -186,6 +203,23 @@ export class Runner {
 			startedAt: e.startedAt,
 			paseoAgentId: null,
 		}));
+	}
+
+	/**
+	 * A progress line of a running agent (box made, checkout, deleted) on its
+	 * ticket. Reported in order, at most {@link MAX_PROGRESS} per execution,
+	 * without secret values; the result waits until they are sent.
+	 */
+	progress(beadId: string, line: string): void {
+		const e = this.#running.get(beadId);
+		if (!e || lost(e)) return;
+		if (e.progress++ >= MAX_PROGRESS) {
+			if (e.progress === MAX_PROGRESS + 1)
+				this.#log(`${beadId}: more progress lines go only to this log`);
+			return;
+		}
+		const text = scrub(line, e.secrets);
+		e.reports = e.reports.then(() => this.#safe(e.dispatch, "report", text));
 	}
 
 	#changed(): void {
@@ -280,6 +314,9 @@ export class Runner {
 			done: Promise.resolve(),
 			startedAt: new Date().toISOString(),
 			target: null,
+			reports: Promise.resolve(),
+			progress: 0,
+			secrets: [],
 		};
 		this.#running.set(dispatch.bead.id, exec);
 		this.#changed();
@@ -330,6 +367,7 @@ export class Runner {
 				await this.#safe(d, "release", check.reason, true);
 				return;
 			}
+			exec.secrets = Object.values(check.env);
 			target = this.#targetSlots(decision.target);
 			if (target) {
 				await target.acquire(exec.abort.signal);
@@ -365,6 +403,8 @@ export class Runner {
 					summary: `agent did not finish: ${error instanceof Error ? error.message : error}`,
 				};
 			}
+			await exec.reports;
+			result.summary = scrub(result.summary, exec.secrets);
 			if (lost(exec)) {
 				this.#log(`${id}: lease lost; result dropped`);
 				return;
