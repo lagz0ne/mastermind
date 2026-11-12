@@ -1,0 +1,17 @@
+diff --git a/dist/esm/router.js b/dist/esm/router.js
+index a31886020d1dfff3c10ee27fea6ae781e6211f9a..346ddeb6c3506641ec3413e072c433bc766eaefb 100644
+--- a/dist/esm/router.js
++++ b/dist/esm/router.js
+@@ -835,7 +835,11 @@ async function documentNavigation(router, href, { replace, ignoreBlocker }) {
+ * dedicated to HMR.
+ */
+ if (process.env.NODE_ENV !== "production") {
+-	RouterCore.prototype._replaceRouteChunk = replaceRouteChunk;
++	// Patched (mastermind mm-6q7): router.js and load-client.js import each other; Bun's dev
++	// bundler (HMR) runs this before load-client.js is bound. Look the function up on call.
++	RouterCore.prototype._replaceRouteChunk = function(route, lazyFn) {
++		return replaceRouteChunk(route, lazyFn);
++	};
+ 	RouterCore.prototype._refreshRoute = async function() {
+ 		this._serverResult = void 0;
+ 		this.updateLatestLocation();

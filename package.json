@@ -23,5 +23,8 @@
 		"turbo": "^2.11.10",
 		"typescript": "^7.0.2"
 	},
-	"packageManager": "bun@1.4.4"
+	"packageManager": "bun@1.4.4",
+	"patchedDependencies": {
+		"@tanstack/router-core@1.171.39": "patches/@tanstack%2Frouter-core@1.171.39.patch"
+	}
 }
