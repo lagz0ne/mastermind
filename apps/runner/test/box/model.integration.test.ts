@@ -130,7 +130,6 @@ describe.skipIf(!on)("model credential outside the box", () => {
 						ref: "master",
 						requires: [],
 						image: "",
-						provider: "claude",
 						secrets: ["CLAUDE_CODE_OAUTH_TOKEN"],
 						limits: { cpu: 2, memoryMb: 2048, timeoutMin: 10 },
 						network,

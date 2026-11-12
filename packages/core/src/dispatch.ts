@@ -109,7 +109,10 @@ export function directQueue(address: string): string {
 	return toLabel(address);
 }
 
-/** What the runner must prepare before it starts the agent. */
+/**
+ * What the runner must prepare before it starts the agent. No agent settings
+ * (provider, model, mode): the runner decides them with Paseo (mm-210.84).
+ */
 export type DispatchEnv = {
 	/**
 	 * The environment's name. Absent only for beads that still carry the old
@@ -120,11 +123,6 @@ export type DispatchEnv = {
 	repo: string;
 	/** Branch, tag or commit to check out. */
 	ref: string;
-	/**
-	 * @deprecated Never set (mm-210.84): the runner picks the agent. Read only
-	 * by runner code that still has a fallback; removed when that code is.
-	 */
-	provider?: string;
 	/** Capabilities the runner must have (tools, CLIs, platforms). */
 	requires: string[];
 	/** Shell commands to run once in the checkout before the agent starts. */
@@ -133,8 +131,6 @@ export type DispatchEnv = {
 	check?: string[];
 	/** Names of secrets the runner must supply. Never the values. */
 	secrets?: string[];
-	/** @deprecated Never set (mm-210.84); see {@link DispatchEnv.provider}. */
-	agent?: { provider?: string; mode?: string };
 	/** Text the environment adds to every prompt. */
 	instructions?: string;
 	// --- the box recipe (named environments; absent for old label beads)
