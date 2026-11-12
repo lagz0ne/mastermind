@@ -2,6 +2,9 @@
  * How the runner starts an agent and gets its result. The default is Paseo
  * (`paseo run`); tests and other agent hosts plug in their own launcher.
  */
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { DispatchEnv } from "@mastermind/core";
 import type { AgentSettings } from "./config.ts";
 
@@ -96,6 +99,69 @@ export function parseResult(stdout: string): AgentResult {
 	return { status: r.status, summary: r.summary };
 }
 
+/** Env vars that tell a `--no-box` agent where its secrets are (paths only). */
+export const SECRETS_ENV = {
+	dir: "MASTERMIND_SECRETS_DIR",
+	file: "MASTERMIND_ENV_FILE",
+} as const;
+
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * `paseo run` has no env file option, and `--env K=V` puts the value on argv
+ * (visible in `ps`). So a `--no-box` agent gets its secrets as files in a
+ * private directory (0700, files 0600): `<dir>/<NAME>` holds one value and
+ * `<dir>/env` exports them all for a shell. Only the two paths go on argv.
+ * The caller deletes the directory when the agent ends.
+ */
+export function writeSecretsDir(env: Record<string, string>): {
+	dir: string;
+	names: string[];
+} {
+	const dir = mkdtempSync(join(tmpdir(), "mastermind-secrets-"));
+	chmodSync(dir, 0o700);
+	const names = Object.keys(env).filter((k) => ENV_NAME.test(k));
+	const sh = (v: string) => `'${v.replaceAll("'", "'\\''")}'`;
+	for (const k of names)
+		writeFileSync(join(dir, k), env[k] as string, { mode: 0o600 });
+	writeFileSync(
+		join(dir, "env"),
+		names.map((k) => `export ${k}=${sh(env[k] as string)}\n`).join(""),
+		{ mode: 0o600 },
+	);
+	return { dir, names };
+}
+
+/** The `paseo run` arguments that point the agent at a secrets directory. */
+export function secretsArgs(dir: string): string[] {
+	return [
+		"--env",
+		`${SECRETS_ENV.dir}=${dir}`,
+		"--env",
+		`${SECRETS_ENV.file}=${join(dir, "env")}`,
+	];
+}
+
+/** The prompt lines that tell the agent how to use its secrets. */
+export function secretsPrompt(names: string[]): string {
+	return `
+
+Secrets for this task (${names.join(", ")}) are NOT in your environment. In a shell
+command that needs them, first run: . "$${SECRETS_ENV.file}"
+Or read one value from "$${SECRETS_ENV.dir}/<NAME>". Never print a value.`;
+}
+
+/** True when `--host` is this machine (a path there is the same file). */
+export function isLocalHost(host: string | undefined): boolean {
+	if (!host) return true;
+	if (host.startsWith("/") || host.startsWith("unix:")) return true;
+	const name = host
+		.replace(/^[a-z]+:\/\//, "")
+		.replace(/:\d+$/, "")
+		.replace(/^\[|\]$/g, "");
+	return ["localhost", "127.0.0.1", "::1"].includes(name);
+}
+
 export type PaseoOptions = {
 	/** The paseo CLI as argv. Default `["paseo"]`. */
 	command?: string[];
@@ -176,6 +242,12 @@ export class PaseoLauncher implements AgentLauncher {
 				`an agent for execution ${spec.executionId} already exists`,
 			);
 		}
+		const secrets = Object.keys(spec.env ?? {}).length > 0;
+		if (secrets && !isLocalHost(spec.host)) {
+			throw new LaunchError(
+				`secrets cannot go to the Paseo host ${spec.host} without their values on the command line; run this task in a box, or route it to a target on this machine`,
+			);
+		}
 		const labels = {
 			...spec.labels,
 			[LABEL.execution]: spec.executionId,
@@ -195,13 +267,14 @@ export class PaseoLauncher implements AgentLauncher {
 			...(a.model ? ["--model", a.model] : []),
 			...(a.mode ? ["--mode", a.mode] : []),
 			...Object.entries(labels).flatMap(([k, v]) => ["--label", `${k}=${v}`]),
-			...Object.entries(spec.env ?? {}).flatMap(([k, v]) => [
-				"--env",
-				`${k}=${v}`,
-			]),
-			...this.#host(spec.host),
-			spec.prompt,
 		];
+		// Written last: nothing above can throw and leave it behind.
+		const vault = secrets ? writeSecretsDir(spec.env ?? {}) : undefined;
+		if (vault) args.push(...secretsArgs(vault.dir));
+		args.push(
+			...this.#host(spec.host),
+			vault ? spec.prompt + secretsPrompt(vault.names) : spec.prompt,
+		);
 		const child = new AbortController();
 		const onAbort = () => child.abort();
 		signal.addEventListener("abort", onAbort, { once: true });
@@ -217,6 +290,7 @@ export class PaseoLauncher implements AgentLauncher {
 			return parseResult(res.stdout);
 		} finally {
 			signal.removeEventListener("abort", onAbort);
+			if (vault) rmSync(vault.dir, { recursive: true, force: true });
 		}
 	}
 

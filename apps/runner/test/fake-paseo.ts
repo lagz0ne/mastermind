@@ -5,9 +5,10 @@ import {
 	appendFileSync,
 	existsSync,
 	readFileSync,
+	statSync,
 	writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 type Agent = { id: string; labels: Record<string, string>; cwd: string };
 
@@ -20,9 +21,22 @@ const agentsFile = join(dir, "agents.json");
 const agents = (): Agent[] =>
 	existsSync(agentsFile) ? JSON.parse(readFileSync(agentsFile, "utf8")) : [];
 const args = process.argv.slice(2);
+// What an agent would find at MASTERMIND_ENV_FILE while `run` is in progress.
+const envFileArg = args
+	.find((a) => a.startsWith("MASTERMIND_ENV_FILE="))
+	?.slice("MASTERMIND_ENV_FILE=".length);
+const envFile =
+	envFileArg && existsSync(envFileArg)
+		? {
+				path: envFileArg,
+				text: readFileSync(envFileArg, "utf8"),
+				mode: statSync(envFileArg).mode & 0o777,
+				dirMode: statSync(dirname(envFileArg)).mode & 0o777,
+			}
+		: null;
 appendFileSync(
 	join(dir, "calls.jsonl"),
-	`${JSON.stringify({ args, agentEnv: process.env.PASEO_AGENT_ID ?? null })}\n`,
+	`${JSON.stringify({ args, agentEnv: process.env.PASEO_AGENT_ID ?? null, envFile })}\n`,
 );
 
 const flags = (name: string) =>

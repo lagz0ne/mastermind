@@ -1,7 +1,8 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { rmSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import {
 	type AgentSpec,
+	isLocalHost,
 	LaunchError,
 	PaseoLauncher,
 	parseResult,
@@ -47,20 +48,78 @@ describe("PaseoLauncher (fake paseo CLI)", () => {
 		expect(args.at(-1)).toBe("fix the bug");
 	});
 
-	test("a routed target's host, labels and the agent env go to ls and run", async () => {
+	test("a routed target's host and labels go to ls and run", async () => {
 		const before = fake.calls().length;
 		const s = spec("routed", {
 			host: "gpu-box:6767",
 			labels: { pool: "gpu" },
-			env: { HF_TOKEN: "t" },
 		});
 		await launcher.run(s, never);
 		const calls = fake.calls().slice(before);
 		for (const c of calls)
 			expect(c.args[c.args.indexOf("--host") + 1]).toBe("gpu-box:6767");
 		const args = calls.find((c) => c.args[0] === "run")?.args ?? [];
-		expect(args[args.indexOf("--env") + 1]).toBe("HF_TOKEN=t");
 		expect(args).toContain("pool=gpu");
+	});
+
+	type EnvFile = { path: string; text: string; mode: number; dirMode: number };
+	const runCall = (from: number) =>
+		fake
+			.calls()
+			.slice(from)
+			.find((c) => c.args[0] === "run") as
+			| { args: string[]; envFile: EnvFile | null }
+			| undefined;
+
+	test("secret values never go on argv: the agent gets a private env file, deleted after", async () => {
+		const before = fake.calls().length;
+		const env = { HF_TOKEN: "hf-s3cret", GH_TOKEN: "it's\nmulti" };
+		await launcher.run(spec("with secrets", { env }), never);
+		const run = runCall(before);
+		const argv = run?.args.join("\n") ?? "";
+		for (const v of Object.values(env)) expect(argv).not.toContain(v);
+		for (const k of Object.keys(env)) expect(argv).not.toContain(`${k}=`);
+		const f = run?.envFile;
+		if (!f) throw new Error("no env file during the run");
+		expect(f.mode).toBe(0o600);
+		expect(f.dirMode).toBe(0o700);
+		expect(argv).toContain(`MASTERMIND_SECRETS_DIR=${f.path.slice(0, -4)}`);
+		// The env file (copied: the original is gone) gives back the exact values.
+		const copy = `${fake.dir}/env.copy`;
+		await Bun.write(copy, f.text);
+		const out = Bun.spawnSync([
+			"sh",
+			"-c",
+			`. '${copy}' && printf '%s|%s' "$HF_TOKEN" "$GH_TOKEN"`,
+		]);
+		expect(out.stdout.toString()).toBe(`${env.HF_TOKEN}|${env.GH_TOKEN}`);
+		// The prompt names the secrets (not the values) and how to load them.
+		expect(run?.args.at(-1)).toContain("HF_TOKEN, GH_TOKEN");
+		expect(existsSync(f.path)).toBe(false);
+	});
+
+	test("the secrets file is deleted when the agent fails", async () => {
+		const before = fake.calls().length;
+		await launcher
+			.run(spec("FAKE:crash", { env: { A: "x" } }), never)
+			.catch(() => {});
+		const f = runCall(before)?.envFile;
+		expect(f).toBeTruthy();
+		expect(existsSync(f?.path ?? "/")).toBe(false);
+	});
+
+	test("secrets are not sent to a Paseo host on another machine", async () => {
+		const before = fake.calls().length;
+		const err = await launcher
+			.run(spec("x", { host: "gpu-box:6767", env: { A: "x" } }), never)
+			.catch((e: Error) => e.message);
+		expect(err).toContain("secrets cannot go to the Paseo host gpu-box:6767");
+		expect(runCall(before)).toBeUndefined();
+		expect(isLocalHost("localhost:6767")).toBe(true);
+		expect(isLocalHost("tcp://127.0.0.1:6767")).toBe(true);
+		expect(isLocalHost("/home/me/.paseo/paseo.sock")).toBe(true);
+		expect(isLocalHost("[::1]:6767")).toBe(true);
+		expect(isLocalHost("ssh://gpu-box")).toBe(false);
 	});
 
 	test("paseo's JSON error is the reason; a permission wait names the fix", async () => {
