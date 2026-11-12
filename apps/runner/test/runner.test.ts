@@ -440,3 +440,50 @@ test("executionId is stable per claim and differs between claims", () => {
 	expect(executionId(b)).not.toBe(executionId(a));
 	expect(agentPrompt(a)).toContain("bead mm-1.2, queue q, stage work");
 });
+
+describe("login gate hook (mm-210.81)", () => {
+	const loginLine =
+		'provider login failed: the agent\'s provider answered "Failed to authenticate" (Failed to authenticate. API Error: 401 OAuth access token is invalid.)';
+	const run = async (launcher: AgentLauncher) => {
+		const mm = new FakeMastermind();
+		mm.push(dispatch("mm-1"));
+		const seen: { text: string; env: Record<string, string> }[] = [];
+		runner = new Runner({
+			client: mm,
+			launcher,
+			settings: settings(),
+			check: async () => ({
+				ok: true,
+				cwd: "/work",
+				env: { CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-v" },
+			}),
+			onAgentFailure: (text, env) => seen.push({ text, env }),
+			idleMs: 10,
+			heartbeatMs: 20,
+		});
+		runner.start();
+		await until(
+			() => mm.verbs("release").length + mm.verbs("complete").length === 1,
+		);
+		return { mm, seen };
+	};
+
+	test("a failed agent: the hook gets its text and the secrets it had; the ticket gets no value", async () => {
+		const { mm, seen } = await run({
+			run: async () => {
+				throw new Error(loginLine);
+			},
+		});
+		expect(seen).toHaveLength(1);
+		expect(seen[0]?.text).toContain("Failed to authenticate");
+		expect(seen[0]?.env).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-v" });
+		expect(JSON.stringify(mm.calls)).not.toContain("sk-ant-oat01-v");
+	});
+
+	test("a finished agent: no hook call", async () => {
+		const { seen } = await run(
+			new FakeLauncher({ status: "done", summary: "ok" }),
+		);
+		expect(seen).toEqual([]);
+	});
+});

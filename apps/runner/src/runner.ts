@@ -83,6 +83,11 @@ export type RunnerOptions = {
 	 * not ready. Call {@link Runner.readinessChanged} when it changes.
 	 */
 	readiness?: () => RunnerReadiness | null;
+	/**
+	 * A task's agent ended failed: its text (not scrubbed) and the secrets it
+	 * got, for the login gate (mm-210.81). Values stay in this process.
+	 */
+	onAgentFailure?: (text: string, env: Record<string, string>) => void;
 };
 
 /** A FIFO counting semaphore. */
@@ -533,6 +538,8 @@ export class Runner {
 				};
 			}
 			await exec.reports;
+			if (result.status !== "done" && !exec.abort.signal.aborted)
+				this.#o.onAgentFailure?.(result.summary, check.env);
 			result.summary = scrub(result.summary, exec.secrets);
 			if (lost(exec)) {
 				this.#log(`${id}: lease lost; result dropped`);

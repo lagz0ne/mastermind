@@ -7,8 +7,11 @@ import { fail, pass, runOnboard } from "../src/onboard.ts";
 import {
 	evaluate,
 	gateReason,
+	loginRefusal,
 	type ReadinessFacts,
 	readinessLine,
+	refusalHolds,
+	secretHash,
 } from "../src/readiness.ts";
 import { Runner } from "../src/runner.ts";
 import type { SecretsState } from "../src/secrets/state.ts";
@@ -376,5 +379,70 @@ describe("runOnboard", () => {
 			),
 		).toBe(true);
 		expect(out.at(-1)).toBe("✓ 1/1 y: fine");
+	});
+});
+
+describe("login gate (mm-210.81)", () => {
+	const TOKEN = "CLAUDE_CODE_OAUTH_TOKEN";
+	/** Environments box (needs the Claude token) and web (does not). */
+	const withToken = (): SecretsState => ({
+		rows: [
+			{ name: TOKEN, neededBy: ["box"], present: true, from: "store" },
+			{ name: "GH_TOKEN", neededBy: ["web"], present: true, from: "store" },
+		],
+		needs: {
+			at: "2026-11-12T00:00:00Z",
+			environments: [
+				{ name: "box", secrets: [TOKEN, "GH_TOKEN"] },
+				{ name: "web", secrets: ["GH_TOKEN"] },
+			],
+		},
+		diagnostics: { needed: [TOKEN, "GH_TOKEN"], missing: [], needsAt: null },
+	});
+	const login =
+		"Failed to authenticate"; /* providerLoginMessage of the mm-awdc text */
+
+	test("a refused token: only the environments that need it are not ready, with the fix; no value anywhere", () => {
+		const refused = loginRefusal(
+			login,
+			{ [TOKEN]: "sk-ant-oat01-wrong", GH_TOKEN: "g" },
+			["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
+			new Date("2026-11-12T10:00:00Z"),
+		);
+		expect(refused).toMatchObject({ secret: TOKEN, problem: login });
+		const r = evaluate(facts({ secrets: withToken(), loginRefused: refused }));
+		expect(r.state).toBe("ready");
+		expect(r.readyEnvironments).toEqual(["web"]);
+		expect(r.failedChecks).toEqual([
+			{
+				check: "login",
+				environment: "box",
+				problem: `the agent's provider refused ${TOKEN} (Failed to authenticate, 2026-11-12T10:00:00.000Z)`,
+				fix: "run claude setup-token again, then mastermind-runner secrets set CLAUDE_CODE_OAUTH_TOKEN",
+			},
+		]);
+		expect(JSON.stringify(r)).not.toContain("sk-ant-oat01-wrong");
+		expect(JSON.stringify(refused)).not.toContain("sk-ant-oat01-wrong");
+		// No refusal: both ready.
+		expect(evaluate(facts({ secrets: withToken() })).readyEnvironments).toEqual(
+			["box", "web"],
+		);
+	});
+
+	test("no login answer, or no model credential given: no refusal", () => {
+		expect(loginRefusal(null, { [TOKEN]: "x" }, [TOKEN])).toBeNull();
+		expect(loginRefusal(login, { GH_TOKEN: "g" }, [TOKEN])).toBeNull();
+	});
+
+	test("the refusal holds while the value is the same; a new or removed value lifts it", () => {
+		const r = {
+			secret: TOKEN,
+			hash: secretHash("old"),
+			at: "2026-11-12T10:00:00Z",
+			problem: login,
+		};
+		expect(refusalHolds(r, "old")).toBe(true);
+		expect(refusalHolds(r, "new")).toBe(false);
+		expect(refusalHolds(r, null)).toBe(false);
 	});
 });

@@ -58,6 +58,7 @@ import {
 	probeBoxLauncher,
 	startBoxMode,
 } from "./box/launcher.ts";
+import { MODEL_SECRETS } from "./box/proxy.ts";
 import { checkRequirement, FileSetupMemory } from "./check.ts";
 import {
 	checkCredential,
@@ -84,7 +85,12 @@ import {
 	statusPath,
 	writeDoctor,
 } from "./diagnostics.ts";
-import { type DoctorBox, formatReport, runDoctor } from "./doctor.ts";
+import {
+	type DoctorBox,
+	type DoctorReport,
+	formatReport,
+	runDoctor,
+} from "./doctor.ts";
 import { probeModelSecret } from "./doctor-probe.ts";
 import { EnrolError, enrol } from "./enroll.ts";
 import {
@@ -94,7 +100,7 @@ import {
 	parseNetwork,
 } from "./env.ts";
 import { type EnvTestStep, envTest } from "./env-test.ts";
-import { PaseoLauncher } from "./launcher.ts";
+import { PaseoLauncher, providerLoginMessage } from "./launcher.ts";
 import {
 	acquireLock,
 	LockedError,
@@ -121,8 +127,11 @@ import { terminalPrompt } from "./onboard-prompt.ts";
 import {
 	type BoxCheck,
 	evaluate,
+	type LoginRefused,
+	loginRefusal,
 	RECHECK_MS,
 	readinessLine,
+	refusalHolds,
 	sameReadiness,
 } from "./readiness.ts";
 import { serveDoctor } from "./remote-doctor.ts";
@@ -136,6 +145,7 @@ import {
 } from "./routing.ts";
 import { Runner } from "./runner.ts";
 import { readSecretFromStdin, secretsCommand } from "./secrets/command.ts";
+import { lookupSecret } from "./secrets/needs.ts";
 import { type SecretsState, secretsState } from "./secrets/state.ts";
 import { SecretStore, secretsPath } from "./secrets/store.ts";
 import {
@@ -1359,8 +1369,11 @@ async function runStart(
 	/** Mastermind's `superseded` line: a newer process of this runner runs. */
 	let superseded: string | null = null;
 	let publishNow = async () => {};
+	/** The provider refused the box's model credential (mm-210.81). */
+	let loginRefused: LoginRefused | null = null;
 	const reevaluate = () => {
 		const r = evaluate({
+			loginRefused,
 			onboarded: !!cfg.onboardedAt,
 			checks: diag.checks,
 			box: boxCheck,
@@ -1379,6 +1392,31 @@ async function runStart(
 		log(readinessLine(r));
 		void publishNow().then(() => runner?.readinessChanged());
 	};
+	/** A later doctor --deep whose box probe answered lifts the refusal. */
+	const probePassed = (r: DoctorReport | null) => {
+		if (!loginRefused || !r?.deep || noBox || r.at <= loginRefused.at) return;
+		if (r.steps.find((x) => x.id === "e")?.status !== "pass") return;
+		log(
+			`login: the doctor's box probe passed; ${loginRefused.secret} is accepted again`,
+		);
+		loginRefused = null;
+		reevaluate();
+	};
+	/** A changed (or removed) value lifts the refusal: checked with the secrets. */
+	const refusalCheck = async () => {
+		if (!loginRefused) return;
+		const hit = await lookupSecret(loginRefused.secret, {
+			store: await new SecretStore(secretsPath(io.env))
+				.load()
+				.catch(() => ({})),
+			env: io.env,
+		});
+		if (refusalHolds(loginRefused, hit?.value)) return;
+		log(
+			`login: ${loginRefused.secret} changed; its environments are checked again`,
+		);
+		loginRefused = null;
+	};
 	let conn: Awaited<ReturnType<typeof connectRunner>> | null = null;
 	const statusSubject = subjects.runnerStatus(cfg.account, settings.id);
 	const reporter = startReporter({
@@ -1389,7 +1427,9 @@ async function runStart(
 		file: statusPath(path),
 		check: async () => {
 			// A local `doctor` run writes doctor.json; send it as lastDoctor.
-			diag.doctor(await readDoctor(path));
+			const doctor = await readDoctor(path);
+			diag.doctor(doctor);
+			probePassed(doctor);
 			const c = await runChecks(settings, {
 				paseoHost: f["paseo-host"],
 				login: noBox,
@@ -1487,6 +1527,24 @@ async function runStart(
 									}),
 					}),
 			readiness: () => diag.readiness,
+			// Box mode: a refused model credential stops work for its environments (mm-210.81).
+			...(noBox
+				? {}
+				: {
+						onAgentFailure: (text: string, env: Record<string, string>) => {
+							const r = loginRefusal(
+								providerLoginMessage(text),
+								env,
+								MODEL_SECRETS,
+							);
+							if (!r) return;
+							loginRefused = r;
+							log(
+								`error: the agent's provider refused ${r.secret} (${r.problem}); the environments that need it take no work until it changes; fix: run claude setup-token again, then mastermind-runner secrets set ${r.secret}`,
+							);
+							reevaluate();
+						},
+					}),
 			settings,
 			routing,
 			setupMemory: new FileSetupMemory(join(dirname(path), "setup-state.json")),
@@ -1531,6 +1589,7 @@ async function runStart(
 				}),
 			onReport: (r) => {
 				diag.doctor(r);
+				probePassed(r);
 				void writeDoctor(path, r).catch(() => {});
 			},
 			log,
@@ -1540,6 +1599,7 @@ async function runStart(
 		let lastMissing = "";
 		const learnSecrets = async () => {
 			await checkBox();
+			await refusalCheck().catch(() => {});
 			try {
 				const x = await secretsFor(cfg, routing, io);
 				// Git access per environment (mm-lnm), set with the secrets.

@@ -10,7 +10,8 @@
  * - ready: the runner-wide checks pass (Paseo, providers, workdir, box
  *   engine, queues). `readyEnvironments` lists the environments whose own
  *   checks pass (every needed secret present, the box runtime it asks for,
- *   its repo readable at its ref with its git credential).
+ *   its repo readable at its ref with its git credential, and no agent login
+ *   refused with the model credential it needs: mm-210.81).
  * - degraded: a runner-wide check fails (engine gone, Paseo down). It is
  *   ready again when the checks pass.
  *
@@ -54,12 +55,72 @@ export type ReadinessFacts = {
 	 * restarts (update.ts): no new work (mm-210.77).
 	 */
 	updating?: string | null;
+	/**
+	 * The agent's provider refused the model credential (a task or the
+	 * doctor's box probe ended with a login failure, mm-210.81). The
+	 * environments that need that secret are not ready until it changes.
+	 */
+	loginRefused?: LoginRefused | null;
 	/** The state before this evaluation (ready vs degraded). */
 	previous?: RunnerReadiness | null;
 	now?: () => Date;
 };
 
 /** The readiness the facts give. Pure. */
+/**
+ * A model credential the agent's provider refused. `hash`: sha256 of the
+ * value then (never the value): a new value lifts the refusal.
+ */
+export type LoginRefused = {
+	secret: string;
+	hash: string;
+	at: string;
+	/** The provider's answer, for example "Failed to authenticate". */
+	problem: string;
+};
+
+/** The fix line of a refused model credential. */
+export function loginFix(secret: string): string {
+	return secret === "CLAUDE_CODE_OAUTH_TOKEN"
+		? "run claude setup-token again, then mastermind-runner secrets set CLAUDE_CODE_OAUTH_TOKEN"
+		: `mastermind-runner secrets set ${secret} (a value the provider accepts)`;
+}
+
+/** sha256 hex of a secret value: compare values without keeping them. */
+export function secretHash(value: string): string {
+	return new Bun.CryptoHasher("sha256").update(value).digest("hex");
+}
+
+/**
+ * The refusal after a failed agent, or null: `login` is the provider's login
+ * answer (launcher.ts providerLoginMessage), `env` the secrets the agent got;
+ * the model credential is the first of `modelSecrets` among them.
+ */
+export function loginRefusal(
+	login: string | null,
+	env: Record<string, string>,
+	modelSecrets: readonly string[],
+	now: Date = new Date(),
+): LoginRefused | null {
+	if (!login) return null;
+	const secret = modelSecrets.find((n) => env[n]);
+	if (!secret) return null;
+	return {
+		secret,
+		hash: secretHash(env[secret] as string),
+		at: now.toISOString(),
+		problem: login,
+	};
+}
+
+/** Does the refusal still hold? Not when the value changed (or is gone). */
+export function refusalHolds(
+	r: LoginRefused,
+	current: string | null | undefined,
+): boolean {
+	return !!current && secretHash(current) === r.hash;
+}
+
 export function evaluate(f: ReadinessFacts): RunnerReadiness {
 	const failed: FailedCheck[] = [];
 	if (!f.onboarded)
@@ -135,6 +196,21 @@ export function evaluate(f: ReadinessFacts): RunnerReadiness {
 			fix: why.fix,
 		});
 	}
+
+	// Per environment: the provider refused the model credential it needs (mm-210.81).
+	const refused = f.loginRefused;
+	if (refused)
+		for (const e of f.secrets?.needs?.environments ?? []) {
+			if (!envs.includes(e.name) || !e.secrets.includes(refused.secret))
+				continue;
+			notReady.add(e.name);
+			failed.push({
+				check: "login",
+				environment: e.name,
+				problem: `the agent's provider refused ${refused.secret} (${refused.problem}, ${refused.at})`,
+				fix: loginFix(refused.secret),
+			});
+		}
 
 	// Per environment: its repo is readable at its ref (mm-lnm).
 	for (const env of envs) {
