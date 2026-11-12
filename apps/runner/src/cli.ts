@@ -145,6 +145,7 @@ const OPTIONS = {
 	"allow-remote-probe": { type: "boolean" },
 	"paseo-host": { type: "string" },
 	"no-box": { type: "boolean" },
+	"no-paseo-link": { type: "boolean" },
 	"box-image": { type: "string" },
 	routing: { type: "string" },
 	env: { type: "string" },
@@ -199,9 +200,11 @@ const USAGE = `usage:
       --non-interactive (flags and stdin only) --no-browser --json
   mastermind-runner enroll <token> --url <mastermind url> [settings]
       enrol only: the runner stays NOT READY (no work) until onboard passes
-  mastermind-runner start [settings] [--save] [--box-image <ref>] [--no-box]
+  mastermind-runner start [settings] [--save] [--box-image <ref>] [--no-box] [--no-paseo-link]
       every task runs in a throwaway box (Docker or Podman API: DOCKER_HOST);
       --no-box: agents run on this machine, at your own risk (the ticket says so)
+      each box shows as host 'mastermind:<item>' in this machine's Paseo app;
+      --no-paseo-link (or MASTERMIND_PASEO_LINK=0): not
   mastermind-runner check [settings]
   mastermind-runner route [dispatch.json] [--env <name>] [--queue <q>]
       [--stage work] [--type <t>] [--label <l>]... [--priority <n>]
@@ -1121,6 +1124,7 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 					runnerId: settings.id,
 					env: io.env,
 					image: f["box-image"],
+					...(f["no-paseo-link"] ? { paseoLink: false as const } : {}),
 					outDir: join(dirname(path), "results"),
 					log,
 					onStep: (beadId, line) => runner?.progress(beadId, line),
