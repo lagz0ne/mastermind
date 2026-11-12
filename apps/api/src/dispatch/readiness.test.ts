@@ -15,7 +15,6 @@ const req = (id: string): NextRequest => ({
 		id,
 		account: "alice",
 		serviceAccount: "alice-sa",
-		providers: ["claude"],
 		capabilities: [],
 	},
 });

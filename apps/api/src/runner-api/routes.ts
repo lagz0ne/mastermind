@@ -11,11 +11,7 @@
  * live on the runner machine and never reach Mastermind. With the repo and
  * ref it checks git access per environment in its readiness (mm-lnm).
  */
-import {
-	type BoxRuntime,
-	type Environment,
-	requiredSecrets,
-} from "@mastermind/core";
+import type { BoxRuntime, Environment } from "@mastermind/core";
 import { clientIp, RateLimit } from "../auth/rate-limit.ts";
 import type { Auth } from "../auth/service.ts";
 import type { EnvironmentStore } from "../environments/store.ts";
@@ -48,10 +44,7 @@ export function environmentSecrets(environments: Environment[]): {
 }[] {
 	return environments.map((e) => ({
 		name: e.name,
-		secrets: requiredSecrets({
-			secrets: e.secrets ?? [],
-			provider: e.provider,
-		}),
+		secrets: [...new Set(e.secrets ?? [])],
 		...(e.runtime ? { runtime: e.runtime } : {}),
 		...(e.repo ? { repo: e.repo, ref: e.ref ?? "" } : {}),
 	}));

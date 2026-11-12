@@ -80,16 +80,14 @@ describe("route: two targets, three rules", () => {
 		);
 	});
 
-	test("2. env ml -> gpu on its host; the instruction's mode fills the open field", () => {
+	test("2. env ml -> gpu on its host; an old server's mode is ignored (mm-210.84)", () => {
 		const r = route(d({ env: "ml", mode: "plan" }), sample(), providers);
 		if (!r.ok) throw new Error(r.reason);
 		expect(r.target).toBe("gpu");
 		expect(r.host).toBe("gpu-box:6767");
 		expect(r.labels).toEqual({ pool: "gpu" });
-		expect(r.agent).toEqual({ provider: "codex", mode: "plan" });
-		expect(r.why).toContain(
-			"provider codex from target, mode plan from instruction",
-		);
+		expect(r.agent).toEqual({ provider: "codex" });
+		expect(r.why).toContain("provider codex from target");
 		expect(decisionLine(r, "box")).toStartWith(
 			"target gpu on gpu-box:6767, provider codex",
 		);
@@ -130,16 +128,12 @@ describe("route: two targets, three rules", () => {
 		});
 	});
 
-	test("the instruction's provider must be one the runner offers", () => {
+	test("an old server's provider never chooses the agent (mm-210.84)", () => {
 		const routing = sample();
 		delete routing.targets.laptop?.provider;
 		const r = route(d({ env: "web", provider: "gemini" }), routing, providers);
-		expect(r).toMatchObject({
-			ok: false,
-			reason: "provider gemini is not offered by this runner",
-		});
-		const ok = route(d({ env: "web", provider: "codex" }), routing, providers);
-		expect(ok.ok && ok.agent.provider).toBe("codex");
+		expect(r.ok && r.agent.provider).toBe("claude");
+		expect(r.ok && r.why.join("\n")).not.toContain("gemini");
 	});
 });
 
@@ -153,12 +147,12 @@ describe("implicit routing (the old flags)", () => {
 		expect(r.agent).toEqual({ provider: "claude", mode: "auto" });
 	});
 
-	test("the instruction's provider beats --provider, as before", () => {
+	test("--provider wins over an old server's provider (mm-210.84)", () => {
 		const r = route(d({ provider: "codex" }), implicitRouting(flags), [
 			"claude",
 			"codex",
 		]);
-		expect(r.ok && r.agent).toEqual({ provider: "codex", mode: "auto" });
+		expect(r.ok && r.agent).toEqual({ provider: "claude", mode: "auto" });
 	});
 
 	test("enrichment needs the assistant", () => {

@@ -153,7 +153,7 @@ describe("POST /api/beads", () => {
 					ref: "dev",
 					provider: "claude",
 					requires: ["bun"],
-				},
+				} as never,
 			}),
 		);
 		expect(res.status).toBe(201);
@@ -169,12 +169,13 @@ describe("POST /api/beads", () => {
 				priority: 1,
 			},
 		});
+		// An older client's env.provider is ignored: the runner picks (mm-210.84).
 		expect(envOf(bead)).toEqual({
 			repo: "https://github.com/x/y.git",
 			ref: "dev",
-			provider: "claude",
 			requires: ["bun"],
 		});
+		expect(bead.labels.some((l) => l.startsWith("provider:"))).toBe(false);
 		expect(bead.labels).toContain("queue:build");
 	});
 

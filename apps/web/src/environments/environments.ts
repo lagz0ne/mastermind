@@ -33,11 +33,6 @@ export type EnvForm = {
 	ref: string;
 	requires: string;
 	secrets: string;
-	/** Provider name, for example claude. */
-	provider: string;
-	/** Name of the provider login secret. */
-	providerAuth: string;
-	mode: string;
 	// what comes out
 	outputKind: EnvironmentOutput["kind"];
 	outputBase: string;
@@ -83,9 +78,6 @@ export function toForm(e: Environment): EnvForm {
 		ref: e.ref,
 		requires: e.requires.join(" "),
 		secrets: e.secrets.join(" "),
-		provider: e.provider?.name ?? e.agent?.provider ?? "",
-		providerAuth: e.provider?.auth ?? "",
-		mode: e.agent?.mode ?? "",
 		outputKind: e.output.kind,
 		outputBase: e.output.base ?? "",
 		instructions: e.instructions ?? "",
@@ -128,11 +120,6 @@ export function fromForm(f: EnvForm): Environment {
 			...(f.outputBase.trim() ? { base: f.outputBase.trim() } : {}),
 		},
 	};
-	const provider = f.provider.trim();
-	const auth = f.providerAuth.trim();
-	if (provider)
-		e.provider = auth ? { name: provider, auth } : { name: provider };
-	if (f.mode.trim()) e.agent = { mode: f.mode.trim() };
 	if (f.instructions.trim()) e.instructions = f.instructions.trim();
 	const dc: NonNullable<Environment["devcontainer"]> = {};
 	if (f.dcUse === "none") dc.use = "none";
@@ -241,10 +228,6 @@ function formKey(
 			return { key: (sub ?? "cpu") as keyof EnvForm };
 		case "network":
 			return { key: "network", item: index };
-		case "provider":
-			return { key: sub === "auth" ? "providerAuth" : "provider" };
-		case "agent":
-			return { key: sub === "provider" ? "provider" : "mode" };
 		case "output":
 			return { key: sub === "base" ? "outputBase" : "outputKind" };
 		case "devcontainer":

@@ -34,7 +34,6 @@ const next = (account: string, id: string, capabilities: string[] = []) =>
 			id,
 			account,
 			serviceAccount: `${account}-sa`,
-			providers: ["claude"],
 			capabilities,
 		},
 	}) satisfies NextRequest;

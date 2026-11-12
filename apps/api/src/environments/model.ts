@@ -1,6 +1,7 @@
 /**
  * Environments: named box recipes (image, tools, setup, check, limits,
- * network, repo, ref, secret names, provider login, output, instructions).
+ * network, repo, ref, secret names, output, instructions). No agent settings:
+ * the runner picks provider, model and mode with Paseo (mm-210.84).
  * ONE document in JetStream KV (bucket `mm-config`, key `environments`),
  * written with compare-and-set by revision, like routing.
  *
@@ -18,21 +19,14 @@ import {
 	type DevcontainerSettings,
 	type DispatchEnv,
 	type Environment,
-	type EnvironmentAgent,
 	type EnvironmentLimits,
 	type EnvironmentNetwork,
 	type EnvironmentOutput,
 	envNameOf,
 	OUTPUT_KINDS,
-	requiredSecrets,
 } from "@mastermind/core";
 import { requirementsOf } from "@mastermind/router";
-import {
-	envOf,
-	PROVIDER_LABEL_PREFIX,
-	REF_LABEL_PREFIX,
-	REPO_LABEL_PREFIX,
-} from "../beads/env.ts";
+import { envOf, REF_LABEL_PREFIX, REPO_LABEL_PREFIX } from "../beads/env.ts";
 
 export const ENVIRONMENTS_KEY = "environments";
 
@@ -234,41 +228,10 @@ export function validate(
 			secrets: list("secrets", SECRET, "a name: letters, digits and '_'"),
 			output,
 		};
-		if (e.agent !== undefined && e.agent !== null) {
-			if (!isObject(e.agent)) err(`${at}.agent`, "must be an object");
-			else {
-				const agent: EnvironmentAgent = {};
-				for (const k of ["provider", "mode"] as const) {
-					const v = e.agent[k];
-					if (v === undefined || v === null || v === "") continue;
-					if (typeof v !== "string" || !NO_SPACE.test(v))
-						err(`${at}.agent.${k}`, "one word, no spaces");
-					else agent[k] = v;
-				}
-				if (agent.provider || agent.mode) env.agent = agent;
-			}
-		}
-		if (e.provider !== undefined && e.provider !== null && e.provider !== "") {
-			const p = e.provider;
-			if (!isObject(p)) err(`${at}.provider`, "must be an object");
-			else {
-				const name = typeof p.name === "string" ? p.name.trim() : "";
-				if (!name || !NO_SPACE.test(name))
-					err(`${at}.provider.name`, "one word, for example claude");
-				const auth = typeof p.auth === "string" ? p.auth.trim() : "";
-				if (
-					p.auth !== undefined &&
-					p.auth !== null &&
-					p.auth !== "" &&
-					!SECRET.test(auth)
-				)
-					err(`${at}.provider.auth`, "a secret name: letters, digits and '_'");
-				if (name) env.provider = auth ? { name, auth } : { name };
-			}
-		} else if (env.agent?.provider) {
-			// Before box recipes the provider was a preference in `agent`.
-			env.provider = { name: env.agent.provider };
-		}
+		// Before mm-210.84 an environment chose the agent (`agent`, `provider`).
+		// Those fields are dropped; the provider login secret stays a secret.
+		const login = oldProviderLogin(e.provider);
+		if (login && !env.secrets.includes(login)) env.secrets.push(login);
 		if (e.runtime !== undefined && e.runtime !== null && e.runtime !== "") {
 			if (!(BOX_RUNTIMES as readonly unknown[]).includes(e.runtime))
 				err(`${at}.runtime`, "gvisor, or absent for the engine's default");
@@ -285,6 +248,16 @@ export function validate(
 	return errors.length
 		? { ok: false, errors }
 		: { ok: true, doc: { environments } };
+}
+
+/**
+ * The login secret name of an old `provider: {name, auth}` (before
+ * mm-210.84), when it is a valid secret name; else null.
+ */
+function oldProviderLogin(p: unknown): string | null {
+	if (!isObject(p) || typeof p.auth !== "string") return null;
+	const auth = p.auth.trim();
+	return SECRET.test(auth) ? auth : null;
 }
 
 /** Most bytes of an environment's own devcontainer.json. */
@@ -406,7 +379,7 @@ export type ResolveOptions = {
 /**
  * The environment of a dispatch. The bead's `env:<name>` label wins, else the
  * routing default. A per-bead `ref:` label overrides the ref; `req:` labels
- * add requirements; a `provider:` label is kept. A bead with no name but the
+ * add requirements. A bead with no name but the
  * old `repo:` label is read the old way. Unknown or missing: not dispatched,
  * with the reason.
  */
@@ -438,8 +411,7 @@ export function resolveEnv(
 		requires: [...new Set([...def.requires, ...requirementsOf(bead)])],
 		setup: def.setup,
 		check: def.check,
-		// The provider login is one more secret the box needs.
-		secrets: requiredSecrets(def),
+		secrets: [...def.secrets],
 		image: def.image,
 		tools: def.tools,
 		recipeHash: recipeHash(def),
@@ -448,15 +420,6 @@ export function resolveEnv(
 		output: def.output,
 	};
 	if (def.runtime) env.runtime = def.runtime;
-	const provider = labelValue(bead, PROVIDER_LABEL_PREFIX);
-	if (provider) env.provider = provider;
-	if (def.provider) env.providerLogin = def.provider;
-	// The runner reads the provider preference from `agent` (mm-210.31).
-	const agent: EnvironmentAgent = {
-		...def.agent,
-		...(def.provider ? { provider: def.provider.name } : {}),
-	};
-	if (agent.provider || agent.mode) env.agent = agent;
 	if (def.instructions) env.instructions = def.instructions;
 	if (def.devcontainer) env.devcontainer = def.devcontainer;
 	return { ok: true, env };

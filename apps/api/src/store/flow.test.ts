@@ -25,7 +25,6 @@ const runner: NextRequest = {
 		id: "laptop",
 		account: "alice",
 		serviceAccount: "alice-sa",
-		providers: ["claude"],
 		capabilities: [],
 	},
 };

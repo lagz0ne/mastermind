@@ -30,7 +30,6 @@ const info: RunnerInfo = {
 	id: "laptop",
 	account: "alice",
 	serviceAccount: "sa",
-	providers: ["claude"],
 	capabilities: [],
 };
 

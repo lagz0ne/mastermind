@@ -19,8 +19,7 @@ const doc = {
 	environments: [
 		env({
 			name: "web",
-			secrets: ["GITHUB_TOKEN"],
-			provider: { name: "claude", auth: "CLAUDE_CODE_OAUTH_TOKEN" },
+			secrets: ["GITHUB_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"],
 		}),
 		env({ name: "docs" }),
 		env({ name: "scratch", repo: "" }),

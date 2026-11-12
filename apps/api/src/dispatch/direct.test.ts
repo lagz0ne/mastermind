@@ -18,7 +18,6 @@ const info = (account: string, id: string): RunnerInfo => ({
 	id,
 	account,
 	serviceAccount: `${account}-sa`,
-	providers: ["claude"],
 	capabilities: [],
 });
 

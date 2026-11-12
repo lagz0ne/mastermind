@@ -27,14 +27,6 @@ export type BoxRuntime = "gvisor";
 
 export const BOX_RUNTIMES = ["gvisor"] as const;
 
-/** The agent provider in the box, and the secret that logs it in. */
-export type EnvironmentProvider = {
-	/** For example `claude`. */
-	name: string;
-	/** Name of the secret with the provider login (a token). Never the value. */
-	auth?: string;
-};
-
 /** How code leaves the box: a pull request, a pushed branch, or nothing. */
 export type EnvironmentOutput = {
 	kind: "pr" | "branch" | "none";
@@ -43,9 +35,6 @@ export type EnvironmentOutput = {
 };
 
 export const OUTPUT_KINDS = ["pr", "branch", "none"] as const;
-
-/** Which agent an environment prefers (before box recipes; `mode` still applies). */
-export type EnvironmentAgent = { provider?: string; mode?: string };
 
 /**
  * Where the box comes from (bead mm-210.62): a devcontainer.json, built with
@@ -100,11 +89,14 @@ export type Environment = {
 	ref: string;
 	/** Capabilities the runner must have (for example `docker`). */
 	requires: string[];
-	/** Names of secrets the box gets. Never the values. */
+	/**
+	 * Names of secrets the box gets. Never the values. The model credential is
+	 * one of them (for example `CLAUDE_CODE_OAUTH_TOKEN`): the runner's box
+	 * proxy takes it out and adds it upstream. Which agent runs (provider,
+	 * model, mode) is not Mastermind's: the runner decides with its own
+	 * settings and Paseo (mm-210.84).
+	 */
 	secrets: string[];
-	provider?: EnvironmentProvider;
-	/** Older preference; `mode` is still passed to the runner. */
-	agent?: EnvironmentAgent;
 	/** The box from a devcontainer.json (repo or own); see {@link DevcontainerSettings}. */
 	devcontainer?: DevcontainerSettings;
 	// --- what comes out
@@ -120,15 +112,6 @@ export const DEFAULT_LIMITS: EnvironmentLimits = {
 };
 export const DEFAULT_NETWORK: EnvironmentNetwork = "open";
 export const DEFAULT_OUTPUT: EnvironmentOutput = { kind: "none" };
-
-/** Every secret name a box of this recipe needs: `secrets` plus the provider login. */
-export function requiredSecrets(
-	env: Pick<Environment, "secrets"> & { provider?: EnvironmentProvider },
-): string[] {
-	const names = [...env.secrets];
-	if (env.provider?.auth) names.push(env.provider.auth);
-	return [...new Set(names)];
-}
 
 /** What goes into the box image: the runner caches images by its hash. */
 export type BoxRecipe = Pick<Environment, "image" | "tools">;

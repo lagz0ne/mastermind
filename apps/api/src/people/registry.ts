@@ -29,6 +29,7 @@ export type RunnerEntry = {
 	serviceAccount: string | null;
 	queues: string[];
 	capabilities: string[];
+	/** Providers Paseo reports available (logged in) on the runner's host. */
 	providers: string[];
 	/** "unlimited" when the runner says null; null when it does not say. */
 	capacity: number | "unlimited" | null;
@@ -68,6 +69,14 @@ type Entry = {
 	diagnostics: RunnerDiagnostics | null;
 	statusAt: number | null;
 };
+
+/** Providers Paseo reports available on the runner's host, sorted. */
+export function availableProviders(d: RunnerDiagnostics | null): string[] {
+	return Object.entries(d?.checks?.providers ?? {})
+		.filter(([, ok]) => ok)
+		.map(([p]) => p)
+		.sort();
+}
 
 /** `<account>/<runner>` → [account, runner]; null for other actors. */
 function splitActor(actor: string): [string, string] | null {
@@ -191,7 +200,8 @@ export class RunnerRegistry {
 				serviceAccount: e.info?.serviceAccount ?? null,
 				queues: [...new Set([...stated, ...e.queues])].sort(),
 				capabilities: e.info?.capabilities ?? [],
-				providers: e.info?.providers ?? [],
+				// What Paseo reports on that host (runner diagnostics), not settings.
+				providers: availableProviders(e.diagnostics),
 				capacity:
 					e.info?.capacity === null ? "unlimited" : (e.info?.capacity ?? null),
 				version: e.info?.version ?? null,

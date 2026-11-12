@@ -289,23 +289,12 @@ function Editor({
 				<Field
 					label="Secrets"
 					error={errors.secrets}
-					hint="Names only. The values stay on the runner machine."
+					hint="Names only. The values stay on the runner machine. Add the model login (for example CLAUDE_CODE_OAUTH_TOKEN): the runner's proxy keeps it out of the box. The runner and its Paseo choose the agent."
 				>
-					{text("secrets", "Secrets", { placeholder: "GH_TOKEN", code: true })}
-				</Field>
-				<Field
-					label="Provider"
-					error={errors.provider ?? errors.providerAuth ?? errors.mode}
-					hint="Provider, the secret with its login, and the mode."
-				>
-					<div className="grid grid-cols-3 gap-2">
-						{text("provider", "Provider", { placeholder: "claude" })}
-						{text("providerAuth", "Provider login secret", {
-							placeholder: "CLAUDE_TOKEN",
-							code: true,
-						})}
-						{text("mode", "Mode", { placeholder: "mode (optional)" })}
-					</div>
+					{text("secrets", "Secrets", {
+						placeholder: "GH_TOKEN CLAUDE_CODE_OAUTH_TOKEN",
+						code: true,
+					})}
 				</Field>
 				<Field
 					label="Requires"

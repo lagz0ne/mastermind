@@ -105,7 +105,6 @@ describe.skipIf(!bin)("runner over NATS", () => {
 				id: "laptop",
 				account: "alice",
 				serviceAccount: "0a1b2c",
-				providers: ["claude"],
 				capabilities: [],
 			}),
 			launcher: new PaseoLauncher({

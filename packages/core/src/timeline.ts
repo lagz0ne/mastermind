@@ -177,7 +177,6 @@ export type NewWork = {
 	env?: {
 		repo: string;
 		ref?: string;
-		provider?: string;
 		requires?: string[];
 	};
 };

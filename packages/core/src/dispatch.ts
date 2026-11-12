@@ -21,11 +21,9 @@
 import type {
 	BoxRuntime,
 	DevcontainerSettings,
-	EnvironmentAgent,
 	EnvironmentLimits,
 	EnvironmentNetwork,
 	EnvironmentOutput,
-	EnvironmentProvider,
 } from "./environment.ts";
 import type { Bead, Lease, WorkOutput } from "./work.ts";
 
@@ -122,7 +120,10 @@ export type DispatchEnv = {
 	repo: string;
 	/** Branch, tag or commit to check out. */
 	ref: string;
-	/** Agent provider to use (for example `claude`); the runner picks when absent. */
+	/**
+	 * @deprecated Never set (mm-210.84): the runner picks the agent. Read only
+	 * by runner code that still has a fallback; removed when that code is.
+	 */
 	provider?: string;
 	/** Capabilities the runner must have (tools, CLIs, platforms). */
 	requires: string[];
@@ -132,8 +133,8 @@ export type DispatchEnv = {
 	check?: string[];
 	/** Names of secrets the runner must supply. Never the values. */
 	secrets?: string[];
-	/** The environment's agent preference; the runner's own rules win. */
-	agent?: EnvironmentAgent;
+	/** @deprecated Never set (mm-210.84); see {@link DispatchEnv.provider}. */
+	agent?: { provider?: string; mode?: string };
 	/** Text the environment adds to every prompt. */
 	instructions?: string;
 	// --- the box recipe (named environments; absent for old label beads)
@@ -147,8 +148,6 @@ export type DispatchEnv = {
 	network?: EnvironmentNetwork;
 	/** Container runtime of the box; absent: the engine's default (mm-210.63). */
 	runtime?: BoxRuntime;
-	/** Provider and the name of its login secret (also listed in `secrets`). */
-	providerLogin?: EnvironmentProvider;
 	output?: EnvironmentOutput;
 	/** The box from a devcontainer.json; absent: see {@link DevcontainerSettings}. */
 	devcontainer?: DevcontainerSettings;
@@ -175,8 +174,6 @@ export type RunnerInfo = {
 	account: string;
 	/** The service account the adapter connects with; owned by `account`. */
 	serviceAccount: string;
-	/** Agent providers the runner can start. */
-	providers: string[];
 	/** Capabilities it offers; matched against `DispatchEnv.requires`. */
 	capabilities: string[];
 	/** How many agents it runs at once (shown on /people); null: unlimited. */

@@ -330,7 +330,6 @@ export function runnerInfo(
 		id: s.id,
 		account: cfg.account,
 		serviceAccount: cfg.serviceAccount.id,
-		providers: s.providers,
 		capabilities: s.capabilities,
 		capacity: s.capacity,
 		queues: s.queues,

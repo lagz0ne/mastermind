@@ -111,16 +111,13 @@ export function parseNewWork(b: Record<string, unknown>): CreateBead {
 		const repo = str(env.repo, "env.repo", 500, true) as string;
 		if (!NAME.test(repo)) throw new Invalid("env.repo must have no spaces");
 		const ref = str(env.ref, "env.ref", 200);
-		const provider = str(env.provider, "env.provider", 100);
+		// env.provider of an older client is ignored: the runner picks (mm-210.84).
 		if (ref && !NAME.test(ref))
 			throw new Invalid("env.ref must have no spaces");
-		if (provider && !NAME.test(provider))
-			throw new Invalid("env.provider must have no spaces");
 		labels.push(
 			...envLabels({
 				repo,
 				...(ref ? { ref } : {}),
-				...(provider ? { provider } : {}),
 				requires: names(env.requires, "env.requires"),
 			}),
 		);

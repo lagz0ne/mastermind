@@ -19,7 +19,6 @@ const runner = (id: string, extra: Partial<RunnerInfo> = {}): NextRequest => ({
 		id,
 		account: "alice",
 		serviceAccount: "alice-laptop",
-		providers: ["claude"],
 		capabilities: [],
 		...extra,
 	},
@@ -590,7 +589,7 @@ describe("observe", () => {
 });
 
 describe("dispatch envelope from the bead (mm-210.26)", () => {
-	test("env comes from repo:/ref:/provider:/req: labels; prompt has acceptance and human notes", async () => {
+	test("env comes from repo:/ref:/req: labels (provider: ignored); prompt has acceptance and human notes", async () => {
 		const { d, work } = setup();
 		work.add(
 			{
@@ -622,10 +621,10 @@ describe("dispatch envelope from the bead (mm-210.26)", () => {
 			},
 		];
 		const { dispatch } = await d.next("alice", "build", runner("laptop"));
+		// An old provider: label is ignored: the runner picks (mm-210.84).
 		expect(dispatch?.env).toEqual({
 			repo: "https://github.com/x/y.git",
 			ref: "dev",
-			provider: "claude",
 			requires: [],
 		});
 		expect(dispatch?.prompt).toBe(

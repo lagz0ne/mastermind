@@ -16,7 +16,7 @@ import { accountGuard, type RequireAccount } from "../auth/session.ts";
 import { inviteAs, loginAs } from "../auth/test-login.ts";
 import { Dispatcher } from "../dispatch/dispatcher.ts";
 import { fakeWork } from "../dispatch/fake-work.ts";
-import { RunnerRegistry } from "./registry.ts";
+import { availableProviders, RunnerRegistry } from "./registry.ts";
 import { joinRunners, peopleRoutes } from "./routes.ts";
 import { runnerScript } from "./runner-script.ts";
 
@@ -37,7 +37,6 @@ const info = (id: string, sa: string, extra = {}): NextRequest => ({
 		id,
 		account: "alice",
 		serviceAccount: sa,
-		providers: ["claude"],
 		capabilities: ["git"],
 		...extra,
 	},
@@ -62,7 +61,8 @@ describe("registry", () => {
 				serviceAccount: "sa1",
 				queues: ["build", "fix"],
 				capabilities: ["git"],
-				providers: ["claude"],
+				// No status yet: Paseo has reported no provider.
+				providers: [],
 				capacity: 2,
 				version: null,
 				running: [],
@@ -334,7 +334,6 @@ describe("routes", () => {
 				id: "host1",
 				account: "admin",
 				serviceAccount: saId,
-				providers: [],
 				capabilities: [],
 				capacity: 3,
 			},
@@ -391,7 +390,6 @@ describe("routes", () => {
 				id: "r1",
 				account: "admin",
 				serviceAccount: "x",
-				providers: [],
 				capabilities: [],
 			},
 		});
@@ -403,7 +401,6 @@ describe("routes", () => {
 				id: "r2",
 				account: "admin",
 				serviceAccount: "",
-				providers: [],
 				capabilities: [],
 			},
 		});
@@ -443,5 +440,16 @@ describe("runner.js", () => {
 		} finally {
 			await rm(dir, { recursive: true });
 		}
+	});
+});
+
+describe("availableProviders (mm-210.84)", () => {
+	test("lists what Paseo reports available on the runner's host, not settings", () => {
+		expect(availableProviders(null)).toEqual([]);
+		expect(
+			availableProviders({
+				checks: { providers: { codex: false, claude: true, opencode: true } },
+			} as unknown as RunnerDiagnostics),
+		).toEqual(["claude", "opencode"]);
 	});
 });

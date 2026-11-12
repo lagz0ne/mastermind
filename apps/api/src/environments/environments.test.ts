@@ -57,9 +57,7 @@ const BOX = {
 	repo: "https://github.com/acme/box.git",
 	ref: "dev",
 	requires: ["docker"],
-	secrets: ["GH_TOKEN"],
-	provider: { name: "claude", auth: "CLAUDE_TOKEN" },
-	agent: { mode: "bypass" },
+	secrets: ["GH_TOKEN", "CLAUDE_TOKEN"],
 	output: { kind: "pr" as const, base: "main" },
 	instructions: "Small commits.",
 };
@@ -72,15 +70,15 @@ describe("validate", () => {
 		);
 		expect(v.ok).toBe(true);
 		if (!v.ok) return;
+		// The old agent preference is dropped (mm-210.84).
+		const { agent: _agent, ...scratch } = SCRATCH;
 		expect(v.doc.environments[0]).toEqual({
-			...SCRATCH,
+			...scratch,
 			image: "ghcr.io/acme/default:1",
 			tools: [],
 			limits: { cpu: 2, memoryMb: 4096, timeoutMin: 60 },
 			network: "open",
 			output: { kind: "none" },
-			// The old preference becomes the provider.
-			provider: { name: "claude" },
 		});
 		expect(v.doc.environments[1]).toEqual({
 			name: "min",
@@ -97,6 +95,47 @@ describe("validate", () => {
 			secrets: [],
 			output: { kind: "none" },
 		});
+	});
+
+	test("an environment saved with agent settings loads without them; its provider login stays a secret (mm-210.84)", () => {
+		const v = validate(
+			{
+				environments: [
+					{
+						name: "old",
+						repo: "r",
+						secrets: ["GH_TOKEN"],
+						provider: { name: "claude", auth: "CLAUDE_CODE_OAUTH_TOKEN" },
+						agent: { provider: "claude", mode: "bypassPermissions" },
+					},
+					{
+						name: "twice",
+						repo: "r",
+						secrets: ["CLAUDE_CODE_OAUTH_TOKEN"],
+						provider: { name: "claude", auth: "CLAUDE_CODE_OAUTH_TOKEN" },
+					},
+					// Values that were errors before are dropped with the field.
+					{
+						name: "bad",
+						repo: "r",
+						provider: { name: "", auth: "bad-name" },
+						agent: { mode: "two words" },
+					},
+				],
+			},
+			"",
+		);
+		expect(v.ok).toBe(true);
+		if (!v.ok) return;
+		const [old, twice, bad] = v.doc.environments;
+		expect(old?.secrets).toEqual(["GH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"]);
+		expect(twice?.secrets).toEqual(["CLAUDE_CODE_OAUTH_TOKEN"]);
+		expect(bad?.secrets).toEqual([]);
+		for (const e of v.doc.environments) {
+			expect(e).not.toHaveProperty("provider");
+			expect(e).not.toHaveProperty("agent");
+			expect(e).not.toHaveProperty("model");
+		}
 	});
 
 	test("a full recipe round-trips; no default image config leaves image empty", () => {
@@ -128,11 +167,10 @@ describe("validate", () => {
 			"environments.1.secrets.0",
 			"environments.2.name",
 			"environments.2.repo",
-			"environments.2.agent.mode",
 		]);
 	});
 
-	test("box fields: limits, network, provider, output and image are checked by field", () => {
+	test("box fields: limits, network, output and image are checked by field", () => {
 		const v = validate(
 			{
 				environments: [
@@ -142,7 +180,6 @@ describe("validate", () => {
 						image: "two words",
 						limits: { cpu: 0, memoryMb: 100.5, timeoutMin: 2000 },
 						network: { allow: ["ok.com", "not a host"] },
-						provider: { name: "", auth: "bad-name" },
 						output: { kind: "pr", base: "a b" },
 					},
 					{ name: "c", repo: "r", network: "closed", output: { kind: "zip" } },
@@ -161,8 +198,6 @@ describe("validate", () => {
 			"environments.0.network.allow.1",
 			"environments.0.output.base",
 			"environments.0.output.kind",
-			"environments.0.provider.name",
-			"environments.0.provider.auth",
 			"environments.1.network",
 			"environments.1.output.kind",
 		]);
@@ -311,12 +346,11 @@ describe("resolveEnv", () => {
 			setup: ["bun install"],
 			check: ["bun test"],
 			secrets: ["GH_TOKEN"],
-			agent: { provider: "claude" },
 			instructions: "Keep commits small.",
 		});
 	});
 
-	test("the envelope carries the whole recipe with its hash; the provider login is a needed secret", () => {
+	test("the envelope carries the whole recipe with its hash; no agent settings (mm-210.84)", () => {
 		const r = resolveEnv({ labels: ["env:box"] }, doc);
 		expect(r).toEqual({
 			ok: true,
@@ -334,8 +368,6 @@ describe("resolveEnv", () => {
 				limits: BOX.limits,
 				network: BOX.network,
 				output: BOX.output,
-				providerLogin: { name: "claude", auth: "CLAUDE_TOKEN" },
-				agent: { mode: "bypass", provider: "claude" },
 				instructions: "Small commits.",
 			},
 		});

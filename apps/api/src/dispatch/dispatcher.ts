@@ -242,7 +242,7 @@ export type EnvResolution =
 
 export { ENV_TRIAGE_LABEL, FAILED_START_LABEL, NEEDS_HUMAN_LABEL };
 
-/** Read from the bead's labels: repo:, ref:, provider:, req: (see beads/env.ts). */
+/** Read from the bead's labels: repo:, ref:, req: (see beads/env.ts). */
 export function defaultEnv(bead: Bead): DispatchEnv {
 	return envOf(bead);
 }
@@ -298,7 +298,6 @@ export function checkRunner(account: string, req: NextRequest): RunnerInfo {
 		!AGENT.test(r.id) ||
 		typeof r.account !== "string" ||
 		typeof r.serviceAccount !== "string" ||
-		!strings(r.providers) ||
 		!strings(r.capabilities) ||
 		(r.environments !== undefined && !strings(r.environments)) ||
 		(r.session !== undefined && typeof r.session !== "string") ||

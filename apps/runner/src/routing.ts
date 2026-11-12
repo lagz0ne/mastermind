@@ -1,14 +1,14 @@
 /**
  * User-controlled routing: which Paseo (target) runs a dispatch, with which
  * agent, in which local checkout. The instruction (the dispatch) brings hard
- * requirements and preferences; the user who owns this runner brings the
- * rules. Decision order:
+ * requirements, never agent settings (mm-210.84); the user who owns this
+ * runner brings the rules and the agent. Decision order:
  *
  *   a. hard requirements of the instruction: a named environment must be bound
  *      here (plus requires and secrets, see check.ts): met, or declined
  *   b. the user's rules, in order, first match wins: a target, or decline
- *   c. agent fields: rule, then target, then the instruction's preference
- *      (env.agent, env.provider), then the stage default; first set wins.
+ *   c. agent fields: rule, then target, then the stage default; first set
+ *      wins. An old server's env.agent / env.provider is ignored.
  *      The provider is never left empty (paseo run needs --provider): then the
  *      runner's default provider, then the first offered provider whose check
  *      did not fail; none: decline
@@ -333,16 +333,10 @@ export function route(
 			why,
 		};
 
-	const pref = {
-		provider: d.env.agent?.provider ?? d.env.provider,
-		mode: d.env.agent?.mode,
-		model: undefined as string | undefined,
-	};
 	const stageDefault = routing.defaults?.[d.stage] ?? {};
 	const layers = [
 		["rule", rule],
 		["target", target],
-		["instruction", pref],
 		["default", stageDefault],
 	] as const;
 	const agent: AgentSettings = {};
@@ -353,15 +347,6 @@ export function route(
 			if (v) {
 				agent[field] = v;
 				from.push(`${field} ${v} from ${layer}`);
-				if (layer === "instruction" && field === "provider") {
-					const p = v.split("/")[0] as string;
-					if (!providers.includes(p))
-						return {
-							ok: false,
-							reason: `provider ${p} is not offered by this runner`,
-							why,
-						};
-				}
 				break;
 			}
 		}

@@ -30,7 +30,6 @@ describe.skipIf(!bin)("direct offers over NATS", () => {
 		id: "laptop",
 		account: "bob",
 		serviceAccount: "bob-sa",
-		providers: ["claude"],
 		capabilities: [],
 	};
 

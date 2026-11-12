@@ -23,9 +23,7 @@ const box: Environment = {
 	repo: "https://github.com/acme/box.git",
 	ref: "dev",
 	requires: ["docker"],
-	secrets: ["GH_TOKEN"],
-	provider: { name: "claude", auth: "CLAUDE_TOKEN" },
-	agent: { mode: "bypass" },
+	secrets: ["GH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"],
 	output: { kind: "pr", base: "main" },
 	instructions: "Small commits.",
 };
@@ -37,7 +35,6 @@ test("a form round-trips a full recipe; lists split by line or word", () => {
 		requires: "a, b a",
 		setup: " x \n\n y ",
 		network: "open",
-		mode: "",
 		outputBase: "",
 	};
 	const e = fromForm(f);
@@ -46,9 +43,12 @@ test("a form round-trips a full recipe; lists split by line or word", () => {
 	expect(e.network).toBe("open");
 	expect(e.output).toEqual({ kind: "pr" });
 	expect(fromForm({ ...f, network: "" }).network).toBe("open");
-	expect(fromForm({ ...f, provider: "", instructions: " " })).not.toContainKeys(
-		["agent", "provider", "instructions"],
-	);
+	// No agent settings: the runner and Paseo choose (mm-210.84).
+	expect(fromForm({ ...f, instructions: " " })).not.toContainKeys([
+		"agent",
+		"provider",
+		"instructions",
+	]);
 });
 
 test("empty limits take the defaults; a word is flagged before save", () => {
@@ -76,20 +76,16 @@ test("server errors map to form fields of one environment", () => {
 	const errors = [
 		{ field: "environments.1.repo", message: "required" },
 		{ field: "environments.1.setup.0", message: "must be non-empty text" },
-		{ field: "environments.1.agent.mode", message: "one word, no spaces" },
 		{ field: "environments.1.limits.memoryMb", message: "a whole number" },
 		{ field: "environments.1.network.allow.2", message: "a host" },
-		{ field: "environments.1.provider.auth", message: "a secret name" },
 		{ field: "environments.1.output.kind", message: "pr, branch or none" },
 		{ field: "environments.0.name", message: "used twice" },
 	];
 	expect(errorsFor(errors, 1)).toEqual({
 		repo: "required",
 		setup: "must be non-empty text (1)",
-		mode: "one word, no spaces",
 		memoryMb: "a whole number",
 		network: "a host (3)",
-		providerAuth: "a secret name",
 		outputKind: "pr, branch or none",
 	});
 	expect([...erroredIndexes(errors)].sort()).toEqual([0, 1]);
