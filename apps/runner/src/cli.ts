@@ -34,7 +34,8 @@ import {
 	type RunnerDiagnostics,
 	type RunnerInfo,
 } from "@mastermind/core";
-import { startBoxMode } from "./box/launcher.ts";
+import { DockerDriver } from "./box/docker.ts";
+import { DEFAULT_BOX_IMAGE, startBoxMode } from "./box/launcher.ts";
 import { checkRequirement, FileSetupMemory } from "./check.ts";
 import {
 	checkCredential,
@@ -60,7 +61,7 @@ import {
 	statusPath,
 	writeDoctor,
 } from "./diagnostics.ts";
-import { formatReport, runDoctor } from "./doctor.ts";
+import { type DoctorBox, formatReport, runDoctor } from "./doctor.ts";
 import { EnrolError, enrol } from "./enroll.ts";
 import { PaseoLauncher } from "./launcher.ts";
 import { serveDoctor } from "./remote-doctor.ts";
@@ -136,8 +137,9 @@ const USAGE = `usage:
   mastermind-runner route [dispatch.json] [--env <name>] [--queue <q>]
       [--stage work] [--type <t>] [--label <l>]... [--priority <n>]
   mastermind-runner status [--json]
-  mastermind-runner doctor [--deep] [--json] [settings]
-      steps a-d: config, NATS, routing, Paseo; --deep: e. a real agent; f. secrets
+  mastermind-runner doctor [--deep] [--json] [--box-image <ref>] [--no-box] [settings]
+      steps a-d: config, NATS, routing, Paseo; --deep: e. a real agent; f. secrets;
+      g. box engine and default image (--deep: a real box); --no-box skips g
   mastermind-runner secrets [list] [--json]   needed, present, missing (names only)
   mastermind-runner secrets set <NAME>        value from stdin or a hidden prompt
   mastermind-runner secrets unset <NAME>
@@ -486,6 +488,7 @@ function doctorInput(
 	routing: Routing,
 	source: string,
 	io: Io,
+	box: DoctorBox,
 ) {
 	return {
 		config: cfg,
@@ -497,7 +500,20 @@ function doctorInput(
 		natsUrl: io.env.MASTERMIND_NATS_URL ?? cfg?.natsUrl,
 		version: VERSION,
 		secrets: () => secretsFor(cfg, routing, io),
+		box,
 	};
+}
+
+/** The default image of box mode: --box-image, else MASTERMIND_BOX_IMAGE, else the default. */
+function boxImage(f: Flags, io: Io): string {
+	return f["box-image"] || io.env.MASTERMIND_BOX_IMAGE || DEFAULT_BOX_IMAGE;
+}
+
+/** Step g of a local doctor: box mode unless --no-box. */
+function doctorBox(f: Flags, io: Io): DoctorBox {
+	return f["no-box"]
+		? { noBox: true }
+		: { driver: new DockerDriver({ env: io.env }), image: boxImage(f, io) };
 }
 
 async function cmdDoctor(path: string, f: Flags, io: Io): Promise<number> {
@@ -529,7 +545,7 @@ async function cmdDoctor(path: string, f: Flags, io: Io): Promise<number> {
 			});
 	}
 	const report = await runDoctor({
-		...doctorInput(path, cfg, s, routing, source, io),
+		...doctorInput(path, cfg, s, routing, source, io, doctorBox(f, io)),
 		deep: f.deep === true,
 		runnerProblems,
 	});
@@ -658,6 +674,8 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 		diag.log(line);
 	};
 	// Box mode (default): the engine must answer before any work is taken.
+	// Box steps go to the ticket through the runner (made below).
+	let runner: Runner | undefined;
 	const box = f["no-box"]
 		? null
 		: await startBoxMode({
@@ -666,6 +684,7 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 				image: f["box-image"],
 				outDir: join(dirname(path), "results"),
 				log,
+				onStep: (beadId, line) => runner?.progress(beadId, line),
 			});
 	if (!box)
 		log(
@@ -728,7 +747,7 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 		conn = nc;
 		diag.natsServer = nc.getServer();
 		diag.set("connected");
-		const runner = new Runner({
+		runner = new Runner({
 			client: natsClient(nc, runnerInfo(cfg, settings, routing)),
 			launcher: box?.launcher ?? new PaseoLauncher({ host: f["paseo-host"] }),
 			...(box ? { check: box.check } : { noBox: true }),
@@ -748,7 +767,17 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 			allowRemoteProbe: settings.allowRemoteProbe === true,
 			run: (deep) =>
 				runDoctor({
-					...doctorInput(path, cfg, settings, routing, source, io),
+					...doctorInput(
+						path,
+						cfg,
+						settings,
+						routing,
+						source,
+						io,
+						box
+							? { driver: box.driver, image: boxImage(f, io) }
+							: { noBox: true },
+					),
 					deep,
 				}),
 			onReport: (r) => {

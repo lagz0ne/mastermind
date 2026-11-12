@@ -13,12 +13,19 @@
  *                 uses ("Reply with the single word OK"), then archive it
  *   f. secrets    every secret the environments need is present locally
  *                 (names only; FAIL with 'mastermind-runner secrets set <NAME>')
+ *   g. box        the box engine answers (Docker/Podman API) and the default
+ *                 image is present or pullable; --deep: make a box from it,
+ *                 wait for `paseo status --json` in it, delete it (times each).
+ *                 SKIP when the runner runs with --no-box.
  *
- * No secret is printed: the command line leaves out --env values.
+ * No secret is printed: secrets reach the agent as files; the command line shows only their directory.
  */
 import { existsSync, statSync } from "node:fs";
 import { type ConnectOptions, connect, subjects } from "@mastermind/bus";
 import type { Dispatch } from "@mastermind/core";
+import type { Box, BoxDriver } from "./box/driver.ts";
+import { BOX_LABEL } from "./box/driver.ts";
+import { BOX_ENV } from "./box/run.ts";
 import {
 	type CredentialState,
 	checkCredential,
@@ -30,13 +37,14 @@ import {
 	type AgentSpec,
 	PaseoLauncher,
 	RESULT_SCHEMA,
+	secretsArgs,
 } from "./launcher.ts";
 import { type Decision, type Routing, route } from "./routing.ts";
 import type { SecretsState } from "./secrets/state.ts";
 
 export type StepStatus = "pass" | "warn" | "fail" | "skip";
 export type DoctorStep = {
-	id: "a" | "b" | "c" | "d" | "e" | "f";
+	id: "a" | "b" | "c" | "d" | "e" | "f" | "g";
 	name: string;
 	status: StepStatus;
 	ms: number;
@@ -78,6 +86,8 @@ export type DoctorDeps = {
 	isGitDir?: (dir: string) => Promise<boolean>;
 	/** Monotonic ms, for step times. */
 	clock?: () => number;
+	/** Wait between box readiness polls. */
+	sleep?: (ms: number) => Promise<void>;
 	now?: () => Date;
 };
 
@@ -100,7 +110,20 @@ export type DoctorInput = {
 	secrets?: () => Promise<SecretsState>;
 	/** Step e timeout, ms. */
 	agentTimeoutMs?: number;
+	/** Step g: box mode; absent: no step g. */
+	box?: DoctorBox;
+	/** Step g --deep: longest wait for the agent host in the box, ms. */
+	boxReadyTimeoutMs?: number;
 };
+
+/** How the runner runs agents: in boxes (driver + default image) or not (--no-box). */
+export type DoctorBox =
+	| { noBox: true }
+	| { noBox?: false; driver: BoxDriver; image: string };
+
+export const BOX_READY_TIMEOUT_MS = 60_000;
+const NO_BOX_FIX =
+	"start Docker, or set DOCKER_HOST (Podman: podman system service --time=0 unix://<path>), or start the runner with --no-box at your own risk";
 
 export const NATS_SLOW_MS = 2_000;
 export const AGENT_TIMEOUT_MS = 120_000;
@@ -151,7 +174,7 @@ export function paseoCommandLine(
 			"--label",
 			`${k}=${v}`,
 		]),
-		...(spec.envNames ?? []).flatMap((k) => ["--env", `${k}=…`]),
+		...(spec.envNames?.length ? secretsArgs("<dir>") : []),
 		...(spec.host ? ["--host", spec.host] : []),
 		"<prompt>",
 	];
@@ -684,6 +707,115 @@ export async function runDoctor(
 				st.ok("no environment this runner can get needs a secret");
 		});
 
+	// g. box
+	const box = input.box;
+	if (box?.noBox)
+		skip(
+			"g",
+			"box",
+			"skipped: the runner runs with --no-box (agents run on this machine, owner's risk)",
+		);
+	else if (box)
+		await timed("g", "box", async (st) => {
+			const { driver } = box;
+			const ms = (t0: number) => Math.round(clock() - t0);
+			const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
+			let t0 = clock();
+			try {
+				const engine = await driver.ping();
+				st.ok(`engine ${driver.name} answers: ${engine} (${ms(t0)} ms)`);
+			} catch (error) {
+				// The driver's message may carry its own '; fix: ...'.
+				st.fail(
+					`engine ${driver.name} does not answer: ${msg(error).split("; fix: ")[0]}`,
+					NO_BOX_FIX,
+				);
+				return;
+			}
+			t0 = clock();
+			let image: string;
+			try {
+				image = await driver.ensureImage({ image: box.image });
+				st.ok(`default image ${box.image} present (${ms(t0)} ms)`);
+			} catch (error) {
+				st.fail(
+					`default image ${box.image} is not present and cannot be pulled: ${msg(error).slice(0, 400)}`,
+					"check the image name and the registry login, or --box-image <ref> / MASTERMIND_BOX_IMAGE",
+				);
+				return;
+			}
+			if (!input.deep) {
+				st.ok("doctor --deep also makes a box and starts the agent host in it");
+				return;
+			}
+			const executionId = `doctor-${(deps.now?.() ?? new Date()).getTime()}`;
+			let b: Box | undefined;
+			try {
+				t0 = clock();
+				try {
+					b = await driver.create({
+						image,
+						name: `mm-box-${executionId}`,
+						labels: {
+							[BOX_LABEL.runner]: s.id,
+							[BOX_LABEL.item]: "doctor",
+							[BOX_LABEL.execution]: executionId,
+						},
+						network: "open",
+						env: { ...BOX_ENV },
+					});
+				} catch (error) {
+					st.fail(
+						`cannot make a box from ${image}: ${msg(error).slice(0, 400)}`,
+						"check the engine (disk, rootless Podman setup); the runner log has the engine error",
+					);
+					return;
+				}
+				st.ok(`box ${b.name} made in ${ms(t0)} ms`);
+				// The agent host runs as `paseo` when the image has that user (as in run.ts).
+				const p = await b.exec(["id", "-u", "paseo"], {
+					user: "root",
+					workdir: "/",
+				});
+				const user = p.code === 0 ? { user: "paseo" } : {};
+				t0 = clock();
+				const timeout = input.boxReadyTimeoutMs ?? BOX_READY_TIMEOUT_MS;
+				const sleep = deps.sleep ?? ((n: number) => Bun.sleep(n));
+				for (;;) {
+					const r = await b.exec(["paseo", "status", "--json"], {
+						workdir: "/",
+						...user,
+					});
+					if (r.code === 0) {
+						st.ok(`paseo status --json in the box answers in ${ms(t0)} ms`);
+						break;
+					}
+					if (clock() - t0 > timeout) {
+						const logs = await b.logs(10).catch(() => "");
+						st.fail(
+							`the agent host in the box does not answer within ${timeout / 1000} s: ${paseoError(r)}${logs ? ` | box log: ${logs.replace(/\s+/g, " ").trim().slice(-300)}` : ""}`,
+							"the image must start the Paseo daemon (default image: ghcr.io/getpaseo/paseo); check --box-image / MASTERMIND_BOX_IMAGE",
+						);
+						break;
+					}
+					await sleep(500);
+				}
+			} finally {
+				if (b) {
+					t0 = clock();
+					try {
+						await b.destroy();
+						st.ok(`box ${b.name} deleted in ${ms(t0)} ms`);
+					} catch (error) {
+						st.warn(
+							`cannot delete box ${b.name}: ${msg(error)}`,
+							`the next runner start deletes it; or: docker rm -f ${b.name}`,
+						);
+					}
+				}
+			}
+		});
+
 	return {
 		runner: s.id,
 		at: (deps.now?.() ?? new Date()).toISOString(),
@@ -714,7 +846,7 @@ export function formatReport(r: DoctorReport): string[] {
 	out.push(
 		bad
 			? `runner ${r.runner}: ${bad} step(s) FAIL${warn ? `, ${warn} WARN` : ""}`
-			: `runner ${r.runner}: no failure${warn ? ` (${warn} WARN)` : ""}${r.deep ? "" : "; doctor --deep also starts a real agent"}`,
+			: `runner ${r.runner}: no failure${warn ? ` (${warn} WARN)` : ""}${r.deep ? "" : "; doctor --deep also starts a real agent and a box"}`,
 	);
 	return out;
 }

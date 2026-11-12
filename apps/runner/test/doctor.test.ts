@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { tmpdir } from "node:os";
+import { BoxError } from "../src/box/driver.ts";
 import type { RunnerConfig, RunnerSettings } from "../src/config.ts";
 import {
 	asksPermission,
@@ -15,6 +16,7 @@ import {
 } from "../src/doctor.ts";
 import { type AgentSpec, LaunchError } from "../src/launcher.ts";
 import { implicitRouting } from "../src/routing.ts";
+import { FakeDriver } from "./box/fake-driver.ts";
 
 const settings = (over: Partial<RunnerSettings> = {}): RunnerSettings => ({
 	id: "laptop",
@@ -305,7 +307,131 @@ test("the command line hides secret values", () => {
 		labels: { purpose: "probe" },
 		envNames: ["GH_TOKEN"],
 	});
-	expect(line).toContain("GH_TOKEN=…");
+	expect(line).toContain("MASTERMIND_ENV_FILE=");
+	expect(line).not.toContain("GH_TOKEN");
 	expect(line).not.toContain("secret");
 	expect(line).toContain("--label purpose=probe");
+});
+
+describe("doctor step g: box", () => {
+	const image = "ghcr.io/getpaseo/paseo:0.15.4";
+
+	test("without a box input there is no step g", async () => {
+		const r = await runDoctor(input(), world().deps);
+		expect(r.steps.find((x) => x.id === "g")).toBeUndefined();
+	});
+
+	test("--no-box: SKIP with the reason", async () => {
+		const g = step(
+			await runDoctor(input({ box: { noBox: true } }), world().deps),
+			"g",
+		);
+		expect(g.status).toBe("skip");
+		expect(g.detail[0]).toContain("--no-box");
+	});
+
+	test("plain doctor: engine answers and the default image is there; no box is made", async () => {
+		const driver = new FakeDriver();
+		const g = step(
+			await runDoctor(input({ box: { driver, image } }), world().deps),
+			"g",
+		);
+		expect(g.status).toBe("pass");
+		expect(g.detail.join("\n")).toContain("engine fake answers: fake 1.0");
+		expect(driver.images).toEqual([{ image }]);
+		expect(driver.created).toHaveLength(0);
+	});
+
+	test("engine down: FAIL with the fix, --no-box included", async () => {
+		const driver = new FakeDriver();
+		driver.ping = async () => {
+			throw new BoxError(
+				"cannot reach the box engine at unix:///x.sock: ENOENT; fix: start Docker",
+			);
+		};
+		const r = await runDoctor(input({ box: { driver, image } }), world().deps);
+		const g = step(r, "g");
+		expect(g.status).toBe("fail");
+		expect(g.problem).toContain("ENOENT");
+		expect(g.problem).not.toContain("fix:");
+		expect(g.fix).toContain("--no-box");
+		expect(r.ok).toBe(false);
+		expect(driver.images).toHaveLength(0);
+	});
+
+	test("image cannot be pulled: FAIL with the fix", async () => {
+		const driver = new FakeDriver();
+		driver.ensureImage = async () => {
+			throw new BoxError("pull x: manifest unknown");
+		};
+		const g = step(
+			await runDoctor(input({ box: { driver, image: "x" } }), world().deps),
+			"g",
+		);
+		expect(g.status).toBe("fail");
+		expect(g.problem).toContain("manifest unknown");
+		expect(g.fix).toContain("--box-image");
+	});
+
+	test("--deep: makes a labelled box, waits for paseo status as paseo, deletes it", async () => {
+		const driver = new FakeDriver();
+		let tries = 0;
+		driver.handler = (cmd) =>
+			cmd[0] === "paseo" && ++tries < 3
+				? { code: 1, stdout: "", stderr: "daemon not running" }
+				: undefined;
+		const { deps } = world();
+		const r = await runDoctor(input({ deep: true, box: { driver, image } }), {
+			...deps,
+			sleep: async () => {},
+		});
+		const g = step(r, "g");
+		expect(g.status).toBe("pass");
+		expect(driver.created).toHaveLength(1);
+		expect(driver.created[0]?.labels["mastermind.runner"]).toBe("laptop");
+		const status = driver.execs.filter((e) => e.cmd[0] === "paseo");
+		expect(status).toHaveLength(3);
+		expect(status[0]?.cmd).toEqual(["paseo", "status", "--json"]);
+		expect(status[0]?.opts.user).toBe("paseo");
+		expect(driver.boxes.size).toBe(0);
+		expect(g.detail.join("\n")).toMatch(/made in \d+ ms/);
+		expect(g.detail.join("\n")).toMatch(/deleted in \d+ ms/);
+	});
+
+	test("--deep: the agent host never answers: FAIL, and the box is still deleted", async () => {
+		const driver = new FakeDriver();
+		driver.handler = (cmd) =>
+			cmd[0] === "paseo"
+				? { code: 1, stdout: "", stderr: "connect ECONNREFUSED" }
+				: undefined;
+		let t = 0;
+		const { deps } = world();
+		const g = step(
+			await runDoctor(
+				input({ deep: true, box: { driver, image }, boxReadyTimeoutMs: 1_000 }),
+				{ ...deps, clock: () => (t += 400), sleep: async () => {} },
+			),
+			"g",
+		);
+		expect(g.status).toBe("fail");
+		expect(g.problem).toContain("ECONNREFUSED");
+		expect(g.problem).toContain("daemon log");
+		expect(driver.boxes.size).toBe(0);
+		expect(driver.removed).toHaveLength(1);
+	});
+
+	test("--deep: a box that cannot be made: FAIL, nothing left", async () => {
+		const driver = new FakeDriver();
+		driver.createError = new BoxError("POST /containers/create: 500 no space");
+		const g = step(
+			await runDoctor(
+				input({ deep: true, box: { driver, image } }),
+				world().deps,
+			),
+			"g",
+		);
+		expect(g.status).toBe("fail");
+		expect(g.problem).toContain("no space");
+		expect(driver.boxes.size).toBe(0);
+	});
 });
