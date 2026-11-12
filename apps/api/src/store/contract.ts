@@ -24,6 +24,8 @@ export type ContractOptions = {
 	leaseMs: number;
 	/** False where the implementation lets anyone release (the fake). */
 	releaseChecksHolder?: boolean;
+	/** bun:test options for every test (timeout, retry). */
+	test?: { timeout?: number; retry?: number };
 };
 
 export function workContract(
@@ -61,6 +63,7 @@ export function workContract(
 				expect(now.status).toBe("in_progress");
 				expect(actors).toContain(now.assignee as string);
 			}),
+			opts.test,
 		);
 
 		test(
@@ -73,6 +76,7 @@ export function workContract(
 				expect(again.alreadyClaimed).toBe(true);
 				expect(again.bead.lease).toEqual(first.bead.lease);
 			}),
+			opts.test,
 		);
 
 		test(
@@ -93,6 +97,7 @@ export function workContract(
 				const [held] = await work.claimed();
 				expect(leaseState(held?.lease, c.now())).toBe("live");
 			}),
+			opts.test,
 		);
 
 		test(
@@ -112,6 +117,7 @@ export function workContract(
 				const again = await work.claim(b.id, "bob/b");
 				expect(again.bead.assignee).toBe("bob/b");
 			}),
+			opts.test,
 		);
 
 		test(
@@ -128,6 +134,7 @@ export function workContract(
 				expect(released.status).toBe("open");
 				expect(released.assignee).toBeUndefined();
 			}),
+			opts.test,
 		);
 
 		test(
@@ -147,6 +154,7 @@ export function workContract(
 				expect(await work.ready("be")).toEqual([]);
 				expect((await work.ready("fe")).map((x) => x.id)).toEqual([b.id]);
 			}),
+			opts.test,
 		);
 
 		test(
@@ -160,6 +168,7 @@ export function workContract(
 				expect(await work.claimed()).toEqual([]);
 				expect(await work.ready("be")).toEqual([]);
 			}),
+			opts.test,
 		);
 
 		test(
@@ -168,6 +177,7 @@ export function workContract(
 				expect(work.get("mm-zzzz")).rejects.toBeInstanceOf(NotFound);
 				expect(work.claim("mm-zzzz", "ann/a")).rejects.toBeInstanceOf(NotFound);
 			}),
+			opts.test,
 		);
 	});
 }

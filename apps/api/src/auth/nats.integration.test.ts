@@ -2,8 +2,6 @@
 // startAuth. Needs the binary: NATS_SERVER=/path/to/nats-server bun test src/auth
 // Skips when no nats-server is found (CI has none).
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	connect,
@@ -13,6 +11,11 @@ import {
 	serve,
 	subjects,
 } from "@mastermind/bus";
+import {
+	freePortsConf,
+	startNatsServer,
+	type TestNats,
+} from "@mastermind/work/test";
 import type { NatsConnection } from "@nats-io/nats-core";
 import { createAccount } from "@nats-io/nkeys";
 import { BUCKETS, type ServiceAccount } from "./service.ts";
@@ -21,40 +24,34 @@ import { type AuthService, startAuth } from "./start.ts";
 const bin = process.env.NATS_SERVER ?? Bun.which("nats-server");
 const PASSWORD = "test-secret";
 const CONF = join(import.meta.dir, "../../../../deploy/nats/nats.conf");
+// Server start and the auth service's buckets (sync_interval: always) can take
+// more than bun's 5 s on a busy machine (mm-ut1).
+const START_TIMEOUT_MS = 30_000;
 
 describe.skipIf(!bin)("auth against nats-server", () => {
-	let dir = "";
-	const base = 20_000 + Math.floor(Math.random() * 20_000);
-	const ws = `ws://127.0.0.1:${base + 2}`;
-	let server: ReturnType<typeof Bun.spawn> | undefined;
+	let ws = "";
+	let server: TestNats | undefined;
 	let svc: AuthService;
 	const open: NatsConnection[] = [];
 
 	beforeAll(async () => {
-		dir = mkdtempSync(join(tmpdir(), "mm-auth-"));
-		const conf = (await Bun.file(CONF).text())
-			.replace("port: 4222", `port: ${base}`)
-			.replace("http: 8222", `http: ${base + 1}`)
-			.replace("port: 8080", `port: ${base + 2}`)
-			.replace('"/data/jetstream"', JSON.stringify(join(dir, "js")));
-		await Bun.write(join(dir, "nats.conf"), conf);
+		const deploy = await Bun.file(CONF).text();
 		const issuer = createAccount();
 		// biome-ignore lint/style/noNonNullAssertion: guarded by skipIf
-		server = Bun.spawn([bin!, "-c", join(dir, "nats.conf")], {
+		server = await startNatsServer(bin!, {
+			prefix: "mm-auth-",
+			conf: (dir) =>
+				freePortsConf(deploy, dir, {
+					client: 4222,
+					http: 8222,
+					websocket: 8080,
+				}),
 			env: {
 				NATS_AUTH_PASSWORD: PASSWORD,
 				NATS_ISSUER_PUBLIC: issuer.getPublicKey(),
 			},
-			stdout: "ignore",
-			stderr: "pipe",
 		});
-		for (let i = 0; i < 50; i++) {
-			const r = await fetch(`http://127.0.0.1:${base + 1}/healthz`).catch(
-				() => undefined,
-			);
-			if (r?.ok) break;
-			await Bun.sleep(100);
-		}
+		ws = server.url;
 		svc = await startAuth({
 			natsUrl: ws,
 			authUser: "mastermind",
@@ -68,13 +65,12 @@ describe.skipIf(!bin)("auth against nats-server", () => {
 			subject: msg.subject,
 		}));
 		await svc.app.flush();
-	});
+	}, START_TIMEOUT_MS);
 
 	afterAll(async () => {
 		await Promise.allSettled(open.map((nc) => nc.close()));
 		await svc?.stop();
-		server?.kill();
-		if (dir) rmSync(dir, { recursive: true, force: true });
+		server?.stop();
 	});
 
 	const runner = async (token: string, account: string) => {

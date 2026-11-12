@@ -54,6 +54,16 @@ describe.skipIf(!natsAvailable())("on nats-server", () => {
 				stop: () => store.stop(),
 			};
 		},
-		{ leaseMs: LEASE_MS },
+		{
+			leaseMs: LEASE_MS,
+			// Bun's WebSocket client now and then fails a frame ("RSV2 and RSV3
+			// must be clear") and drops the connection (mm-l3s). nats.js
+			// reconnects in 2-3 s; the request in flight times out after 5 s.
+			// The test timeout stays above that, so the drop fails one attempt
+			// with the NATS timeout (a bun timeout kills the nats-server as a
+			// dangling process, and every later test fails); the retry then
+			// runs on the reconnected connection.
+			test: { timeout: 15_000, retry: 2 },
+		},
 	);
 });
