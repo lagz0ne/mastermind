@@ -22,6 +22,7 @@ import {
 } from "../src/launcher.ts";
 import { implicitRouting } from "../src/routing.ts";
 import { FakeDriver } from "./box/fake-driver.ts";
+import { fakeAnthropic, GOOD_TOKEN } from "./fake-anthropic.ts";
 
 const settings = (over: Partial<RunnerSettings> = {}): RunnerSettings => ({
 	id: "laptop",
@@ -486,5 +487,82 @@ describe("doctor step g: box", () => {
 		expect(g.status).toBe("fail");
 		expect(g.problem).toContain("no space");
 		expect(driver.boxes.size).toBe(0);
+	});
+});
+
+describe("doctor step h: model credential (mm-210.80)", () => {
+	/** The world's fakes, but /v1/models goes to a fake Anthropic over HTTP. */
+	const withAnthropic = (deps: DoctorDeps): DoctorDeps => {
+		const base = deps.fetch as typeof fetch;
+		return {
+			...deps,
+			fetch: ((u: string, init?: RequestInit) =>
+				String(u).includes("/v1/models")
+					? fetch(u, init)
+					: base(u, init)) as typeof fetch,
+		};
+	};
+	const run = async (value: string | null) => {
+		const api = fakeAnthropic();
+		try {
+			const r = await runDoctor(
+				input({
+					modelUpstream: api.url,
+					model: async () =>
+						value === null
+							? null
+							: { secret: "CLAUDE_CODE_OAUTH_TOKEN", value, from: "store" },
+				}),
+				withAnthropic(world().deps),
+			);
+			return { r, h: step(r, "h"), seen: api.seen };
+		} finally {
+			api.stop();
+		}
+	};
+
+	test("a wrong stored token: FAIL with the setup-token fix; the value is never in the report", async () => {
+		const { r, h, seen } = await run("sk-ant-oat01-wrong");
+		expect(h.status).toBe("fail");
+		expect(h.problem).toBe(
+			"CLAUDE_CODE_OAUTH_TOKEN (store) at Anthropic: refused (401) (GET /v1/models with the box proxy's header)",
+		);
+		expect(h.fix).toBe(
+			"run claude setup-token again, then mastermind-runner secrets set CLAUDE_CODE_OAUTH_TOKEN",
+		);
+		expect(r.ok).toBe(false);
+		expect(seen[0]?.get("authorization")).toBe("Bearer sk-ant-oat01-wrong");
+		const text = `${JSON.stringify(r)}\n${formatReport(r).join("\n")}`;
+		expect(text).not.toContain("sk-ant-oat01-wrong");
+		expect(text).toContain("FAIL h. model credential");
+	});
+
+	test("a valid token: PASS", async () => {
+		const { r, h } = await run(GOOD_TOKEN);
+		expect(h.status).toBe("pass");
+		expect(h.detail[0]).toContain("at Anthropic: accepted");
+		expect(r.ok).toBe(true);
+	});
+
+	test("no model credential on this machine: PASS with a note (step f owns missing secrets)", async () => {
+		const { h } = await run(null);
+		expect(h.status).toBe("pass");
+		expect(h.detail[0]).toContain("no CLAUDE_CODE_OAUTH_TOKEN");
+	});
+
+	test("Anthropic does not answer: WARN, not FAIL", async () => {
+		const r = await runDoctor(
+			input({
+				modelUpstream: "http://127.0.0.1:1",
+				model: async () => ({
+					secret: "CLAUDE_CODE_OAUTH_TOKEN",
+					value: "t",
+					from: "env:CLAUDE_CODE_OAUTH_TOKEN",
+				}),
+			}),
+			withAnthropic(world().deps),
+		);
+		expect(step(r, "h").status).toBe("warn");
+		expect(step(r, "h").problem).toContain("not checked (network)");
 	});
 });

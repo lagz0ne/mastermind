@@ -54,6 +54,7 @@ import {
 import { DockerDriver } from "./box/docker.ts";
 import { natsBoxFiles } from "./box/files.ts";
 import { DEFAULT_BOX_IMAGE, startBoxMode } from "./box/launcher.ts";
+import { MODEL_SECRETS } from "./box/proxy.ts";
 import { checkRequirement, FileSetupMemory } from "./check.ts";
 import {
 	checkCredential,
@@ -80,7 +81,12 @@ import {
 	statusPath,
 	writeDoctor,
 } from "./diagnostics.ts";
-import { type DoctorBox, formatReport, runDoctor } from "./doctor.ts";
+import {
+	type DoctorBox,
+	type DoctorModel,
+	formatReport,
+	runDoctor,
+} from "./doctor.ts";
 import { EnrolError, enrol } from "./enroll.ts";
 import {
 	EnvInitError,
@@ -131,6 +137,7 @@ import {
 } from "./routing.ts";
 import { Runner } from "./runner.ts";
 import { readSecretFromStdin, secretsCommand } from "./secrets/command.ts";
+import { lookupSecret } from "./secrets/needs.ts";
 import { type SecretsState, secretsState } from "./secrets/state.ts";
 import { SecretStore, secretsPath } from "./secrets/store.ts";
 import {
@@ -697,7 +704,20 @@ function doctorInput(
 		version: VERSION,
 		secrets: () => secretsFor(cfg, routing, io),
 		box,
+		model: () => modelFor(io),
 	};
+}
+
+/** Step h of the doctor: the model credential a box gets (store, else env; never printed). */
+async function modelFor(io: Io): Promise<DoctorModel | null> {
+	const store = await new SecretStore(secretsPath(io.env))
+		.load()
+		.catch(() => ({}));
+	for (const secret of MODEL_SECRETS) {
+		const hit = await lookupSecret(secret, { store, env: io.env });
+		if (hit) return { secret, value: hit.value, from: hit.from };
+	}
+	return null;
 }
 
 /** The default image of box mode: --box-image, else MASTERMIND_BOX_IMAGE, else the default. */

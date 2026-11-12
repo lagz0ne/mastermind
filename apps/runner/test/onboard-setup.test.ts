@@ -268,8 +268,11 @@ function github(installed: string[] = ["duke"]) {
 				: new Response("{}", { status: 401 });
 		}
 		if (key === "GET api.anthropic.com/v1/models") {
+			const h = new Headers(init?.headers);
 			const ok =
-				new Headers(init?.headers).get("x-api-key") === "sk-ant-api-ok";
+				h.get("x-api-key") === "sk-ant-api-ok" ||
+				(h.get("authorization") === "Bearer sk-ant-oat01-ok" &&
+					h.get("anthropic-beta") === "oauth-2025-04-20");
 			return ok
 				? Response.json({ data: [] })
 				: new Response("{}", { status: 401 });
@@ -280,30 +283,74 @@ function github(installed: string[] = ["duke"]) {
 }
 
 describe("Claude credential", () => {
-	test("stored: kept, nothing asked", async () => {
+	test("stored: checked with Anthropic and kept, nothing asked", async () => {
 		const pr = prompt();
+		const gh = github();
 		const r = await claudeCredential({
-			store: memStore({ [CLAUDE_OAUTH]: "sk-ant-oat-x" }),
+			store: memStore({ [CLAUDE_OAUTH]: "sk-ant-oat01-ok" }),
 			prompt: pr.p,
+			fetch: gh.f,
 		});
 		expect(r).toEqual({
 			ok: true,
-			detail: `${CLAUDE_OAUTH} stored on this machine`,
+			detail: `${CLAUDE_OAUTH} stored on this machine, accepted by Anthropic`,
 		});
+		expect(gh.calls).toEqual(["GET api.anthropic.com/v1/models"]);
 		expect(pr.asked).toEqual([]);
 	});
 
-	test("setup-token from the menu: stored locally", async () => {
+	test("stored but refused (mm-210.80): FAIL with the setup-token fix, value never shown", async () => {
+		const r = await claudeCredential({
+			store: memStore({ [CLAUDE_OAUTH]: "sk-ant-oat01-wrong" }),
+			prompt: prompt().p,
+			fetch: github().f,
+		});
+		expect(r).toMatchObject({
+			ok: false,
+			problem: `Anthropic refuses the stored ${CLAUDE_OAUTH}: refused (401)`,
+			fix: "run claude setup-token again, then mastermind-runner secrets set CLAUDE_CODE_OAUTH_TOKEN (or: onboard --claude setup-token)",
+		});
+		expect(JSON.stringify(r)).not.toContain("sk-ant-oat01-wrong");
+	});
+
+	test("stored, no answer from Anthropic: kept, says not checked", async () => {
+		const r = await claudeCredential({
+			store: memStore({ [CLAUDE_OAUTH]: "sk-ant-oat01-ok" }),
+			prompt: prompt().p,
+			fetch: (async () => {
+				throw new Error("ENOTFOUND");
+			}) as unknown as typeof fetch,
+		});
+		expect(r).toEqual({
+			ok: true,
+			detail: `${CLAUDE_OAUTH} stored on this machine (not checked with Anthropic: network)`,
+		});
+	});
+
+	test("setup-token from the menu: checked with Anthropic, stored locally; a refused one is not stored", async () => {
+		const gh = github();
 		const s = memStore();
+		const bad = await claudeCredential({
+			store: s,
+			prompt: prompt({ choose: ["setup-token"], secrets: ["sk-ant-oat01-abc"] })
+				.p,
+			fetch: gh.f,
+		});
+		expect(bad).toMatchObject({
+			ok: false,
+			problem: "Anthropic refuses this token: refused (401)",
+			fix: "run claude setup-token again, then mastermind-runner secrets set CLAUDE_CODE_OAUTH_TOKEN",
+		});
+		expect(s.v[CLAUDE_OAUTH]).toBeUndefined();
 		const pr = prompt({
 			choose: ["setup-token"],
-			secrets: ["sk-ant-oat01-abc"],
+			secrets: ["sk-ant-oat01-ok"],
 		});
-		const r = await claudeCredential({ store: s, prompt: pr.p });
+		const r = await claudeCredential({ store: s, prompt: pr.p, fetch: gh.f });
 		expect(r.ok).toBe(true);
-		expect(s.v[CLAUDE_OAUTH]).toBe("sk-ant-oat01-abc");
+		expect(s.v[CLAUDE_OAUTH]).toBe("sk-ant-oat01-ok");
 		expect(pr.out.join("\n")).toContain("claude setup-token");
-		expect(pr.out.join("\n")).not.toContain("sk-ant-oat01-abc");
+		expect(pr.out.join("\n")).not.toContain("sk-ant-oat01-ok");
 	});
 
 	test("api key: checked with Anthropic; a refused key is not stored", async () => {
@@ -317,7 +364,7 @@ describe("Claude credential", () => {
 		});
 		expect(bad).toMatchObject({
 			ok: false,
-			problem: "Anthropic refuses this API key",
+			problem: "Anthropic refuses this API key: refused (401)",
 		});
 		expect(s.v[ANTHROPIC_KEY]).toBeUndefined();
 		const ok = await claudeCredential({

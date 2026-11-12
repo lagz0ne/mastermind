@@ -17,6 +17,9 @@
  *                 image is present or pullable; --deep: make a box from it,
  *                 wait for `paseo status --json` in it, delete it (times each).
  *                 SKIP when the runner runs with --no-box.
+ *   h. model      the Claude credential the box uses (CLAUDE_CODE_OAUTH_TOKEN,
+ *                 else ANTHROPIC_API_KEY): one GET /v1/models with the header
+ *                 the box proxy sets upstream; refused = FAIL (mm-210.80).
  *
  * No secret is printed: secrets reach the agent as files; the command line shows only their directory.
  */
@@ -42,12 +45,17 @@ import {
 	RESULT_SCHEMA,
 	secretsArgs,
 } from "./launcher.ts";
+import {
+	checkModelSecret,
+	modelCheckText,
+	modelCredentialFix,
+} from "./model-check.ts";
 import { type Decision, type Routing, route } from "./routing.ts";
 import type { SecretsState } from "./secrets/state.ts";
 
 export type StepStatus = "pass" | "warn" | "fail" | "skip";
 export type DoctorStep = {
-	id: "a" | "b" | "c" | "d" | "e" | "f" | "g";
+	id: "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h";
 	name: string;
 	status: StepStatus;
 	ms: number;
@@ -117,6 +125,17 @@ export type DoctorInput = {
 	box?: DoctorBox;
 	/** Step g --deep: longest wait for the agent host in the box, ms. */
 	boxReadyTimeoutMs?: number;
+	/** Step h: the model credential the box uses (value and where it is from); absent: no step h. */
+	model?: () => Promise<DoctorModel | null>;
+	/** Step h: Anthropic's base URL (tests). */
+	modelUpstream?: string;
+};
+
+/** The model credential of the box, as the runner resolves it (never printed). */
+export type DoctorModel = {
+	secret: "CLAUDE_CODE_OAUTH_TOKEN" | "ANTHROPIC_API_KEY";
+	value: string;
+	from: string;
 };
 
 /** How the runner runs agents: in boxes (driver + default image) or not (--no-box). */
@@ -827,6 +846,30 @@ export async function runDoctor(
 					}
 				}
 			}
+		});
+
+	// h. model credential: accepted by Anthropic, with the box proxy's header
+	const model = input.model;
+	if (model)
+		await timed("h", "model credential", async (st) => {
+			const m = await model();
+			if (!m) {
+				st.ok(
+					"no CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY on this machine (step f says if an environment needs one)",
+				);
+				return;
+			}
+			const c = await checkModelSecret(
+				m.secret,
+				m.value,
+				deps.fetch,
+				input.modelUpstream,
+			);
+			const line = `${m.secret} (${m.from}) at Anthropic: ${modelCheckText(c)} (GET /v1/models with the box proxy's header)`;
+			if (c.result === "accepted") st.ok(line);
+			else if (c.result === "refused")
+				st.fail(line, modelCredentialFix(m.secret));
+			else st.warn(line, "check the network to api.anthropic.com");
 		});
 
 	return {
