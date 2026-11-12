@@ -4,6 +4,7 @@ import {
 	envNameOf,
 	isAddress,
 	notReadyReasons,
+	otherProcess,
 	parseAddress,
 	READINESS_FRESH_MS,
 	toLabel,
@@ -85,5 +86,40 @@ describe("notReadyReasons (mm-210.59)", () => {
 		expect(notReadyReasons(degraded, 0, 1000)).toEqual([
 			"state degraded: Docker does not answer",
 		]);
+	});
+});
+
+describe("otherProcess (mm-210.79)", () => {
+	test("sessions must match; an older runner matches by version", () => {
+		expect(otherProcess({ session: "a" }, { session: "a" })).toBeNull();
+		expect(otherProcess({ session: "a" }, { session: "b" })).toContain(
+			"another process of this runner (session a; this request: session b)",
+		);
+		expect(otherProcess({}, { session: "b" })).not.toBeNull();
+		expect(otherProcess({ session: "a" }, { version: "v1" })).not.toBeNull();
+		expect(otherProcess({ version: "v2" }, { version: "v1" })).toContain(
+			"(version v2; this request: version v1)",
+		);
+		expect(otherProcess({ version: "v1" }, { version: "v1" })).toBeNull();
+		// Cannot tell: no version on one side.
+		expect(otherProcess({}, { version: "v1" })).toBeNull();
+		expect(otherProcess({ version: "v1" }, {})).toBeNull();
+	});
+
+	test("notReadyReasons: a ready status of another process is not ready", () => {
+		const ready = {
+			version: "new",
+			readiness: {
+				state: "ready" as const,
+				readyEnvironments: [],
+				failedChecks: [],
+				checkedAt: null,
+			},
+		};
+		expect(notReadyReasons(ready, 0, 1, null, { version: "old" })[0]).toContain(
+			"another process",
+		);
+		expect(notReadyReasons(ready, 0, 1, null, { version: "new" })).toEqual([]);
+		expect(notReadyReasons(ready, 0, 1)).toEqual([]);
 	});
 });

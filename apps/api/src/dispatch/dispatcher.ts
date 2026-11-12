@@ -66,6 +66,7 @@ import {
 	NOT_ACCEPTED_LABEL,
 	notReadyReasons,
 	type OfferResult,
+	type ProcessOf,
 	parseAddress,
 	queueLabel,
 	queueOf,
@@ -226,7 +227,7 @@ export type DispatcherOptions = {
 
 /** A runner's last status as the dispatcher sees it. */
 export type RunnerStatusSeen = {
-	status: { readiness?: RunnerReadiness };
+	status: { readiness?: RunnerReadiness } & ProcessOf;
 	receivedAt: number;
 };
 
@@ -274,6 +275,8 @@ type Waiter = RunnerState & {
 	environments?: string[];
 	/** The process's session; absent: a runner older than mm-210.79. */
 	session?: string;
+	/** The runner's version (tells two older processes apart). */
+	version?: string;
 	actor: string;
 	queue: string;
 	/** When the runner started to wait (ISO). */
@@ -444,7 +447,7 @@ export class Dispatcher {
 			if (!runner.session) await this.#hold();
 			return { dispatch: null, superseded };
 		}
-		const notReady = await this.#untilReady(actor);
+		const notReady = await this.#untilReady(actor, runner);
 		if (notReady.length) {
 			this.#decide(
 				"decline",
@@ -460,7 +463,9 @@ export class Dispatcher {
 		const reply = await this.#lock(queue, async () => {
 			const ready = (
 				await this.#dispatchable(queue, await this.#work.ready(queue))
-			).filter((b) => this.#eligible(actor, runner.environments, b, queue));
+			).filter((b) =>
+				this.#eligible(actor, runner.environments, b, queue, runner),
+			);
 			const dispatch = await this.#take(state, actor, queue, ready);
 			if (dispatch || this.#stopped || this.#waitMs <= 0) return { dispatch };
 			// Registered under the lock: a ready signal cannot slip in between.
@@ -469,6 +474,7 @@ export class Dispatcher {
 					...state,
 					...(runner.environments ? { environments: runner.environments } : {}),
 					...(runner.session ? { session: runner.session } : {}),
+					...(runner.version ? { version: runner.version } : {}),
 					actor,
 					queue,
 					since: this.#now().toISOString(),
@@ -503,7 +509,7 @@ export class Dispatcher {
 				const waiter = selectWaiter(
 					bead,
 					current.filter((w) =>
-						this.#eligible(w.actor, w.environments, bead, queue),
+						this.#eligible(w.actor, w.environments, bead, queue, w),
 					),
 				);
 				if (!waiter) continue;
@@ -819,6 +825,19 @@ export class Dispatcher {
 					lines.push(`${actor}: ${superseded}`);
 					continue;
 				}
+				// The process that answered must be the ready one (mm-210.79).
+				const notThis = this.#ineligible(
+					actor,
+					undefined,
+					bead,
+					queue,
+					ex.runner,
+				);
+				if (notThis) {
+					ex.reply({ dispatch: null, reason: notThis });
+					lines.push(`${actor}: ${notThis}`);
+					continue;
+				}
 				let dispatch: Dispatch | null;
 				try {
 					dispatch = await this.#claim(bead, actor, queue, "offer");
@@ -988,8 +1007,9 @@ export class Dispatcher {
 		environments: string[] | undefined,
 		bead: Bead,
 		queue: string,
+		from: ProcessOf,
 	): boolean {
-		return this.#ineligible(actor, environments, bead, queue) === null;
+		return this.#ineligible(actor, environments, bead, queue, from) === null;
 	}
 
 	/** Why `actor` may not take `bead`, recorded as a decision; null: it may. */
@@ -998,6 +1018,8 @@ export class Dispatcher {
 		environments: string[] | undefined,
 		bead: Bead,
 		queue: string,
+		/** The process that asks; absent: before an offer (no process yet). */
+		from?: ProcessOf,
 	): string | null {
 		const no = (reason: string) => {
 			this.#decide("decline", queue, bead.id, actor, reason);
@@ -1014,13 +1036,13 @@ export class Dispatcher {
 					? `back-off after release ${c.n} until ${new Date(c.until).toISOString()}`
 					: `back-off after release ${c.n}: never again for this runner`,
 			);
-		const notReady = this.#notReady(actor, this.#envName(bead, queue));
+		const notReady = this.#notReady(actor, this.#envName(bead, queue), from);
 		if (notReady.length) return no(`not ready: ${notReady.join("; ")}`);
 		return null;
 	}
 
 	/** Why the runner `actor` is not ready (for `env`; null: runner-wide). Empty: it is. */
-	#notReady(actor: string, env: string | null): string[] {
+	#notReady(actor: string, env: string | null, from?: ProcessOf): string[] {
 		const gate = this.#opts.readiness;
 		if (!gate) return [];
 		const i = actor.indexOf("/");
@@ -1030,6 +1052,7 @@ export class Dispatcher {
 			seen?.receivedAt ?? null,
 			this.#now().getTime(),
 			env,
+			from,
 		);
 	}
 
@@ -1041,12 +1064,12 @@ export class Dispatcher {
 	}
 
 	/** Wait (up to `waitMs`) until the runner is ready; the reasons if it is not. */
-	async #untilReady(actor: string): Promise<string[]> {
-		let reasons = this.#notReady(actor, null);
+	async #untilReady(actor: string, from: ProcessOf): Promise<string[]> {
+		let reasons = this.#notReady(actor, null, from);
 		const end = Date.now() + this.#waitMs;
 		while (reasons.length && !this.#stopped && Date.now() < end) {
 			await Bun.sleep(Math.min(NOT_READY_POLL_MS, end - Date.now()));
-			reasons = this.#notReady(actor, null);
+			reasons = this.#notReady(actor, null, from);
 		}
 		return reasons;
 	}

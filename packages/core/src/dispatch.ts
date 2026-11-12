@@ -366,21 +366,56 @@ export type RunnerReadiness = {
 /** The dispatcher trusts a runner status for this long (ms). */
 export const READINESS_FRESH_MS = 120_000;
 
+/** Which process asks: its session, else its version (an older runner). */
+export type ProcessOf = { session?: string; version?: string };
+
+/**
+ * The status is from another process of the same runner id (two processes
+ * run, mm-210.79): the line says so; null: same process, or it cannot tell.
+ * A process with a session needs a status with that session. A process
+ * without one (older runner) needs a status without a session and, when both
+ * say a version, the same version.
+ */
+export function otherProcess(
+	status: ProcessOf,
+	from: ProcessOf,
+): string | null {
+	const s = (p: ProcessOf) =>
+		typeof p.session === "string" && p.session ? p.session : null;
+	const v = (p: ProcessOf) =>
+		typeof p.version === "string" && p.version ? p.version : null;
+	const them = s(status)
+		? `session ${s(status)?.slice(0, 8)}`
+		: `version ${v(status) ?? "?"}`;
+	const me = s(from)
+		? `session ${s(from)?.slice(0, 8)}`
+		: `version ${v(from) ?? "?"}`;
+	const line = `its last status is from another process of this runner (${them}; this request: ${me}): two processes run, stop one`;
+	if (s(from)) return s(status) === s(from) ? null : line;
+	if (s(status)) return line;
+	return v(from) && v(status) && v(from) !== v(status) ? line : null;
+}
+
 /**
  * Why a runner may not get work (empty: it may). `status`: the runner's last
  * status; `receivedAt`: when Mastermind got it (ms). `environment`: the
  * item's environment; null: the item has none (state `ready` is enough).
+ * `from`: the process that asks (mm-210.79); a status of another process of
+ * the same runner id does not make it ready. Absent: not checked.
  */
 export function notReadyReasons(
-	status: { readiness?: RunnerReadiness } | null,
+	status: ({ readiness?: RunnerReadiness } & ProcessOf) | null,
 	receivedAt: number | null,
 	now: number,
 	environment: string | null = null,
+	from?: ProcessOf,
 ): string[] {
 	if (!status || receivedAt === null)
 		return [
 			"no status from the runner yet (start it; a runner from before mm-210.59 must be updated and run: mastermind-runner onboard)",
 		];
+	const other = from ? otherProcess(status, from) : null;
+	if (other) return [other];
 	const age = now - receivedAt;
 	if (age > READINESS_FRESH_MS)
 		return [

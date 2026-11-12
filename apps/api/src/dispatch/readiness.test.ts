@@ -161,3 +161,111 @@ describe("readiness gate", () => {
 		expect(s.offers).toEqual(["alice/laptop"]);
 	});
 });
+
+describe("two processes of one runner id (mm-210.79, P0 mm-awdc)", () => {
+	// Production 08:55Z: the new process (1948c46) published a ready status;
+	// the old one (700dcda, no box, no environments, no session) asked `next`
+	// under the same runner id and got the item on the new one's status.
+	const oldReq = (): NextRequest => ({
+		runner: { ...req("yo-buid").runner, version: "700dcda" },
+	});
+	const newReq = (extra = {}): NextRequest => ({
+		runner: {
+			...req("yo-buid").runner,
+			version: "1948c46",
+			environments: ["scratch"],
+			...extra,
+		},
+	});
+
+	test("next: the old process does not pass on the new process's ready status", async () => {
+		const { d, work, report } = setup();
+		work.add({ id: "mm-awdc", labels: ["env:scratch"] }, "build");
+		report("yo-buid", { ...ready(["scratch"]), version: "1948c46" });
+		const r = await d.next("alice", "build", oldReq());
+		expect(r.dispatch).toBeNull();
+		expect(r.notReady?.[0]).toStartWith(
+			"its last status is from another process of this runner (version 1948c46; this request: version 700dcda)",
+		);
+		expect(work.beads.get("mm-awdc")?.assignee).toBeFalsy();
+		expect((await d.next("alice", "build", newReq())).dispatch?.bead.id).toBe(
+			"mm-awdc",
+		);
+	});
+
+	test("waiter woken: the old process waiting while the new one reports ready is not woken", async () => {
+		const { d, work, report } = setup(5_000);
+		// The old one passed the runner-wide check once (its own status said
+		// ready), then the new process's status came.
+		report("yo-buid", { ...ready([]), version: "700dcda" });
+		const older = d.next("alice", "build", oldReq());
+		await Bun.sleep(5);
+		report("yo-buid", { ...ready(["scratch"]), version: "1948c46" });
+		work.add({ id: "mm-awdc", labels: ["env:scratch"] }, "build");
+		await d.ready("build");
+		expect(work.beads.get("mm-awdc")?.assignee).toBeFalsy();
+		d.stop();
+		expect((await older).dispatch).toBeNull();
+	});
+
+	test("with sessions: the status must carry the asking process's session", async () => {
+		const { d, work, report } = setup();
+		work.add({ id: "mm-1" }, "build");
+		report("yo-buid", {
+			...ready([]),
+			version: "d306f8f",
+			session: "bbbb-new",
+		});
+		const other = await d.next(
+			"alice",
+			"build",
+			newReq({
+				version: "d306f8f",
+				session: "cccc-x",
+				startedAt: "2026-11-12T07:00:00Z",
+			}),
+		);
+		expect(other.dispatch).toBeNull();
+		const same = await d.next(
+			"alice",
+			"build",
+			newReq({
+				version: "d306f8f",
+				session: "bbbb-new",
+				startedAt: "2026-11-12T08:00:00Z",
+			}),
+		);
+		expect(same.dispatch?.bead.id).toBe("mm-1");
+	});
+
+	test("offer: an accept from the other process is refused, nothing is claimed", async () => {
+		let clock = new Date("2026-11-12T08:00:00Z");
+		const work = fakeWork(() => clock);
+		const replies: unknown[] = [];
+		const d = new Dispatcher({
+			work,
+			now: () => clock,
+			waitMs: 0,
+			readiness: () => ({
+				status: { ...ready(["scratch"]), version: "1948c46" },
+				receivedAt: clock.getTime(),
+			}),
+			runnersOf: () => ["yo-buid"],
+			offer: async (): Promise<OfferExchange> => ({
+				kind: "accepted",
+				runner: oldReq().runner,
+				reply: (r) => replies.push(r),
+			}),
+		});
+		work.add({ id: "mm-d1", labels: ["to:alice/yo-buid", "env:scratch"] });
+		await d.direct("mm-d1");
+		expect(work.beads.get("mm-d1")?.assignee).toBeFalsy();
+		expect(replies).toEqual([
+			{
+				dispatch: null,
+				reason: expect.stringContaining("another process of this runner"),
+			},
+		]);
+		clock = new Date(clock.getTime() + 1);
+	});
+});
