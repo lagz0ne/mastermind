@@ -152,7 +152,12 @@ export async function envTest(i: EnvTestInput): Promise<boolean> {
 	const changed = dirty
 		.split("\n")
 		.filter(Boolean)
-		.filter((l) => !l.endsWith(relative(i.dir, path)));
+		// `?? .devcontainer/` (a new folder) counts as the config too.
+		.map((l) => l.slice(3))
+		.filter((p) => {
+			const rel = relative(i.dir, path);
+			return p !== rel && !(p.endsWith("/") && rel.startsWith(p));
+		});
 	if (changed.length)
 		notes.push(
 			`${changed.length} changed files are not in the box (only devcontainer.json is used from this disk)`,

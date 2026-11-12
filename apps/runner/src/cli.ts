@@ -982,7 +982,7 @@ async function cmdEnv(
 			for (const e of r.validation.errors) io.out(`  ✗ ${e}`);
 			if (r.validation.ok)
 				io.out(
-					`valid. Next: commit and push it, then: mastermind-runner env test ${target ?? "."}`,
+					`valid. Test it (it uses this file from your disk): mastermind-runner env test ${target ?? "."}; then commit and push it`,
 				);
 		}
 		return r.validation.ok ? EXIT.ok : EXIT.error;

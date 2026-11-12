@@ -226,6 +226,7 @@ describe("env test", () => {
 		};
 		const steps: EnvTestStep[] = [];
 		const ok = await envTest(base(dir, driver, steps, { DOCS_KEY: "v" }));
+		expect(steps[1]?.detail).not.toContain("changed files");
 		const text = steps
 			.map((s) => `${s.ok ? "PASS" : "FAIL"} ${s.step}: ${s.detail}`)
 			.join("\n");
@@ -287,6 +288,17 @@ describe("env test", () => {
 		expect(last?.detail).toContain("check `false`");
 		expect(last?.fix).toContain("customizations.mastermind.check");
 		expect(driver.boxes.size).toBe(0);
+	});
+
+	test("a new, untracked .devcontainer/ is not a changed file", async () => {
+		const dir = await sampleRepo("untracked", {
+			image: "mcr.microsoft.com/devcontainers/base:ubuntu",
+		});
+		await sh(dir, "git", "rm", "-q", "--cached", "-r", ".devcontainer");
+		writeFileSync(join(dir, "other.txt"), "x");
+		const steps: EnvTestStep[] = [];
+		await envTest(base(dir, new FakeDriver(), steps));
+		expect(steps[1]?.detail).toContain("1 changed files are not in the box");
 	});
 
 	test("no config: points to env init", async () => {
