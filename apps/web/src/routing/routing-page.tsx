@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
 	ACCOUNT_ID,
+	ADDRESS,
 	ApiError,
 	addQueue,
 	addRule,
@@ -31,6 +32,7 @@ import {
 	setDefaultQueue,
 	setQueue,
 	setRule,
+	setTargetKind,
 	suggestDefault,
 	tryRouting,
 } from "./routing.ts";
@@ -210,7 +212,7 @@ function RuleRow({
 	return (
 		<div
 			className={cn(
-				"grid grid-cols-[20px_1fr_14px_104px_68px] items-center gap-2 border-b py-1.5",
+				"grid grid-cols-[20px_1fr_14px_minmax(104px,auto)_68px] items-center gap-2 border-b py-1.5",
 				winning && "bg-muted",
 			)}
 			data-doop-id={`rule-${index + 1}`}
@@ -261,25 +263,12 @@ function RuleRow({
 				/>
 			</div>
 			<span className="text-muted-foreground">→</span>
-			<select
-				aria-label={`Queue of rule ${index + 1}`}
-				value={rule.queue}
-				onChange={(e) => onChange({ ...rule, queue: e.target.value })}
-				className={cn(
-					input,
-					"h-5 px-0.5 font-medium text-[11px]",
-					!queues.some((q) => q.name === rule.queue) && "border-destructive",
-				)}
-			>
-				{!queues.some((q) => q.name === rule.queue) && (
-					<option value={rule.queue}>{rule.queue || "pick a queue"}</option>
-				)}
-				{queues.map((q) => (
-					<option key={q.name} value={q.name}>
-						{q.name}
-					</option>
-				))}
-			</select>
+			<RuleTarget
+				index={index}
+				rule={rule}
+				queues={queues}
+				onChange={onChange}
+			/>
 			<span className="flex justify-end gap-1">
 				<button
 					type="button"
@@ -309,6 +298,110 @@ function RuleRow({
 				</button>
 			</span>
 		</div>
+	);
+}
+
+/**
+ * Where a rule sends work: a queue, or `to` one address with what happens
+ * when nobody there accepts (wait, or a fallback queue). Frame SC7_aqhn_q.
+ */
+function RuleTarget({
+	index,
+	rule,
+	queues,
+	onChange,
+}: {
+	index: number;
+	rule: Rule;
+	queues: Queue[];
+	onChange: (rule: Rule) => void;
+}) {
+	const kind = rule.to !== undefined ? "to" : "queue";
+	const seg = (k: "queue" | "to") => (
+		<button
+			type="button"
+			aria-pressed={kind === k}
+			onClick={() => onChange(setTargetKind(rule, k, queues))}
+			className={cn(
+				"px-1.5",
+				kind === k
+					? "bg-foreground font-medium text-background"
+					: "text-muted-foreground hover:text-foreground",
+			)}
+		>
+			{k}
+		</button>
+	);
+	const known = (name: string | undefined) =>
+		!!name && queues.some((q) => q.name === name);
+	return (
+		<span
+			className="flex min-w-0 items-center gap-1 text-[11px]"
+			data-doop-id={`rule-${index + 1}-target`}
+		>
+			<fieldset
+				aria-label={`Target kind of rule ${index + 1}`}
+				className="m-0 inline-flex h-5 shrink-0 overflow-hidden rounded-[var(--radius)] border p-0"
+			>
+				{seg("queue")}
+				{seg("to")}
+			</fieldset>
+			{rule.to === undefined ? (
+				<select
+					aria-label={`Queue of rule ${index + 1}`}
+					value={rule.queue}
+					onChange={(e) => onChange({ ...rule, queue: e.target.value })}
+					className={cn(
+						input,
+						"h-5 min-w-0 px-0.5 font-medium text-[11px]",
+						!known(rule.queue) && "border-destructive",
+					)}
+				>
+					{!known(rule.queue) && (
+						<option value={rule.queue}>{rule.queue || "pick a queue"}</option>
+					)}
+					{queues.map((q) => (
+						<option key={q.name} value={q.name}>
+							{q.name}
+						</option>
+					))}
+				</select>
+			) : (
+				<>
+					<input
+						aria-label={`Address of rule ${index + 1}`}
+						title="<account> or <account>/<runner>"
+						placeholder="account/runner"
+						value={rule.to}
+						onChange={(e) => onChange({ ...rule, to: e.target.value.trim() })}
+						className={cn(
+							input,
+							"h-5 w-24 min-w-0 font-medium text-[11px]",
+							!ADDRESS.test(rule.to) && "border-destructive",
+						)}
+					/>
+					<span className="text-muted-foreground">else</span>
+					<select
+						aria-label={`When nobody accepts rule ${index + 1}`}
+						value={rule.fallback ?? ""}
+						onChange={(e) => {
+							const { fallback: _old, ...rest } = rule;
+							onChange(
+								e.target.value ? { ...rest, fallback: e.target.value } : rest,
+							);
+						}}
+						className={cn(input, "h-5 min-w-0 px-0.5 font-medium text-[11px]")}
+					>
+						<option value="">wait</option>
+						{queues.map((q) => (
+							<option key={q.name} value={q.name}>
+								{q.name}
+							</option>
+						))}
+					</select>
+				</>
+			)}
+		</span>
 	);
 }
 
@@ -445,7 +538,11 @@ function TryBead({
 						{result.label}
 					</span>
 					<span className="font-semibold text-sm">
-						{result.e.queue ? `→ ${result.e.queue}` : "unrouted"}
+						{result.e.queue
+							? `→ ${result.e.queue}`
+							: result.e.to
+								? `→ to ${result.e.to}`
+								: "unrouted"}
 					</span>
 					<span className="text-muted-foreground text-xs">{result.e.why}</span>
 				</div>
@@ -632,7 +729,7 @@ export function RoutingPage() {
 					<Section
 						id="routing-rules"
 						title="Rules"
-						hint="first match wins · a queue label on a bead wins over all rules"
+						hint="first match wins · a queue or to: label on a bead wins over all rules"
 						action={
 							<Button
 								size="sm"

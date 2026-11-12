@@ -4,7 +4,9 @@ import {
 	ENV_TRIAGE_LABEL,
 	envNameOf,
 	FAILED_START_LABEL,
+	NOT_ACCEPTED_LABEL,
 	queueOf,
+	toOf,
 } from "@mastermind/core";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { type FormEvent, useState } from "react";
@@ -60,12 +62,16 @@ function StateLine({ bead }: { bead: Bead }) {
 				? "work"
 				: queueOf(bead)
 					? "waiting for a runner"
-					: "waiting for routing";
+					: toOf(bead)
+						? bead.labels.includes(NOT_ACCEPTED_LABEL)
+							? `not accepted by ${toOf(bead)}: waiting (see notes)`
+							: `offered to ${toOf(bead)}`
+						: "waiting for routing";
 	return (
 		<dl className="grid grid-cols-[5.5rem_1fr] gap-x-3 gap-y-1 text-sm sm:grid-cols-[5.5rem_1fr_5.5rem_1fr]">
 			<dt className="text-muted-foreground">Queue</dt>
 			<dd>
-				<QueuePicker beadId={bead.id} queue={queueOf(bead)} />
+				<QueuePicker beadId={bead.id} queue={queueOf(bead)} to={toOf(bead)} />
 			</dd>
 			<dt className="text-muted-foreground">Column</dt>
 			<dd>{column ? COLUMN_LABELS[column] : "parked"}</dd>

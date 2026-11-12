@@ -9,7 +9,14 @@ export type RuleMatch = {
 	maxPriority?: 0 | 1 | 2 | 3 | 4;
 	idPrefix?: string;
 };
-export type Rule = { match: RuleMatch; queue: string };
+/**
+ * A rule sends a bead to a queue (any member's runner may take it) or to one
+ * address (direct: `<account>` or `<account>/<runner>`; `fallback`: the queue
+ * when nobody there accepts, else it waits).
+ */
+export type Rule =
+	| { match: RuleMatch; queue: string; to?: undefined; fallback?: undefined }
+	| { match: RuleMatch; to: string; fallback?: string; queue?: undefined };
 export type Queue = {
 	name: string;
 	description: string;
@@ -25,12 +32,40 @@ export type RoutingDoc = {
 export type Routing = RoutingDoc & { revision: number };
 export type Explanation = {
 	queue: string | null;
+	/** Direct: the address it is offered to (older apis leave it out). */
+	to?: string | null;
 	ruleIndex: number | null;
 	why: string;
 };
 
 export const QUEUE_NAME = /^[A-Za-z0-9_-]{1,64}$/;
 export const ACCOUNT_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
+/** `<account>` or `<account>/<runner>`. */
+export const ADDRESS = /^[a-z0-9][a-z0-9-]{0,31}(\/[^\s/.*>~]+)?$/;
+
+/** Switch a rule between a queue target and a direct one; the match stays. */
+export function setTargetKind(
+	rule: Rule,
+	kind: "queue" | "to",
+	queues: readonly Queue[],
+): Rule {
+	const extra = Object.fromEntries(
+		Object.entries(rule).filter(
+			([k]) => !["queue", "to", "fallback", "match"].includes(k),
+		),
+	);
+	if (kind === "to")
+		return rule.to !== undefined
+			? rule
+			: ({ ...extra, match: rule.match, to: "" } as Rule);
+	return rule.queue !== undefined
+		? rule
+		: ({
+				...extra,
+				match: rule.match,
+				queue: rule.fallback ?? queues[0]?.name ?? "",
+			} as Rule);
+}
 
 /** Why a bead without a queue is not offered to anybody, in words. */
 export const UNROUTED_REASON =
@@ -118,7 +153,13 @@ export function addQueue(doc: RoutingDoc, name: string): RoutingDoc {
 export function removeQueue(doc: RoutingDoc, name: string): RoutingDoc {
 	return {
 		queues: doc.queues.filter((q) => q.name !== name),
-		rules: doc.rules.filter((r) => r.queue !== name),
+		rules: doc.rules
+			.filter((r) => r.queue !== name)
+			.map((r) => {
+				if (r.fallback !== name) return r;
+				const { fallback: _gone, ...rest } = r;
+				return rest;
+			}),
 		...(doc.defaultQueue && doc.defaultQueue !== name
 			? { defaultQueue: doc.defaultQueue }
 			: {}),
@@ -279,6 +320,19 @@ export const tryRouting = (
 		"POST",
 		"/api/routing/test",
 		{ ...input, ...draft },
+		fetcher,
+	);
+
+/** Manual override: send a bead to one address (null: back to the rules). */
+export const sendTo = (
+	beadId: string,
+	to: string | null,
+	fetcher: Fetch = fetch,
+) =>
+	call<{ bead: unknown }>(
+		"POST",
+		`/api/beads/${encodeURIComponent(beadId)}/to`,
+		{ to },
 		fetcher,
 	);
 

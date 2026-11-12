@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+	ADDRESS,
 	ApiError,
 	addMember,
 	addQueue,
@@ -14,7 +15,9 @@ import {
 	removeMember,
 	removeQueue,
 	saveRouting,
+	sendTo,
 	setDefaultQueue,
+	setTargetKind,
 	suggestDefault,
 } from "./routing.ts";
 
@@ -79,6 +82,56 @@ describe("text", () => {
 			bead: { priority: 2, labels: ["area:api"] },
 		});
 		expect(parseTry("  ")).toBeNull();
+	});
+});
+
+describe("direct targets (to an address)", () => {
+	test("setTargetKind switches queue <-> to and keeps the match and other fields", () => {
+		const rule = { match: { type: "bug" }, queue: "web", environment: "e" };
+		const direct = setTargetKind(rule, "to", DOC.queues);
+		expect(direct).toEqual({
+			match: { type: "bug" },
+			to: "",
+			environment: "e",
+		} as never);
+		expect(setTargetKind(direct, "to", DOC.queues)).toBe(direct);
+		const back = setTargetKind(
+			{ match: {}, to: "bob", fallback: "web" },
+			"queue",
+			DOC.queues,
+		);
+		expect(back).toEqual({ match: {}, queue: "web" });
+		expect(
+			setTargetKind({ match: {}, to: "bob" }, "queue", DOC.queues),
+		).toEqual({ match: {}, queue: "backend" });
+	});
+
+	test("removing a queue drops it as a fallback, the direct rule stays", () => {
+		const doc: RoutingDoc = {
+			...DOC,
+			rules: [{ match: {}, to: "bob", fallback: "web" }],
+		};
+		expect(removeQueue(doc, "web").rules).toEqual([{ match: {}, to: "bob" }]);
+	});
+
+	test("ADDRESS: an account, or account/runner", () => {
+		for (const ok of ["bob", "bob/laptop", "a-1/my_box"])
+			expect(ADDRESS.test(ok)).toBe(true);
+		for (const bad of ["", "Bob", "bob/", "bob/a/b", "bob/a.b"])
+			expect(ADDRESS.test(bad)).toBe(false);
+	});
+
+	test("sendTo posts {to} to the bead", async () => {
+		const calls: { url: string; init?: RequestInit }[] = [];
+		const fetcher = (async (url: string, init?: RequestInit) => {
+			calls.push({ url, init });
+			if (url === "/api/auth/me") return Response.json({ csrf: "tok" });
+			return Response.json({ bead: {} });
+		}) as typeof fetch;
+		await sendTo("mm-210.5", "bob/laptop", fetcher);
+		const post = calls.find((c) => c.url.startsWith("/api/beads/"));
+		expect(post?.url).toBe("/api/beads/mm-210.5/to");
+		expect(JSON.parse(String(post?.init?.body))).toEqual({ to: "bob/laptop" });
 	});
 });
 
