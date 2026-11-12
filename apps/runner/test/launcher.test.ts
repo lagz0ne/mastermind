@@ -5,8 +5,11 @@ import {
 	isLocalHost,
 	LaunchError,
 	PaseoLauncher,
+	PROVIDER_LOGIN_FIX,
 	parseResult,
+	providerLoginMessage,
 	RESULT_SCHEMA,
+	runFailure,
 } from "../src/launcher.ts";
 import { FAKE_PASEO, fakePaseoDir } from "./fakes.ts";
 
@@ -136,6 +139,19 @@ describe("PaseoLauncher (fake paseo CLI)", () => {
 		);
 	});
 
+	test("an agent that cannot log in to its provider fails with the reason and the fix (mm-210.72)", async () => {
+		const err = await launcher.run(spec("FAKE:nologin"), never).then(
+			() => null,
+			(e: Error) => e,
+		);
+		expect(err).toBeInstanceOf(LaunchError);
+		expect(err?.message).toStartWith(
+			'provider login failed: the agent\'s provider answered "Not logged"',
+		);
+		expect(err?.message).toContain("OUTPUT_SCHEMA_FAILED");
+		expect(err?.message).toEndWith(`; fix: ${PROVIDER_LOGIN_FIX}`);
+	});
+
 	test("does not pass the caller's Paseo agent scope to the CLI", async () => {
 		const scoped = new PaseoLauncher({
 			command: FAKE_PASEO,
@@ -195,4 +211,60 @@ test("parseResult", () => {
 		summary: "x",
 	});
 	expect(() => parseResult('{"status":"ok"}')).toThrow(LaunchError);
+});
+
+describe("provider login failures (mm-210.72)", () => {
+	// Real paseo 0.15.4 output: claude with no credential in its config.
+	const evidence = {
+		code: 1,
+		stdout: JSON.stringify({
+			error: {
+				code: "OUTPUT_SCHEMA_FAILED",
+				message: "Agent response did not match the required output schema",
+				details:
+					"Invalid JSON: Unexpected token 'N', \"Not logged\"... is not valid JSON",
+			},
+		}),
+		stderr: "",
+	};
+
+	test("runFailure names the login failure and the fix", () => {
+		const why = runFailure(evidence);
+		expect(why).toStartWith("provider login failed: ");
+		expect(why).toContain("mastermind-runner secrets set ANTHROPIC_API_KEY");
+	});
+
+	test("known provider auth messages match; other failures do not", () => {
+		for (const t of [
+			"Not logged in · Please run /login",
+			"Invalid API key · Please run /login",
+			'API Error: 401 {"type":"error","error":{"type":"authentication_error"}}',
+			"OAuth token has expired",
+			"unexpected status 401 Unauthorized",
+		])
+			expect(providerLoginMessage(t)).not.toBeNull();
+		for (const t of [
+			"Agent is waiting for permission before producing structured output",
+			"MISSING_PROVIDER: Provider is required",
+			"daemon is not running",
+			"logged in as acme",
+		])
+			expect(providerLoginMessage(t)).toBeNull();
+	});
+
+	test("a permission wait still gets its own fix", () => {
+		const why = runFailure({
+			code: 1,
+			stdout: JSON.stringify({
+				error: {
+					code: "OUTPUT_SCHEMA_FAILED",
+					message:
+						"Agent is waiting for permission before producing structured output",
+				},
+			}),
+			stderr: "",
+		});
+		expect(why).toContain("--mode auto");
+		expect(why).not.toContain("provider login failed");
+	});
 });

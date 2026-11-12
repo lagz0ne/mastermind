@@ -14,7 +14,12 @@ import {
 	paseoError,
 	runDoctor,
 } from "../src/doctor.ts";
-import { type AgentSpec, LaunchError } from "../src/launcher.ts";
+import {
+	type AgentSpec,
+	LaunchError,
+	PROVIDER_LOGIN_FIX,
+	runFailure,
+} from "../src/launcher.ts";
 import { implicitRouting } from "../src/routing.ts";
 import { FakeDriver } from "./box/fake-driver.ts";
 
@@ -192,6 +197,35 @@ describe("runner doctor", () => {
 		const e = step(await runDoctor(input({ deep: true }), deps), "e");
 		expect(e.status).toBe("fail");
 		expect(e.fix).toContain("--mode auto");
+	});
+
+	test("a probe agent that cannot log in: step e fails with the login fix (mm-210.72)", async () => {
+		const { deps } = world({
+			run: async () => {
+				throw new LaunchError(
+					runFailure({
+						code: 1,
+						stdout: JSON.stringify({
+							error: {
+								code: "OUTPUT_SCHEMA_FAILED",
+								message:
+									"Agent response did not match the required output schema",
+								details:
+									"Invalid JSON: Unexpected token 'N', \"Not logged\"... is not valid JSON",
+							},
+						}),
+						stderr: "",
+					}),
+				);
+			},
+		});
+		const r = await runDoctor(input({ deep: true }), deps);
+		const e = step(r, "e");
+		expect(e.status).toBe("fail");
+		expect(e.problem).toStartWith("provider login failed: ");
+		expect(e.problem).not.toContain("; fix: ");
+		expect(e.fix).toBe(PROVIDER_LOGIN_FIX);
+		expect(r.ok).toBe(false);
 	});
 
 	test("an answer other than OK is a warning", async () => {

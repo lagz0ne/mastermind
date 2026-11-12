@@ -67,6 +67,26 @@ export class LaunchError extends Error {
 }
 
 /**
+ * What agent CLIs say when they cannot log in to their provider. Paseo does
+ * not report this as an agent error (mm-210.71 Q6): the agent goes idle,
+ * 'finished', lastError null, 0 tokens, and its only message is the text, e.g.
+ * Claude Code "Not logged in · Please run /login". `paseo run --output-schema`
+ * then fails with OUTPUT_SCHEMA_FAILED and only a cut of that text
+ * ('Invalid JSON: Unexpected token 'N', "Not logged"... is not valid JSON').
+ */
+const PROVIDER_LOGIN =
+	/\bnot logged\b|please run \/login|invalid api key|invalid x-api-key|authentication_error|oauth token (?:has )?expired|\b401\b[^\n]{0,40}unauthori[sz]ed/i;
+
+/** The fix line for a provider login failure (box: runner secrets; --no-box: this machine's login). */
+export const PROVIDER_LOGIN_FIX =
+	"mastermind-runner onboard (Claude login), or mastermind-runner secrets set ANTHROPIC_API_KEY (or the key of your provider); with --no-box: log the provider in on this machine";
+
+/** The provider's auth message in a failure text, or null. */
+export function providerLoginMessage(text: string): string | null {
+	return text.match(PROVIDER_LOGIN)?.[0] ?? null;
+}
+
+/**
  * Why `paseo run` failed, from its JSON error on stdout
  * ({error: {code, message, details}}) or else stderr, with a fix when known.
  */
@@ -82,6 +102,9 @@ export function runFailure(res: {
 	const text = err
 		? [err.code, err.message, err.details].filter(Boolean).join(": ")
 		: res.stderr.trim();
+	const login = providerLoginMessage(text);
+	if (login)
+		return `provider login failed: the agent's provider answered "${login}" (paseo run exited ${res.code}: ${text.slice(-300)}); fix: ${PROVIDER_LOGIN_FIX}`;
 	const fix = /waiting for permission/i.test(text)
 		? " (the agent mode asks for permission; fix: mastermind-runner start --mode auto --save)"
 		: "";

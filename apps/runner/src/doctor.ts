@@ -37,6 +37,8 @@ import {
 	type AgentLauncher,
 	type AgentSpec,
 	PaseoLauncher,
+	PROVIDER_LOGIN_FIX,
+	providerLoginMessage,
 	RESULT_SCHEMA,
 	secretsArgs,
 } from "./launcher.ts";
@@ -655,15 +657,18 @@ export async function runDoctor(
 			} catch (error) {
 				const msg = error instanceof Error ? error.message : String(error);
 				const p0 = (d.agent.provider ?? "").split("/")[0] as string;
+				const login = !stop.signal.aborted && providerLoginMessage(msg);
 				st.fail(
 					stop.signal.aborted
 						? `no answer within ${timeout / 1000} s`
-						: msg.slice(0, 600),
-					/permission/i.test(msg)
-						? `the agent waits for permission: mastermind-runner start --mode ${UNATTENDED_MODE[p0] ?? "<a mode that does not ask>"} --save`
-						: /MISSING_PROVIDER/.test(msg)
-							? `update the runner: ${install}`
-							: "run the command above by hand to see the Paseo error",
+						: (login ? (msg.split("; fix: ")[0] ?? msg) : msg).slice(0, 600),
+					login
+						? PROVIDER_LOGIN_FIX
+						: /permission/i.test(msg)
+							? `the agent waits for permission: mastermind-runner start --mode ${UNATTENDED_MODE[p0] ?? "<a mode that does not ask>"} --save`
+							: /MISSING_PROVIDER/.test(msg)
+								? `update the runner: ${install}`
+								: "run the command above by hand to see the Paseo error",
 				);
 			} finally {
 				clearTimeout(timer);

@@ -1,6 +1,6 @@
 // A stand-in for the paseo CLI in tests: `bun test/fake-paseo.ts <args>`.
 // State lives in $FAKE_PASEO_DIR (agents.json, calls.jsonl).
-// The prompt steers `run`: FAKE:fail, FAKE:slow, FAKE:crash, FAKE:garbage.
+// The prompt steers `run`: FAKE:fail, FAKE:slow, FAKE:crash, FAKE:garbage, FAKE:nologin.
 import {
 	appendFileSync,
 	existsSync,
@@ -11,6 +11,13 @@ import {
 import { dirname, join } from "node:path";
 
 type Agent = { id: string; labels: Record<string, string>; cwd: string };
+
+const NO_LOGIN_ERROR = {
+	code: "OUTPUT_SCHEMA_FAILED",
+	message: "Agent response did not match the required output schema",
+	details:
+		"Invalid JSON: Unexpected token 'N', \"Not logged\"... is not valid JSON",
+};
 
 const dir = process.env.FAKE_PASEO_DIR;
 if (!dir) {
@@ -105,6 +112,12 @@ switch (args[0]) {
 		if (prompt.includes("FAKE:crash")) {
 			console.error("daemon is not running");
 			process.exit(2);
+		}
+		// paseo 0.15.4 with claude and no credential (probe mm-210.72): the
+		// agent is made, answers 'Not logged in · Please run /login' 3 times.
+		if (prompt.includes("FAKE:nologin")) {
+			console.log(JSON.stringify({ error: NO_LOGIN_ERROR }, null, 2));
+			process.exit(1);
 		}
 		if (prompt.includes("FAKE:slow")) await Bun.sleep(60_000);
 		if (prompt.includes("FAKE:garbage")) {
