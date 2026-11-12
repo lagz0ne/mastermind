@@ -317,6 +317,40 @@ export function formatState(s: Any): string {
 		];
 		return lines.join("\n");
 	});
+	// Absent on a server before mm-bcm.
+	if (s.dispatcher !== undefined)
+		section("dispatcher (this replica)", s.dispatcher, (v) => {
+			const waiters = Object.entries(v.waiters ?? {}).flatMap(([queue, ws]) =>
+				(ws as Any[]).map((w) => [
+					queue,
+					w.actor,
+					ago(w.since, now),
+					list(w.environments),
+				]),
+			);
+			const decisions = ((v.decisions ?? []) as Any[]).slice(-20);
+			return [
+				"  waiting on next:",
+				waiters.length
+					? table(["queue", "runner", "since", "environments"], waiters)
+					: "    (none)",
+				`  last decisions (${decisions.length} of ${(v.decisions ?? []).length}, newest last):`,
+				decisions.length
+					? table(
+							["at", "kind", "queue", "item", "runner", "count", "reason"],
+							decisions.map((d) => [
+								ago(d.at, now),
+								d.kind,
+								d.queue,
+								d.beadId,
+								d.actor ?? "-",
+								String(d.count ?? 1),
+								d.reason,
+							]),
+						)
+					: "    (none)",
+			].join("\n");
+		});
 	section("last errors", s.errors, (v) => {
 		const lines = (v as Any[]).slice(-20);
 		if (!lines.length) return "  (none)";

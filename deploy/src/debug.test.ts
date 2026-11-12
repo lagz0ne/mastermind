@@ -100,6 +100,63 @@ describe("debug cli", () => {
 		expect(text).toContain("default queue -");
 		expect(text).toContain("work: boom");
 		expect(text).toMatch(/reconnects\s+expired/);
+		// An older server has no dispatcher section: none is printed.
+		expect(text).not.toContain("== dispatcher");
+	});
+
+	test("formats the dispatcher section: waiters and last decisions (mm-bcm)", () => {
+		const base = {
+			now: "2026-11-11T10:00:00Z",
+			nats: [],
+			accounts: [],
+			serviceAccounts: [],
+			runners: [],
+			routing: { revision: 0, doc: {} },
+			environments: { revision: 0 },
+			items: { error: "off" },
+			errors: [],
+		};
+		const text = formatState({
+			...base,
+			dispatcher: {
+				waiters: {
+					main: [
+						{
+							actor: "duke/laptop",
+							since: "2026-11-11T09:59:50Z",
+							environments: ["web"],
+						},
+					],
+				},
+				decisions: [
+					{
+						at: "2026-11-11T09:59:00Z",
+						kind: "decline",
+						queue: "main",
+						beadId: "mm-7",
+						actor: "duke/laptop",
+						reason: "back-off after release 1 until 2026-11-11T10:00:00.000Z",
+						count: 3,
+					},
+					{
+						at: "2026-11-11T09:59:30Z",
+						kind: "offer",
+						queue: "main",
+						beadId: "mm-8",
+						reason: "claimed (on next)",
+						count: 1,
+					},
+				],
+			},
+		});
+		expect(text).toContain("== dispatcher (this replica)");
+		expect(text).toMatch(/main\s+duke\/laptop\s+10s ago\s+web/);
+		expect(text).toContain("last decisions (2 of 2, newest last)");
+		expect(text).toMatch(/decline\s+main\s+mm-7\s+duke\/laptop\s+3\s+back-off/);
+		expect(text).toMatch(/offer\s+main\s+mm-8\s+-\s+1\s+claimed/);
+		expect(
+			formatState({ ...base, dispatcher: { error: "the dispatcher is off" } }),
+		).toContain("ERROR: the dispatcher is off");
 	});
 });
 
