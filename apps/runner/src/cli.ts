@@ -67,7 +67,20 @@ import { type DoctorBox, formatReport, runDoctor } from "./doctor.ts";
 import { EnrolError, enrol } from "./enroll.ts";
 import { PaseoLauncher } from "./launcher.ts";
 import { serveOffers } from "./offer.ts";
-import { fail, type OnboardStep, pass, runOnboard } from "./onboard.ts";
+import {
+	fail,
+	type OnboardStep,
+	pass,
+	runOnboard,
+	type StepResult,
+} from "./onboard.ts";
+import { findEngine, gvisorLine } from "./onboard-box.ts";
+import {
+	claudeCredential,
+	defaultAppName,
+	gitCredential,
+} from "./onboard-credentials.ts";
+import { terminalPrompt } from "./onboard-prompt.ts";
 import {
 	type BoxCheck,
 	evaluate,
@@ -127,6 +140,14 @@ const OPTIONS = {
 	force: { type: "boolean" },
 	deep: { type: "boolean" },
 	start: { type: "boolean" },
+	claude: { type: "string" },
+	git: { type: "string" },
+	"github-org": { type: "string" },
+	"github-app-name": { type: "string" },
+	"github-app-id": { type: "string" },
+	"github-app-key": { type: "string" },
+	"non-interactive": { type: "boolean" },
+	"no-browser": { type: "boolean" },
 	json: { type: "boolean" },
 	version: { type: "boolean", short: "v" },
 	help: { type: "boolean", short: "h" },
@@ -142,10 +163,16 @@ export class UsageError extends Error {
 
 const USAGE = `usage:
   mastermind-runner onboard [<token>] --url <mastermind url> [settings] [--no-box] [--start]
-      checks this machine (box engine, Paseo, providers, box image), enrols,
-      asks for missing secrets, runs doctor --deep, then marks the runner READY;
-      stops at the first failure with the fix; run it again after the fix.
+      checks this machine (box engine: found by itself or the install link;
+      Paseo, providers, box image), enrols, sets up the credentials on this
+      machine only (Claude, git), asks for missing secrets, runs doctor --deep,
+      then marks the runner READY; stops at the first failure with the fix;
+      run it again after the fix (what is done is kept). Guide: SETUP.md.
       --start: start the runner when it is READY
+      --claude setup-token|api-key|skip   --git app|token|skip (values from stdin)
+      --github-org <org> --github-app-name <name> (the app the manifest makes)
+      --github-app-id <id> --github-app-key <file.pem> (an app made before)
+      --non-interactive (flags and stdin only) --no-browser --json
   mastermind-runner enroll <token> --url <mastermind url> [settings]
       enrol only: the runner stays NOT READY (no work) until onboard passes
   mastermind-runner start [settings] [--save] [--box-image <ref>] [--no-box]
@@ -320,6 +347,10 @@ type Io = {
 	readSecret?: (prompt: string) => Promise<string>;
 	/** For the Mastermind HTTP calls (tests). */
 	fetch?: typeof fetch;
+	/** onboard: one visible line (tests; default: the terminal). */
+	ask?: (prompt: string, signal?: AbortSignal) => Promise<string>;
+	/** onboard: may it ask (default: stdin is a terminal)? */
+	interactive?: boolean;
 };
 
 /** The secrets state of this runner: needed names from Mastermind, values looked up locally. */
@@ -637,20 +668,28 @@ async function cmdOnboard(
 		io.cwd,
 	);
 	const noBox = f["no-box"] === true;
-	const driver = noBox ? null : new DockerDriver({ env: io.env });
+	// Made by the engine step, on the socket it found.
+	let driver: DockerDriver | null = null;
+	const say = f.json ? io.err : io.out;
+	const prompt = terminalPrompt({
+		out: say,
+		interactive:
+			!f["non-interactive"] && (io.interactive ?? process.stdin.isTTY === true),
+		...(io.ask ? { ask: io.ask } : {}),
+		readSecret: io.readSecret ?? readSecretFromStdin,
+		noBrowser: f["no-browser"] === true,
+	});
 	const steps: OnboardStep[] = [];
-	if (driver)
+	if (!noBox)
 		steps.push({
 			name: "box engine",
 			run: async () => {
-				try {
-					return pass(`${driver.name} (${await driver.ping()})`);
-				} catch (error) {
-					return fail(
-						`${error instanceof Error ? error.message : error}`,
-						"install and start Docker or Podman (DOCKER_HOST), or onboard with --no-box at your own risk",
-					);
-				}
+				const e = await findEngine({ env: io.env });
+				if (!e.ok) return fail(e.problem, e.fix);
+				driver = new DockerDriver({ env: e.env });
+				return pass(
+					`${e.version} at ${e.endpoint.label}; ${gvisorLine(e.runtimes)}${e.exportLine ? `; for start: ${e.exportLine}` : ""}`,
+				);
 			},
 		});
 	steps.push({
@@ -664,11 +703,12 @@ async function cmdOnboard(
 			);
 		},
 	});
-	if (driver)
+	if (!noBox)
 		steps.push({
 			name: "default box image",
 			run: async () => {
 				const image = boxImage(f, io);
+				if (!driver) return fail("no box engine", "run onboard again");
 				try {
 					return pass(await driver.ensureImage({ image }));
 				} catch (error) {
@@ -718,6 +758,45 @@ async function cmdOnboard(
 				? pass(settings.queues.join(", "))
 				: fail("no queues", "run onboard again with --queue <q>"),
 	});
+	// Credentials: values only in the local secret store (onboard-credentials.ts).
+	const store = new SecretStore(secretsPath(io.env));
+	steps.push({
+		name: "Claude login",
+		run: () =>
+			claudeCredential({
+				store,
+				prompt,
+				...(f.claude ? { choice: f.claude } : {}),
+				...(io.fetch ? { fetch: io.fetch } : {}),
+			}),
+	});
+	steps.push({
+		name: "git credential",
+		run: async () => {
+			let appKey: string | undefined;
+			if (f["github-app-key"]) {
+				const file = Bun.file(resolve(io.cwd, f["github-app-key"]));
+				if (!(await file.exists()))
+					return fail(
+						`no file ${f["github-app-key"]}`,
+						"--github-app-key <the app's private key .pem>",
+					);
+				appKey = await file.text();
+			}
+			return gitCredential({
+				store,
+				prompt,
+				appName:
+					f["github-app-name"] ??
+					defaultAppName(cfg?.account ?? "runner", settings.id),
+				...(f.git ? { choice: f.git } : {}),
+				...(f["github-org"] ? { org: f["github-org"] } : {}),
+				...(f["github-app-id"] ? { appId: f["github-app-id"] } : {}),
+				...(appKey ? { appKey } : {}),
+				...(io.fetch ? { fetch: io.fetch } : {}),
+			});
+		},
+	});
 	let routing: Routing | null = null;
 	let source = "";
 	steps.push({
@@ -731,7 +810,6 @@ async function cmdOnboard(
 					state.problem ?? "the needed secrets are unknown",
 					"check the connection to Mastermind, then run onboard again",
 				);
-			const store = new SecretStore(secretsPath(io.env));
 			for (const name of state.diagnostics.missing) {
 				const value = await (io.readSecret ?? readSecretFromStdin)(
 					`secret ${name} is needed; value (hidden): `,
@@ -792,9 +870,14 @@ async function cmdOnboard(
 			return pass(`runner ${cfg.account}/${settings.id} is READY`);
 		},
 	});
-	if (!(await runOnboard(steps, io.out))) return EXIT.error;
+	const results: ({ name: string } & StepResult)[] = [];
+	const ok = await runOnboard(steps, say, (name, r) =>
+		results.push({ name, ...r }),
+	);
+	if (f.json) io.out(JSON.stringify({ ready: ok, steps: results }, null, 2));
+	if (!ok) return EXIT.error;
 	if (f.start) return cmdStart(path, f, io);
-	io.out("start it: mastermind-runner start");
+	say("start it: mastermind-runner start");
 	return EXIT.ok;
 }
 

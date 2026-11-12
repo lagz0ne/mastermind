@@ -5,13 +5,16 @@
  * skips the enrol step). Only the last step marks the runner READY (config
  * `onboardedAt`); before that `start` asks for no work.
  *
- *   1. local checks, no credential: box engine, Paseo daemon, providers,
- *      default box image (pull)
+ *   1. local checks, no credential: box engine (found by itself, else the
+ *      install link for this OS: onboard-box.ts; gVisor noted), Paseo daemon,
+ *      providers, default box image (pull)
  *   2. enroll (spends the token)
- *   3. needed secret NAMES of its environments; ask for each missing value
+ *   3. credentials, LOCAL only (onboard-credentials.ts): Claude (setup-token
+ *      or API key), git (GitHub App from the manifest, or a fine-grained token)
+ *   4. needed secret NAMES of its environments; ask for each missing value
  *      (hidden prompt or stdin, never argv)
- *   4. doctor --deep (a real box, one real probe agent)
- *   5. READY
+ *   5. doctor --deep (a real box: make, check, delete; one real probe agent)
+ *   6. READY
  */
 
 /** The result of one step. */
@@ -39,6 +42,7 @@ export const fail = (problem: string, fix: string): StepResult => ({
 export async function runOnboard(
 	steps: OnboardStep[],
 	out: (line: string) => void,
+	record?: (name: string, r: StepResult) => void,
 ): Promise<boolean> {
 	for (const [i, step] of steps.entries()) {
 		let r: StepResult;
@@ -50,6 +54,7 @@ export async function runOnboard(
 				"fix the problem above, then run onboard again",
 			);
 		}
+		record?.(step.name, r);
 		const n = `${i + 1}/${steps.length}`;
 		if (r.ok) {
 			out(`✓ ${n} ${step.name}${r.detail ? `: ${r.detail}` : ""}`);
