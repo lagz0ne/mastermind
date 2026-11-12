@@ -115,6 +115,33 @@ The environment's `output` says how code leaves the box. After the agent says `d
   shows it. A failed push or pull request fails the task with the reason. Closing the item
   merges nothing.
 
+## Box network: open, none or an allow list
+
+The environment's `network` sets what the box can reach:
+
+| network | The box |
+|---|---|
+| `open` (default) | The engine's default network. |
+| `none` | No network. |
+| `{ "allow": ["github.com", "*.npmjs.org", "api.example.com:443"] }` | Only these hosts, through a proxy. |
+
+For an allow list the runner makes three things, and deletes all three with the task:
+
+- an internal network `<box>-net` with no route out,
+- a proxy box `<box>-proxy` on that network and on the default network. It connects only to
+  the allowed hosts (CONNECT for HTTPS, plain HTTP) and answers 403 for the rest,
+- the task box on the internal network, with `HTTP_PROXY`, `HTTPS_PROXY` (and lower case),
+  `NO_PROXY=localhost,127.0.0.1,::1` and `NODE_USE_ENV_PROXY=1`.
+
+A tool that does not use the proxy (for example `ssh`, or git over ssh) has no network.
+Entries: `host` (any port), `host:port`, `*.host` (subdomains only, not `host` itself).
+List every host the task needs: the git host, the package registries, and the model API of
+the agent (for Claude Code: `api.anthropic.com`).
+
+The proxy runs with `node` or `bun` from the task's image. For an image without both, set
+`MM_BOX_PROXY_IMAGE` (for example `node:24-alpine`). On Podman the internal network has no
+DNS (the proxy is reached by address): this works without a user D-Bus.
+
 ## Routing: which Paseo runs a dispatch
 
 The user who runs the runner decides where work runs. Put `routing.json` next to the

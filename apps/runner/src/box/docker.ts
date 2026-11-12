@@ -17,11 +17,22 @@ import {
 	type ImageRecipe,
 	imageHash,
 } from "./driver.ts";
+import {
+	PROXY_JS,
+	PROXY_READY,
+	PROXY_SH,
+	parseAllow,
+	proxyEnv,
+} from "./proxy.ts";
 import { tar } from "./tar.ts";
 
 const API = "/v1.41";
 /** Most output kept per exec stream. */
 const MAX_OUTPUT = 4 * 1024 * 1024;
+/** On the boxes of an allow list: the id of their internal network. */
+export const NETWORK_LABEL = "mastermind.network";
+/** On the proxy box of an allow list: `proxy`. */
+export const ROLE_LABEL = "mastermind.role";
 
 export type DockerEndpoint = { base: string; unix?: string; label: string };
 
@@ -144,6 +155,13 @@ export type DockerDriverOptions = {
 	callTimeoutMs?: number;
 	/** Longest pull or build. Default 30 min. */
 	imageTimeoutMs?: number;
+	/**
+	 * Image of the egress proxy box of an allow list; it needs node or bun.
+	 * Default: $MM_BOX_PROXY_IMAGE, else the task box's own image.
+	 */
+	proxyImage?: string;
+	/** Longest wait for the proxy box to listen. Default 30 s. */
+	proxyTimeoutMs?: number;
 };
 
 export class DockerDriver implements BoxDriver {
@@ -152,6 +170,9 @@ export class DockerDriver implements BoxDriver {
 	readonly #log: (line: string) => void;
 	readonly #callMs: number;
 	readonly #imageMs: number;
+	readonly #proxyImage: string | undefined;
+	readonly #proxyMs: number;
+	#podman: Promise<boolean> | undefined;
 	/** One build per image at a time. */
 	readonly #building = new Map<string, Promise<string>>();
 
@@ -161,6 +182,10 @@ export class DockerDriver implements BoxDriver {
 		this.#log = opts.log ?? (() => {});
 		this.#callMs = opts.callTimeoutMs ?? 60_000;
 		this.#imageMs = opts.imageTimeoutMs ?? 30 * 60_000;
+		this.#proxyImage =
+			opts.proxyImage ??
+			((opts.env ?? process.env).MM_BOX_PROXY_IMAGE?.trim() || undefined);
+		this.#proxyMs = opts.proxyTimeoutMs ?? 30_000;
 	}
 
 	get name(): string {
@@ -177,6 +202,8 @@ export class DockerDriver implements BoxDriver {
 			ok404?: boolean;
 			/** Default: the call timeout. null: none (exec output, bounded by the box). */
 			timeoutMs?: number | null;
+			/** A full API path (Podman's /v4.0.0/libpod/...), not under /v1.41. */
+			absolute?: boolean;
 		} = {},
 	): Promise<Response> {
 		// The rootless Podman lock is shared: never wait for the engine forever.
@@ -197,7 +224,7 @@ export class DockerDriver implements BoxDriver {
 		}
 		let res: Response;
 		try {
-			res = await fetch(`${this.#ep.base}${API}${path}`, {
+			res = await fetch(`${this.#ep.base}${init.absolute ? "" : API}${path}`, {
 				method,
 				headers,
 				body,
@@ -320,24 +347,34 @@ export class DockerDriver implements BoxDriver {
 
 	async create(spec: BoxSpec): Promise<Box> {
 		const net = spec.network ?? "open";
-		if (typeof net === "object")
-			throw new BoxError(
-				"network allow lists are not supported by the docker driver yet; use open or none",
-			);
+		if (typeof net === "object") return this.#createAllow(spec, net.allow);
+		const id = await this.#run(spec, net === "none" ? "none" : undefined);
+		return new DockerBox(this, id, spec.name);
+	}
+
+	/** Create and start one container; delete it again when the start fails. */
+	async #run(
+		spec: BoxSpec,
+		networkMode?: string,
+		more: { entrypoint?: string[]; user?: string; capDropAll?: boolean } = {},
+	): Promise<string> {
 		const host: Record<string, unknown> = {
 			Init: true,
 			SecurityOpt: ["no-new-privileges"],
 		};
 		if (spec.limits?.cpu) host.NanoCpus = Math.round(spec.limits.cpu * 1e9);
 		if (spec.limits?.memoryMb) host.Memory = spec.limits.memoryMb * 1024 * 1024;
-		if (net === "none") host.NetworkMode = "none";
+		if (networkMode) host.NetworkMode = networkMode;
+		if (more.capDropAll) host.CapDrop = ["ALL"];
 		const res = await this.#fetch(
 			"POST",
 			`/containers/create?name=${encodeURIComponent(spec.name)}`,
 			{
 				body: {
 					Image: spec.image,
+					...(more.entrypoint ? { Entrypoint: more.entrypoint } : {}),
 					...(spec.cmd ? { Cmd: spec.cmd } : {}),
+					...(more.user ? { User: more.user } : {}),
 					Env: Object.entries(spec.env ?? {}).map(([k, v]) => `${k}=${v}`),
 					Labels: spec.labels,
 					HostConfig: host,
@@ -348,10 +385,172 @@ export class DockerDriver implements BoxDriver {
 		try {
 			await this.#fetch("POST", `/containers/${Id}/start`);
 		} catch (error) {
-			await this.remove(Id).catch(() => {});
+			await this.#delete(Id).catch(() => {});
 			throw error;
 		}
-		return new DockerBox(this, Id, spec.name);
+		return Id;
+	}
+
+	/**
+	 * Allow list: an internal network (no route out) for the task box, and a
+	 * proxy box on it and on the default network that only connects to the
+	 * allowed hosts. The task box gets HTTP(S)_PROXY. All three carry the
+	 * box labels, so destroy and the sweep delete them together.
+	 */
+	async #createAllow(spec: BoxSpec, allowIn: string[]): Promise<Box> {
+		const allow = parseAllow(allowIn);
+		if (typeof allow === "string") throw new BoxError(allow);
+		const made: { net?: string; proxy?: string } = {};
+		try {
+			const netName = `${spec.name}-net`;
+			const netId = await this.#internalNetwork(netName, spec.labels);
+			made.net = netId;
+			const labels = { ...spec.labels, [NETWORK_LABEL]: netId };
+			const proxyImage = this.#proxyImage
+				? await this.ensureImage({ image: this.#proxyImage })
+				: spec.image;
+			const proxyName = `${spec.name}-proxy`;
+			made.proxy = await this.#run(
+				{
+					image: proxyImage,
+					name: proxyName,
+					labels: { ...labels, [ROLE_LABEL]: "proxy" },
+					limits: { cpu: 0.5, memoryMb: 256 },
+					cmd: [],
+					env: { MM_PROXY_JS: PROXY_JS, MM_PROXY_ALLOW: allow.join(",") },
+				},
+				undefined,
+				{
+					entrypoint: ["/bin/sh", "-c", PROXY_SH],
+					user: "65534:65534",
+					capDropAll: true,
+				},
+			);
+			await this.#fetch("POST", `/networks/${netId}/connect`, {
+				body: { Container: made.proxy },
+			});
+			const ip = await this.#proxyReady(made.proxy, netName, netId);
+			this.#log(`box: ${proxyName} allows ${allow.join(", ")} (${ip})`);
+			const id = await this.#run(
+				{
+					...spec,
+					labels,
+					env: { ...spec.env, ...proxyEnv(ip) },
+				},
+				netId,
+			);
+			return new DockerBox(this, id, spec.name, [made.proxy], netId);
+		} catch (error) {
+			if (made.proxy) await this.#delete(made.proxy).catch(() => {});
+			if (made.net) await this.#deleteNetwork(made.net);
+			throw error;
+		}
+	}
+
+	/** Is the engine Podman? (Asked once.) */
+	#isPodman(): Promise<boolean> {
+		this.#podman ??= this.#fetch("GET", "/version")
+			.then((r) => r.json() as Promise<{ Components?: { Name?: string }[] }>)
+			.then((v) =>
+				(v.Components ?? []).some((c) => /podman/i.test(c.Name ?? "")),
+			)
+			.catch(() => false);
+		return this.#podman;
+	}
+
+	/**
+	 * An internal network (no route out). On Podman without DNS: the proxy is
+	 * reached by address, and aardvark-dns needs a user D-Bus that a runner
+	 * service may not have.
+	 */
+	async #internalNetwork(
+		name: string,
+		labels: Record<string, string>,
+	): Promise<string> {
+		if (await this.#isPodman()) {
+			const res = await this.#fetch("POST", "/v4.0.0/libpod/networks/create", {
+				absolute: true,
+				body: { name, internal: true, dns_enabled: false, labels },
+			});
+			return ((await res.json()) as { id: string }).id;
+		}
+		const res = await this.#fetch("POST", "/networks/create", {
+			body: {
+				Name: name,
+				Internal: true,
+				CheckDuplicate: true,
+				Labels: labels,
+			},
+		});
+		return ((await res.json()) as { Id: string }).Id;
+	}
+
+	/** Wait until the proxy listens; its address on the internal network. */
+	async #proxyReady(
+		id: string,
+		netName: string,
+		netId: string,
+	): Promise<string> {
+		const until = Date.now() + this.#proxyMs;
+		for (;;) {
+			const info = (await (
+				await this.#fetch("GET", `/containers/${id}/json`)
+			).json()) as {
+				State?: { Running?: boolean };
+				NetworkSettings?: {
+					Networks?: Record<string, { IPAddress?: string; NetworkID?: string }>;
+				};
+			};
+			const logs = await this.logsOf(id, 50);
+			if (!info.State?.Running)
+				throw new BoxError(
+					`network allow list: the proxy box stopped: ${logs.trim().slice(-500)}`,
+				);
+			const nets = info.NetworkSettings?.Networks ?? {};
+			const ip =
+				nets[netName]?.IPAddress ||
+				Object.values(nets).find((n) => n.NetworkID === netId)?.IPAddress;
+			if (ip && logs.includes(PROXY_READY)) return ip;
+			if (Date.now() > until)
+				throw new BoxError(
+					`network allow list: the proxy box is not ready after ${this.#proxyMs / 1000} s (address ${ip || "none"}): ${logs.trim().slice(-500)}`,
+				);
+			await Bun.sleep(100);
+		}
+	}
+
+	/** @internal the tail of a container's output */
+	async logsOf(id: string, tail: number): Promise<string> {
+		const res = await this.#fetch(
+			"GET",
+			`/containers/${id}/logs?stdout=1&stderr=1&tail=${tail}`,
+		);
+		const d = await demux(res);
+		return `${d.stdout}${d.stderr}`;
+	}
+
+	async #delete(id: string): Promise<void> {
+		await this.#fetch("DELETE", `/containers/${id}?force=1&v=1`, {
+			ok404: true,
+		});
+	}
+
+	/** Delete a network; quiet when it is gone or still in use. */
+	async #deleteNetwork(id: string): Promise<void> {
+		await this.#fetch("DELETE", `/networks/${id}`, { ok404: true }).catch(
+			() => {},
+		);
+	}
+
+	/** @internal for DockerBox: the box, its proxy boxes, then its network. */
+	async destroyAll(
+		id: string,
+		extra: readonly string[],
+		net?: string,
+	): Promise<void> {
+		await this.#delete(id);
+		for (const x of extra) await this.#delete(x);
+		if (net) await this.#deleteNetwork(net);
 	}
 
 	async list(labels: Record<string, string>): Promise<BoxInfo[]> {
@@ -375,9 +574,19 @@ export class DockerDriver implements BoxDriver {
 	}
 
 	async remove(id: string): Promise<void> {
-		await this.#fetch("DELETE", `/containers/${id}?force=1&v=1`, {
+		const res = await this.#fetch("GET", `/containers/${id}/json`, {
 			ok404: true,
 		});
+		if (res.status === 404) return;
+		const info = (await res.json()) as {
+			Config?: { Labels?: Record<string, string> };
+		};
+		await this.#delete(id);
+		// The last box of an allow-list network deletes it. (Podman deletes a
+		// network that is still in use, which breaks the delete of the rest.)
+		const net = info.Config?.Labels?.[NETWORK_LABEL];
+		if (net && (await this.list({ [NETWORK_LABEL]: net })).length === 0)
+			await this.#deleteNetwork(net);
 	}
 
 	/** @internal for DockerBox */
@@ -388,6 +597,7 @@ export class DockerDriver implements BoxDriver {
 			body?: unknown;
 			raw?: Uint8Array;
 			signal?: AbortSignal;
+			ok404?: boolean;
 			timeoutMs?: number | null;
 		},
 	): Promise<Response> {
@@ -407,6 +617,10 @@ class DockerBox implements Box {
 		readonly driver: DockerDriver,
 		readonly id: string,
 		readonly name: string,
+		/** The proxy box of an allow list. */
+		readonly extra: readonly string[] = [],
+		/** The internal network of an allow list. */
+		readonly network?: string,
 	) {}
 
 	async exec(cmd: string[], opts: ExecOptions = {}): Promise<ExecResult> {
@@ -468,16 +682,11 @@ class DockerBox implements Box {
 		return new Uint8Array(await res.arrayBuffer());
 	}
 
-	async logs(tail = 100): Promise<string> {
-		const res = await this.driver.request(
-			"GET",
-			`/containers/${this.id}/logs?stdout=1&stderr=1&tail=${tail}`,
-		);
-		const d = await demux(res);
-		return `${d.stdout}${d.stderr}`;
+	logs(tail = 100): Promise<string> {
+		return this.driver.logsOf(this.id, tail);
 	}
 
 	destroy(): Promise<void> {
-		return this.driver.remove(this.id);
+		return this.driver.destroyAll(this.id, this.extra, this.network);
 	}
 }

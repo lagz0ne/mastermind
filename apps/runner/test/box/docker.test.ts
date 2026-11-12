@@ -117,6 +117,8 @@ let reqs: Req[] = [];
 let images = new Map<string, string>();
 let buildError: string | null = null;
 let containers = new Map<string, unknown>();
+let networks = new Map<string, unknown>();
+let proxyLogs = "mm-proxy listening on 3128\n";
 const server = Bun.serve({
 	unix: sock,
 	async fetch(req) {
@@ -156,9 +158,39 @@ const server = Bun.serve({
 			return new Response('{"stream":"Step 1/5"}\n');
 		}
 		if (path === "/containers/create") {
-			containers.set("c1", body);
-			return json({ Id: "c1" }, 201);
+			const id = `c${containers.size + 1}`;
+			containers.set(id, body);
+			return json({ Id: id }, 201);
 		}
+		if (path === "/networks/create") {
+			networks.set("n1", body);
+			return json({ Id: "n1" }, 201);
+		}
+		if (path === "/networks/n1/connect") return json({});
+		const netDel = path.match(/^\/networks\/(\w+)$/);
+		if (netDel && req.method === "DELETE")
+			return networks.delete(netDel[1] ?? "")
+				? new Response(null, { status: 204 })
+				: json({ message: "no such network" }, 404);
+		const inspect = path.match(/^\/containers\/(\w+)\/json$/);
+		if (inspect) {
+			const c = containers.get(inspect[1] ?? "") as
+				| { Labels?: Record<string, string> }
+				| undefined;
+			if (!c) return json({ message: "no such container" }, 404);
+			return json({
+				Config: { Labels: c.Labels },
+				State: { Running: true },
+				NetworkSettings: {
+					Networks: {
+						podman: { IPAddress: "10.88.0.5" },
+						"mm-box-1-net": { IPAddress: "10.89.0.2", NetworkID: "n1" },
+					},
+				},
+			});
+		}
+		if (/^\/containers\/\w+\/logs$/.test(path))
+			return new Response(frame(1, proxyLogs));
 		if (/^\/containers\/\w+\/start$/.test(path))
 			return new Response(null, { status: 204 });
 		if (/^\/containers\/\w+\/exec$/.test(path)) return json({ Id: "e1" });
@@ -171,8 +203,25 @@ const server = Bun.serve({
 			if (req.method === "PUT") return new Response(null, { status: 200 });
 			return new Response(tar([{ name: "r.patch", data: "diff" }]));
 		}
-		if (path === "/containers/json")
-			return json([{ Id: "c9", Names: ["/mm-box-x"], Labels: { a: "b" } }]);
+		if (path === "/containers/json") {
+			const f = JSON.parse(url.searchParams.get("filters") ?? "{}") as {
+				label?: string[];
+			};
+			const net = f.label?.find((l) => l.startsWith("mastermind.network="));
+			if (!net)
+				return json([{ Id: "c9", Names: ["/mm-box-x"], Labels: { a: "b" } }]);
+			const id = net.split("=")[1];
+			return json(
+				[...containers]
+					.filter(
+						([, c]) =>
+							(c as { Labels?: Record<string, string> }).Labels?.[
+								"mastermind.network"
+							] === id,
+					)
+					.map(([k]) => ({ Id: k, Names: [`/${k}`], Labels: {} })),
+			);
+		}
 		const del = path.match(/^\/containers\/(\w+)$/);
 		if (del && req.method === "DELETE") {
 			const had = containers.delete(del[1] ?? "");
@@ -192,6 +241,8 @@ beforeEach(() => {
 	images = new Map();
 	buildError = null;
 	containers = new Map();
+	networks = new Map();
+	proxyLogs = "mm-proxy listening on 3128\n";
 });
 const driver = () =>
 	new DockerDriver({ env: { DOCKER_HOST: `unix://${sock}` } });
@@ -288,17 +339,141 @@ describe("DockerDriver (fake engine)", () => {
 		expect(reqs.some((r) => r.path === "/containers/c1/start")).toBe(true);
 	});
 
-	test("an allow list is refused (not silently open)", async () => {
+	test("allow list: internal network, proxy box, task box behind the proxy; destroy deletes all three", async () => {
+		const box = await driver().create({
+			image: "img",
+			name: "mm-box-1",
+			labels: { "mastermind.runner": "laptop" },
+			network: { allow: ["GitHub.com", "*.npmjs.org:443"] },
+			env: { A: "1" },
+		});
+		const net = reqs.find((r) => r.path === "/networks/create");
+		expect(net?.body).toMatchObject({
+			Name: "mm-box-1-net",
+			Internal: true,
+			Labels: { "mastermind.runner": "laptop" },
+		});
+		const [proxy, task] = reqs.filter((r) =>
+			r.path.startsWith("/containers/create"),
+		);
+		expect(proxy?.path).toBe("/containers/create?name=mm-box-1-proxy");
+		const pb = proxy?.body as {
+			Env: string[];
+			Labels: Record<string, string>;
+			HostConfig: Record<string, unknown>;
+			User: string;
+			Entrypoint: string[];
+		};
+		expect(pb.Env).toContain("MM_PROXY_ALLOW=github.com,*.npmjs.org:443");
+		expect(pb.Labels).toEqual({
+			"mastermind.runner": "laptop",
+			"mastermind.network": "n1",
+			"mastermind.role": "proxy",
+		});
+		expect(pb.HostConfig.NetworkMode).toBeUndefined();
+		expect(pb.HostConfig.CapDrop).toEqual(["ALL"]);
+		expect(pb.User).toBe("65534:65534");
+		expect(pb.Entrypoint[0]).toBe("/bin/sh");
+		expect(reqs.find((r) => r.path === "/networks/n1/connect")?.body).toEqual({
+			Container: "c1",
+		});
+		expect(task?.path).toBe("/containers/create?name=mm-box-1");
+		expect(task?.body).toMatchObject({
+			Image: "img",
+			Labels: { "mastermind.runner": "laptop", "mastermind.network": "n1" },
+			HostConfig: { NetworkMode: "n1" },
+		});
+		const env = (task?.body as { Env: string[] } | undefined)?.Env;
+		expect(env).toContain("A=1");
+		expect(env).toContain("HTTPS_PROXY=http://10.89.0.2:3128");
+		expect(env).toContain("http_proxy=http://10.89.0.2:3128");
+		expect(box.id).toBe("c2");
+		await box.destroy();
+		expect(
+			reqs.filter((q) => q.method === "DELETE").map((q) => q.path),
+		).toEqual([
+			"/containers/c2?force=1&v=1",
+			"/containers/c1?force=1&v=1",
+			"/networks/n1",
+		]);
+		expect(containers.size).toBe(0);
+		expect(networks.size).toBe(0);
+	});
+
+	test("allow list: a bad entry is refused before anything is made", async () => {
 		const err = await driver()
 			.create({
 				image: "i",
 				name: "n",
 				labels: {},
+				network: { allow: ["https://github.com"] },
+			})
+			.catch((e) => e);
+		expect(err).toBeInstanceOf(BoxError);
+		expect(err.message).toContain("is not a host");
+		expect(reqs.length).toBe(0);
+	});
+
+	test("allow list: a proxy that never listens is a BoxError and nothing is left", async () => {
+		proxyLogs = "mm-proxy: the proxy image has neither node nor bun\n";
+		const d = new DockerDriver({
+			env: { DOCKER_HOST: `unix://${sock}` },
+			proxyTimeoutMs: 200,
+		});
+		const err = await d
+			.create({
+				image: "i",
+				name: "mm-box-1",
+				labels: {},
 				network: { allow: ["github.com"] },
 			})
 			.catch((e) => e);
-		expect(err.message).toContain("allow lists are not supported");
-		expect(reqs.length).toBe(0);
+		expect(err).toBeInstanceOf(BoxError);
+		expect(err.message).toContain("neither node nor bun");
+		expect(containers.size).toBe(0);
+		expect(networks.size).toBe(0);
+	});
+
+	test("allow list: MM_BOX_PROXY_IMAGE runs the proxy from its own image", async () => {
+		images.set("node:24-alpine", "node");
+		await new DockerDriver({
+			env: {
+				DOCKER_HOST: `unix://${sock}`,
+				MM_BOX_PROXY_IMAGE: "node:24-alpine",
+			},
+		}).create({
+			image: "img",
+			name: "mm-box-1",
+			labels: {},
+			network: { allow: ["github.com"] },
+		});
+		const [proxy, task] = reqs.filter((r) =>
+			r.path.startsWith("/containers/create"),
+		);
+		expect(proxy?.body).toMatchObject({ Image: "node:24-alpine" });
+		expect(task?.body).toMatchObject({ Image: "img" });
+	});
+
+	test("remove (the sweep) of an allow-list box also deletes its network once unused", async () => {
+		const d = driver();
+		await d.create({
+			image: "img",
+			name: "mm-box-1",
+			labels: {},
+			network: { allow: ["github.com"] },
+		});
+		reqs = [];
+		await d.remove("c2");
+		await d.remove("c1");
+		await d.remove("c1");
+		expect(
+			reqs.filter((q) => q.method === "DELETE").map((q) => q.path),
+		).toEqual([
+			"/containers/c2?force=1&v=1",
+			"/containers/c1?force=1&v=1",
+			"/networks/n1",
+		]);
+		expect(networks.size).toBe(0);
 	});
 
 	test("exec, copy in, copy out, destroy (twice is fine)", async () => {
