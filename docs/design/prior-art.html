@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mastermind: prior art for the main designs, review of 2026-11-12</title>
+<style>
+:root { --bg:#fff; --fg:#111; --muted:#6b6b6b; --line:#111; --soft:#e6e6e6; --panel:#f6f6f6; --accent:#d0021b; --ok:#0a7d33; --warn:#9a5b00; --code:#f1f1f1; }
+* { box-sizing: border-box; }
+html { font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+body { margin: 0; background: var(--bg); color: var(--fg); }
+main { max-width: 1040px; margin: 0 auto; padding: 18px 18px 60px; }
+header { border-bottom: 3px solid var(--line); padding-bottom: 8px; }
+h1 { font-size: 21px; margin: 0 0 4px; letter-spacing: -0.01em; }
+h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; margin: 34px 0 10px; padding-top: 8px; border-top: 1px solid var(--line); display: flex; gap: 10px; }
+h2 .n { color: var(--accent); }
+h3 { font-size: 13px; margin: 14px 0 6px; }
+p, ul, ol { max-width: 78ch; margin: 6px 0; }
+ul, ol { padding-left: 20px; } li { margin: 3px 0; }
+.meta { color: var(--muted); font-size: 12.5px; }
+code { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--code); padding: 1px 4px; border-radius: 3px; overflow-wrap: anywhere; }
+a { color: var(--fg); text-decoration-color: var(--muted); }
+.src { font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere; }
+table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 13px; }
+th, td { text-align: left; vertical-align: top; padding: 6px 10px 6px 0; border-bottom: 1px solid var(--soft); }
+th { font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); border-bottom: 1px solid var(--line); }
+td:first-child { font-weight: 600; white-space: nowrap; }
+.tag { display: inline-block; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; padding: 1px 6px; border: 1.5px solid currentColor; border-radius: 4px; white-space: nowrap; }
+.tag.keep { color: var(--ok); } .tag.change { color: var(--accent); } .tag.adopt { color: var(--warn); }
+.unc { font-size: 10px; font-weight: 700; letter-spacing: .06em; color: var(--warn); border: 1px dashed currentColor; border-radius: 3px; padding: 0 4px; white-space: nowrap; }
+.rec { border: 2px solid var(--line); border-radius: 4px; padding: 10px 12px; margin: 12px 0 4px; }
+.rec .head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; margin-bottom: 4px; }
+.rec .head b { font-size: 14px; }
+.rec dl { display: grid; grid-template-columns: 70px 1fr; gap: 3px 10px; margin: 6px 0 0; font-size: 13px; }
+.rec dt { font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); padding-top: 2px; }
+.rec dd { margin: 0; }
+.cmp { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 8px 0; }
+.cmp > div { border: 1.5px solid var(--line); border-radius: 4px; padding: 8px 10px; }
+.cmp .where { font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+.cmp ul { padding-left: 16px; font-size: 13px; margin: 4px 0 0; }
+.sum td:first-child { color: var(--accent); width: 22px; }
+.sum td:nth-child(2) { white-space: normal; }
+.wrap { overflow-x: auto; }
+@media (max-width: 640px) {
+  .cmp { grid-template-columns: 1fr; }
+  td:first-child { white-space: normal; }
+  .rec dl { grid-template-columns: 1fr; }
+  .rec dt { padding-top: 6px; }
+  table.prod thead { display: none; }
+  table.prod tr { display: block; border-bottom: 1px solid var(--soft); padding: 6px 0; }
+  table.prod td { display: block; border: 0; padding: 2px 0; }
+}
+</style>
+</head>
+<body>
+<main>
+
+<header>
+<h1>Prior art for Mastermind's main designs</h1>
+<div class="meta">Bead mm-210.61 &middot; 2026-11-12 &middot; research only, no product change. Each section: how established tools solve the problem (with the official page), where Mastermind matches or differs, and one recommendation. A fact marked <span class="unc">UNCERTAIN</span> was not confirmed on an official page. The links open outside the Paseo panel.</div>
+</header>
+
+<h2><span class="n">0</span> The seven recommendations</h2>
+<table class="sum">
+<thead><tr><th>#</th><th>Design</th><th>Verdict</th><th>In one line</th><th>Cost</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>Environment = box recipe</td><td><span class="tag keep">keep</span></td><td>Keep our own recipe. No agent product uses devcontainer.json as its recipe. Later: an optional import from devcontainer.json.</td><td>0 now; import is 1 bead</td></tr>
+<tr><td>2</td><td>Box per task</td><td><span class="tag adopt">adopt</span></td><td>Keep one container per task and the allow-list proxy. Adopt two network phases (setup, then agent) and an optional gVisor runtime.</td><td>2 small beads</td></tr>
+<tr><td>3</td><td>Worker onboarding and readiness</td><td><span class="tag keep">keep</span></td><td>It matches GitHub, GitLab, Buildkite and Kubernetes. Add an offline / stale / remove lifecycle and a 1 h enrol token.</td><td>1 small bead</td></tr>
+<tr><td>4</td><td>Dispatch and routing</td><td><span class="tag adopt">adopt</span></td><td>Keep pull, named queues, <code>req:</code> labels and leases. Add a maximum number of attempts (dead letter). Add fairness per account when accounts share a queue.</td><td>1 small + 1 medium bead</td></tr>
+<tr><td>5</td><td>Work store on JetStream</td><td><span class="tag keep">keep</span></td><td>Keep NATS. One server (R1) is a known risk. Keep backups off the host, test a restore on a schedule, and move to R3 when there are 3 servers.</td><td>small</td></tr>
+<tr><td>6</td><td>Credentials into the box</td><td><span class="tag change">change</span></td><td>Replace the personal token for git with a GitHub App token (1 h, one repo) per task, and keep it out of the agent's reach. Offer an API key for Claude as the first choice.</td><td>medium (2 beads)</td></tr>
+<tr><td>7</td><td>Login by single-use code</td><td><span class="tag keep">keep</span></td><td>Our flow is "an approver approves a device" (like Tailscale), not RFC 8628. Keep it. Add a Deny button. Use the RFC names if a CLI ever logs in.</td><td>small</td></tr>
+</tbody>
+</table>
+<p class="meta">How this was made: three research passes read the official docs (about 140 searches and page reads), then the main claims were read again on the source pages (Codex internet access, Claude Code cloud environments). Our side comes from the code at <code>db0c346</code>.</p>
+
+<!-- ============================================================ 1 -->
+<h2><span class="n">1</span> Environment = box recipe</h2>
+<p><b>Question.</b> Should Mastermind read a repo's <code>.devcontainer/devcontainer.json</code> instead of its own recipe?</p>
+
+<div class="cmp">
+<div><div class="where">Mastermind today</div>
+<ul>
+<li><code>packages/core/src/environment.ts</code>: image, tools (baked and cached by hash), setup, check, limits (cpu, memory, timeout), network (open or allow list), repo, ref, requires, secret NAMES, provider login, output (pr, branch, none), instructions.</li>
+<li>Stored in NATS KV, edited on <code>/environments</code>, one recipe per name, not in the repo.</li>
+</ul></div>
+<div><div class="where">What others do</div>
+<ul>
+<li>Dev environment products (Codespaces, Ona) READ devcontainer.json.</li>
+<li>Agent products (Copilot agent, Codex cloud, Claude Code on the web) use their OWN recipe. None of their docs mention devcontainer.json.</li>
+<li>devcontainer.json has no network policy, no secret values, no time limit and no output.</li>
+</ul></div>
+</div>
+
+<div class="wrap"><table class="prod">
+<thead><tr><th>Product</th><th>How an environment is defined</th><th>Source</th></tr></thead>
+<tbody>
+<tr><td>Dev Container spec</td><td><code>image</code> or <code>build</code>, <code>features</code>, <code>containerEnv</code>/<code>remoteEnv</code>, <code>runArgs</code>, <code>hostRequirements</code> (cpus, memory). Lifecycle: <code>initializeCommand</code> (host), <code>onCreateCommand</code>, <code>updateContentCommand</code>, <code>postCreateCommand</code>, <code>postStartCommand</code>, <code>postAttachCommand</code>. No network policy property. <code>customizations</code> holds product-specific settings.</td><td class="src"><a href="https://containers.dev/implementors/json_reference/">containers.dev/implementors/json_reference</a></td></tr>
+<tr><td>devcontainer CLI</td><td><code>devcontainer up | exec | build | read-configuration</code>, JSON output. Used headless in CI through the <code>devcontainers/ci</code> action.</td><td class="src"><a href="https://github.com/devcontainers/cli">github.com/devcontainers/cli</a>, <a href="https://github.com/devcontainers/ci">github.com/devcontainers/ci</a></td></tr>
+<tr><td>GitHub Codespaces</td><td>Reads devcontainer.json. A top-level <code>"secrets"</code> map lists recommended secret NAMES with a description; the user is asked for values. Prebuilds run <code>onCreateCommand</code> + <code>updateContentCommand</code> and snapshot; <code>postCreateCommand</code> runs per codespace. Secrets are not available at image build time.</td><td class="src"><a href="https://docs.github.com/en/codespaces/setting-up-your-project-for-codespaces/configuring-dev-containers/specifying-recommended-secrets-for-a-repository">docs.github.com: recommended secrets</a>, <a href="https://docs.github.com/en/codespaces/prebuilding-your-codespaces/about-github-codespaces-prebuilds">prebuilds</a></td></tr>
+<tr><td>Ona (Gitpod)</td><td>"Ona fully supports Development Containers", Features included. Old <code>.gitpod.yml</code> is migrated to devcontainer.json plus an Ona config file (<span class="unc">UNCERTAIN</span>: exact file name).</td><td class="src"><a href="https://ona.com/docs/ona/configuration/devcontainer/overview">ona.com/docs: devcontainer</a></td></tr>
+<tr><td>Claude Code on the web</td><td>Environment = name, network level (None, Limited = default allow list, Full), env vars, setup script (root, before Claude starts; result cached), network secrets. No devcontainer.json.</td><td class="src"><a href="https://code.claude.com/docs/en/cloud-environments">code.claude.com/docs/en/cloud-environments</a></td></tr>
+<tr><td>OpenAI Codex cloud</td><td>Base image <code>codex-universal</code>, setup script, maintenance script (on cache resume), env vars, secrets (setup only), internet off for the agent by default. No devcontainer.json in the docs.</td><td class="src"><a href="https://learn.chatgpt.com/docs/environments/cloud-environment">learn.chatgpt.com: cloud environment</a></td></tr>
+<tr><td>Copilot coding agent</td><td><code>.github/workflows/copilot-setup-steps.yml</code>, one job named exactly <code>copilot-setup-steps</code>; only <code>steps</code>, <code>permissions</code>, <code>runs-on</code>, <code>services</code>, <code>snapshot</code>, <code>timeout-minutes</code> (max 59). Own "Agents" secrets. No devcontainer.json.</td><td class="src"><a href="https://docs.github.com/en/copilot/how-tos/use-copilot-agents/coding-agent/customize-the-agent-environment">docs.github.com: customize the agent environment</a></td></tr>
+</tbody>
+</table></div>
+
+<h3>Where we match, where we differ</h3>
+<ul>
+<li><b>Match:</b> our split "tools = baked into a cached image, setup = each box" is the same split as Codespaces prebuilds (<code>onCreate</code>/<code>updateContent</code> cached, <code>postCreate</code> per instance) and the Claude and Codex setup caches.</li>
+<li><b>Match:</b> secret NAMES in the recipe, values elsewhere: same as Codespaces <code>"secrets"</code>.</li>
+<li><b>Differ:</b> our recipe lives in Mastermind, not in the repo. Copilot keeps it in the repo; Claude and Codex keep it in the product, like us.</li>
+<li><b>Differ:</b> we have <code>check</code> (must pass before the agent starts) and <code>output</code>. Nobody else has a separate check; Copilot stops at the first failing setup step, which gives the same effect.</li>
+</ul>
+
+<div class="rec"><div class="head"><span class="tag keep">keep</span><b>Keep our own recipe. Do not read devcontainer.json now.</b></div>
+<dl>
+<dt>Why</dt><dd>Every agent product (Copilot, Codex, Claude) has its own recipe, because devcontainer.json has no network policy, no secret handling, no limits per task and no output. Reading it would still need our recipe for those fields.</dd>
+<dt>Later</dt><dd>An optional field <code>devcontainer: true</code>: the runner takes <code>image</code>/<code>build</code>/<code>features</code> as the base and runs <code>onCreateCommand</code> + <code>updateContentCommand</code> as cached tools, <code>postCreateCommand</code> as setup, through the <code>@devcontainers/cli</code>. That helps repos that already have one. Our fields (network, limits, secrets, output) stay ours.</dd>
+<dt>Cost</dt><dd>0 now. The import is about one bead (runner + doctor + one UI field), when a user asks for it.</dd>
+</dl></div>
+
+<!-- ============================================================ 2 -->
+<h2><span class="n">2</span> Box per task</h2>
+<div class="cmp">
+<div><div class="where">Mastermind today</div>
+<ul>
+<li><code>apps/runner/src/box</code>: one Docker (or Podman) container per task on the runner machine; image cached by recipe hash; limits; deleted after.</li>
+<li>Allow list: internal network with no route out + a proxy box (CONNECT and plain HTTP, 403 for unlisted hosts).</li>
+<li>The same network rule applies to setup and to the agent. Secrets are env vars and files for the whole box life.</li>
+</ul></div>
+<div><div class="where">What others do</div>
+<ul>
+<li>One sandbox per task is the norm: Actions ephemeral runners, Codex and Claude (a VM per task or session), Copilot (an Actions job).</li>
+<li>Egress = an HTTP(S) proxy with a domain allow list, wildcards, a package-registry preset.</li>
+<li>Setup has more network than the agent (Codex: on for setup, off for the agent by default; Copilot: the firewall covers only the agent's Bash tool).</li>
+</ul></div>
+</div>
+
+<div class="wrap"><table class="prod">
+<thead><tr><th>Product</th><th>Sandbox and network</th><th>Source</th></tr></thead>
+<tbody>
+<tr><td>GitHub Actions</td><td>Container jobs (<code>jobs.&lt;id&gt;.container</code>; <code>--network</code> option not supported). Self-hosted <code>--ephemeral</code> runners take one job then de-register; JIT config via <code>generate-jitconfig</code>.</td><td class="src"><a href="https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/run-jobs-in-a-container">docs.github.com: run jobs in a container</a>, <a href="https://docs.github.com/en/actions/reference/runners/self-hosted-runners">self-hosted runners</a></td></tr>
+<tr><td>Copilot agent</td><td>Runs as an Actions job, 59 min max. Firewall on by default with a recommended allow list; it covers only processes the agent starts through its Bash tool, not setup steps or MCP servers. GitHub: "shouldn't be treated as a comprehensive security solution".</td><td class="src"><a href="https://docs.github.com/en/copilot/how-tos/use-copilot-agents/coding-agent/customize-the-agent-firewall">docs.github.com: agent firewall</a></td></tr>
+<tr><td>Codex cloud</td><td>Agent internet off by default. Allow list: none, common-dependencies preset, or all. Option: only <code>GET</code>, <code>HEAD</code>, <code>OPTIONS</code>. Named risks: prompt injection, exfiltration.</td><td class="src"><a href="https://learn.chatgpt.com/docs/cloud/internet-access">learn.chatgpt.com: internet access</a> (read again 2026-11-12)</td></tr>
+<tr><td>Claude Code on the web</td><td>A fresh VM per session. All outbound traffic goes through an HTTP(S) proxy. Levels None / Limited (default) / Full; <code>*.</code> wildcards.</td><td class="src"><a href="https://code.claude.com/docs/en/cloud-environments">code.claude.com: cloud environments</a> (read again)</td></tr>
+<tr><td>Modal sandboxes</td><td>gVisor. <code>block_network</code>, <code>outbound_cidr_allowlist</code>, <code>outbound_domain_allowlist</code>.</td><td class="src"><a href="https://modal.com/docs/guide/sandboxes">modal.com/docs/guide/sandboxes</a></td></tr>
+<tr><td>E2B</td><td>One Firecracker microVM per sandbox, own cgroup and network namespace.</td><td class="src"><a href="https://github.com/e2b-dev/infra">github.com/e2b-dev/infra</a></td></tr>
+<tr><td>gVisor</td><td><code>runsc install</code>, restart Docker, then <code>docker run --runtime=runsc</code>. Same Docker API.</td><td class="src"><a href="https://gvisor.dev/docs/user_guide/quick_start/docker/">gvisor.dev: quick start Docker</a></td></tr>
+<tr><td>Docker hardening</td><td>Rootless mode; <code>userns-remap</code> maps container root to an unprivileged host user.</td><td class="src"><a href="https://docs.docker.com/engine/security/rootless/">docs.docker.com: rootless</a>, <a href="https://docs.docker.com/engine/security/userns-remap/">userns-remap</a></td></tr>
+</tbody>
+</table></div>
+
+<h3>Where we match, where we differ</h3>
+<ul>
+<li><b>Match:</b> one throwaway box per task, deleted after; HTTP(S) proxy with a host allow list and <code>*.host</code>. That is the common design. No official page says any of them uses iptables instead <span class="unc">UNCERTAIN</span>.</li>
+<li><b>Differ:</b> hosted products use a VM per task; we use a container on the user's machine. A container shares the host kernel. gVisor is the cheap middle step and needs no driver change beyond <code>--runtime</code>.</li>
+<li><b>Differ:</b> our setup gets the same network as the agent. Others give setup more (package registries) and the agent less.</li>
+</ul>
+
+<div class="rec"><div class="head"><span class="tag adopt">adopt</span><b>Keep the box. Adopt two network phases and an optional gVisor runtime.</b></div>
+<dl>
+<dt>What</dt><dd>(a) <code>network</code> gets a setup part and an agent part: setup may reach a "package registries" preset plus the list; the agent gets only the list (Codex default). (b) Environment field <code>runtime: "runsc"</code>; doctor checks that the runtime is installed. (c) Optional, later: a "read only" switch (GET/HEAD/OPTIONS) in the proxy, as Codex has.</dd>
+<dt>Why</dt><dd>The agent phase is where prompt injection and exfiltration happen (Codex, Copilot docs). Setup needs registries; the agent mostly does not. gVisor closes most of the gap to a VM for little work.</dd>
+<dt>Cost</dt><dd>Two small beads in the runner (proxy reload between phases; one Docker flag + doctor step). No server change.</dd>
+</dl></div>
+
+<!-- ============================================================ 3 -->
+<h2><span class="n">3</span> Worker onboarding and readiness</h2>
+<div class="cmp">
+<div><div class="where">Mastermind today (mm-210.59)</div>
+<ul>
+<li><code>runner onboard &lt;token&gt;</code>: local checks, enrol with a single-use token (valid 24 h), ask for missing secrets, doctor --deep, then READY.</li>
+<li>States onboarding, checking, ready, degraded. Re-check every 5 min. Status lists the ready environments.</li>
+<li>The server gives work only to a runner whose last status is ready, younger than 2 min, and lists the item's environment.</li>
+</ul></div>
+<div><div class="where">What others do</div>
+<ul>
+<li>A short-lived enrol token becomes a long-lived runner credential (GitHub 1 h token or JIT config; GitLab token made in the UI first, shown once; Buildkite agent token gives a session token, then a token per job).</li>
+<li>"Not ready" = send no new work; it does not kill the worker (Kubernetes readiness, NoSchedule taint).</li>
+<li>A runner that is gone for long becomes stale and is removed.</li>
+</ul></div>
+</div>
+
+<div class="wrap"><table class="prod">
+<thead><tr><th>Product</th><th>Onboarding, labels, health</th><th>Source</th></tr></thead>
+<tbody>
+<tr><td>GitHub self-hosted runner</td><td>Registration token "expires after one hour"; <code>./config.sh --url --token --labels --ephemeral</code>. Status Idle / Active / Offline. <code>config --check</code> reports PASS/FAIL per service. Removed after 14 days without connection; a runner below the minimum version gets no jobs.</td><td class="src"><a href="https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners/adding-self-hosted-runners">adding runners</a>, <a href="https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners/monitoring-and-troubleshooting-self-hosted-runners">monitoring</a>, <a href="https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners/removing-self-hosted-runners">removing</a></td></tr>
+<tr><td>GitLab Runner</td><td>Create the runner in the UI or API first, get a <code>glrt-</code> token (shown once), then <code>gitlab-runner register --token</code>. Old registration tokens can be turned off (410 Gone). Status online (contact in the last 2 h), offline, stale (more than 7 days), never_contacted. Paused runners keep their registration but take no jobs.</td><td class="src"><a href="https://docs.gitlab.com/ci/runners/new_creation_workflow/">docs.gitlab.com: new creation workflow</a>, <a href="https://docs.gitlab.com/ci/runners/runners_scope/">runners scope</a></td></tr>
+<tr><td>Buildkite agent</td><td>Agent token (per cluster) gives a session token at registration, then a job token per job. <code>--tags "queue=..."</code>; an agent belongs to one queue. Hook <code>pre-bootstrap</code> can reject a job before it runs. Health endpoint <code>--health-check-addr</code>: <code>/agent/&lt;n&gt;</code> 500 if the last heartbeat failed.</td><td class="src"><a href="https://buildkite.com/docs/agent/v3/tokens">buildkite.com: tokens</a>, <a href="https://buildkite.com/docs/agent/v3/hooks">hooks</a>, <a href="https://buildkite.com/docs/agent/self-hosted/monitoring-and-observability">monitoring</a></td></tr>
+<tr><td>Kubernetes</td><td>Readiness probe fails: the Pod leaves the Service endpoints (no traffic). Liveness fails: restart. Startup probe gates both. Node NotReady: taint, eviction after 300 s by default.</td><td class="src"><a href="https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/">kubernetes.io: probes</a>, <a href="https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/">taints</a></td></tr>
+</tbody>
+</table></div>
+
+<h3>Where we match, where we differ</h3>
+<ul>
+<li><b>Match:</b> single-use token to a long-lived service-account credential (GitHub, GitLab, Buildkite). Ready / degraded = Kubernetes readiness (stop new work, keep running). Our per-environment readiness is like Buildkite's <code>pre-bootstrap</code> gate, but decided before the offer.</li>
+<li><b>Match:</b> our doctor = GitHub <code>config --check</code>, with a deeper end-to-end run.</li>
+<li><b>Differ:</b> our enrol token lives 24 h (KV <code>mm_tokens</code>); GitHub's lives 1 h.</li>
+<li><b>Differ:</b> the live runner list forgets a runner after 24 h without status (<code>apps/api/src/people/registry.ts</code>), but its service account (the credential) stays valid with no stale or remove rule.</li>
+</ul>
+
+<div class="rec"><div class="head"><span class="tag keep">keep</span><b>Keep the model. Add a stale and remove rule, and a shorter enrol token.</b></div>
+<dl>
+<dt>What</dt><dd>Service accounts of runners: offline (no status for 2 min, what the gate uses now), stale (no status for 7 days, GitLab), flagged and then disabled after 14 days (GitHub removes such runners). Runner enrol token: 1 h (GitHub); the person who enrols runs the command at once anyway.</dd>
+<dt>Why</dt><dd>The model already is the common one. The lifecycle stops unused runner credentials from staying valid for ever. A shorter token lowers the risk of a leaked onboard line.</dd>
+<dt>Cost</dt><dd>One small bead (a timer in the api, a column in /people, one TTL).</dd>
+</dl></div>
+
+<!-- ============================================================ 4 -->
+<h2><span class="n">4</span> Dispatch and routing</h2>
+<div class="cmp">
+<div><div class="where">Mastermind today</div>
+<ul>
+<li><code>packages/router</code>: ordered rules put an item on a named queue, or offer it to one address with a fallback queue.</li>
+<li>Runners pull (<code>next</code>); a waiting runner gets a wake-up. <code>req:&lt;capability&gt;</code> labels: the runner must have every one.</li>
+<li>Pick: priority, then age. Claim = lease of 5 min with heartbeat; release on expiry.</li>
+<li>No attempt counter. No fairness between accounts on one queue.</li>
+</ul></div>
+<div><div class="where">What others do</div>
+<ul>
+<li>Workers pull with a long-poll wait (Temporal, JetStream, SQS).</li>
+<li>Lease = timeout + explicit extension (SQS visibility, JetStream AckWait + in-progress, Temporal heartbeat timeout).</li>
+<li>A cap on redeliveries, then a dead-letter queue or an advisory.</li>
+<li>Fairness by a tenant key on one shared queue.</li>
+</ul></div>
+</div>
+
+<div class="wrap"><table class="prod">
+<thead><tr><th>Product</th><th>Routing, leases, fairness</th><th>Source</th></tr></thead>
+<tbody>
+<tr><td>GitHub Actions</td><td><code>runs-on</code> labels are cumulative: the runner needs all. A matching idle runner that does not pick the job up within 60 s: the job is queued again. No match: it fails after 24 h.</td><td class="src"><a href="https://docs.github.com/en/actions/reference/runners/self-hosted-runners">docs.github.com: self-hosted runners</a></td></tr>
+<tr><td>Buildkite</td><td>Named queue (<code>queue=</code> tag) plus tags that must all match. Concurrency groups across pipelines.</td><td class="src"><a href="https://buildkite.com/docs/agent/v3/queues">buildkite.com: queues</a>, <a href="https://buildkite.com/docs/pipelines/configure/workflows/controlling-concurrency">concurrency</a></td></tr>
+<tr><td>Temporal</td><td>Workers poll task queues, only with spare capacity. Sticky queue falls back to the normal queue after 5 s. Timeouts: Schedule-To-Start, Start-To-Close, Heartbeat. Priority 1-5 plus fairness keys (per tenant, weighted round robin, per-key rate limits).</td><td class="src"><a href="https://docs.temporal.io/task-queue">docs.temporal.io: task queue</a>, <a href="https://docs.temporal.io/encyclopedia/detecting-activity-failures">activity timeouts</a>, <a href="https://docs.temporal.io/develop/task-queue-priority-fairness">priority and fairness</a></td></tr>
+<tr><td>NATS JetStream</td><td>Work-queue retention: the first ack removes the message. AckWait default 30 s; in-progress ack resets it; MaxDeliver then an advisory (no built-in DLQ). MaxAckPending 1000.</td><td class="src"><a href="https://docs.nats.io/learn/jetstream/acknowledgment">docs.nats.io: acknowledgment</a>, <a href="https://docs.nats.io/learn/jetstream/retention-policies">retention</a></td></tr>
+<tr><td>AWS SQS</td><td>Visibility timeout (default 30 s), extended with <code>ChangeMessageVisibility</code> ("a heartbeat mechanism"), max 12 h. Redrive to a DLQ after <code>maxReceiveCount</code>. Fair queues (2025): a <code>MessageGroupId</code> per tenant; a noisy tenant does not delay the others.</td><td class="src"><a href="https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-visibility-timeout.html">visibility timeout</a>, <a href="https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-dead-letter-queues.html">DLQ</a>, <a href="https://aws.amazon.com/about-aws/whats-new/2025/07/amazon-sqs-introduces-fair/">fair queues</a></td></tr>
+</tbody>
+</table></div>
+
+<h3>Where we match, where we differ</h3>
+<ul>
+<li><b>Match:</b> pull model with a wait (Temporal, SQS); named queue + capability labels that must all match (Buildkite queue + tags, GitHub group + labels); lease with heartbeat (SQS, Temporal); direct offer with a fallback queue (Temporal sticky queue, GitHub 60 s re-queue).</li>
+<li><b>Match:</b> we do not need JetStream work-queue retention: our items are records, not messages, so the stream keeps them (see 5).</li>
+<li><b>Differ:</b> no attempt limit. An item whose runner dies again and again goes back to the queue forever. Every system above caps it.</li>
+<li><b>Differ:</b> one account with 50 items can delay everyone else on a shared queue. Temporal and SQS solve this with a tenant key.</li>
+</ul>
+
+<div class="rec"><div class="head"><span class="tag adopt">adopt</span><b>Keep the model. Add a maximum of attempts. Add fairness per account later.</b></div>
+<dl>
+<dt>What</dt><dd>(a) Count claims per item; after N (for example 3) lease expiries or failures, the item goes to a "needs a human" state with the reasons (SQS <code>maxReceiveCount</code>, JetStream MaxDeliver). (b) When two or more accounts share a queue: pick round robin by the account that created the item, then priority, then age (Temporal fairness keys).</dd>
+<dt>Why</dt><dd>(a) stops a poison item from using all runners. (b) stops one account from starving the others. Both are standard.</dd>
+<dt>Cost</dt><dd>(a) small: a counter on the item, one router check, one board state. (b) medium: change <code>selectBead</code> in <code>packages/router</code>; do it when a second account shares a queue.</dd>
+</dl></div>
+
+<!-- ============================================================ 5 -->
+<h2><span class="n">5</span> Work store on NATS JetStream, files on Object Store</h2>
+<div class="cmp">
+<div><div class="where">Mastermind today</div>
+<ul>
+<li><code>packages/work</code>: stream <code>MM_WORK</code>, one subject per item, file storage, 1 replica; every write is a compare-and-set on the item's last sequence.</li>
+<li>KV for accounts, routing, environments, leases. Object Store for files (mm-210.60, 128 KiB chunks).</li>
+<li><code>deploy/nats/nats.conf</code>: <code>sync_interval: always</code>, explicit limits. Backup: stream snapshots + manifest (mm-210.36, <code>apps/api/src/backup</code>).</li>
+</ul></div>
+<div><div class="where">What NATS docs say</div>
+<ul>
+<li>R1: "If that server goes down, the stream goes down with it." R3 is "the production floor".</li>
+<li>Default <code>sync_interval</code> is 2 min; <code>always</code> syncs every write, slower.</li>
+<li>"R3 is availability, not a backup." Test restores: "A snapshot you never test is a guess."</li>
+</ul></div>
+</div>
+
+<div class="wrap"><table class="prod">
+<thead><tr><th>Topic</th><th>Fact</th><th>Source</th></tr></thead>
+<tbody>
+<tr><td>Storage, replicas</td><td>Default storage File, replicas 1, discard Old, limits unlimited. R3: a write is acknowledged when a majority has it; each stream has its own Raft group.</td><td class="src"><a href="https://docs.nats.io/nats-concepts/jetstream/streams">docs.nats.io: streams</a>, <a href="https://docs.nats.io/running-a-nats-service/configuration/clustering/jetstream_clustering">clustering</a></td></tr>
+<tr><td>fsync</td><td><code>sync_interval</code> default <code>2m</code>; <code>always</code> = a sync on every write, lower throughput; needs a restart.</td><td class="src"><a href="https://docs.nats.io/reference/config/jetstream/sync_interval">docs.nats.io: sync_interval</a></td></tr>
+<tr><td>KV</td><td><code>update</code> writes only at the named revision (CAS); <code>create</code> only if absent. History max 64. Per-key TTL needs server 2.11+ with markers.</td><td class="src"><a href="https://docs.nats.io/learn/key-value/history-and-revisions">KV history and revisions</a>, <a href="https://docs.nats.io/learn/key-value/ttl-and-limits">TTL and limits</a></td></tr>
+<tr><td>Object Store</td><td>Default chunk 128 KB; a chunk larger than <code>max_payload</code> (1 MB default) fails. Only the latest metadata per object (no versions). No maximum object size stated.</td><td class="src"><a href="https://docs.nats.io/learn/object-store/chunking">docs.nats.io: chunking</a></td></tr>
+<tr><td>Backup</td><td><code>nats backup stream &lt;name&gt; &lt;dir&gt;</code>, <code>nats backup restore stream</code>; restore fails if the stream exists. A mirror also copies bad writes; put the DR mirror in an independent cluster. Back up operator/JWT identity and <code>server.conf</code> too.</td><td class="src"><a href="https://docs.nats.io/learn/backup-recovery/stream-backup-restore">stream backup</a>, <a href="https://docs.nats.io/learn/backup-recovery/disaster-recovery">disaster recovery</a></td></tr>
+<tr><td>As a database</td><td>Synadia: KV and Object Store "complement, rather than fully replace, transactional databases". Another Synadia post argues for events as the record with KV for derived state, which is our design. No official "not a database" statement and no named users with NATS as the only store <span class="unc">UNCERTAIN</span>.</td><td class="src"><a href="https://www.synadia.com/blog/event-driven-banking-as-a-service-with-nats">synadia.com: banking</a>, <a href="https://www.synadia.com/blog/rethinking-the-system-of-record">rethinking the system of record</a></td></tr>
+</tbody>
+</table></div>
+
+<h3>Where we match, where we differ</h3>
+<ul>
+<li><b>Match:</b> file storage, <code>sync_interval: always</code> (stricter than the default), CAS on every write, an event log per item with derived state: this is the pattern Synadia describes. Snapshots with consumers, a manifest and restore: the documented backup path.</li>
+<li><b>Differ:</b> R1 on one Dokploy host. The docs call R1 risky in production. A lost disk = lost work since the last backup.</li>
+</ul>
+
+<div class="rec"><div class="head"><span class="tag keep">keep</span><b>Keep NATS as the only store. Treat R1 as a known risk with three guards.</b></div>
+<dl>
+<dt>What</dt><dd>(1) Backups go to a target OFF the NATS host. (2) A scheduled restore test into a scratch server (the docs say an untested snapshot "is a guess"). (3) Back up the auth/operator config with the streams. Move to R3 when three servers in separate failure domains exist; the stream config already sets <code>num_replicas</code>, so it is a config change plus a cluster.</dd>
+<dt>Why</dt><dd>One host cannot give R3. Off-host backups plus tested restores give a known recovery point now.</dd>
+<dt>Cost</dt><dd>Small. Most of it is in mm-210.36; the restore test is one schedule.</dd>
+</dl></div>
+
+<!-- ============================================================ 6 -->
+<h2><span class="n">6</span> Credentials into the box</h2>
+<div class="cmp">
+<div><div class="where">Mastermind today</div>
+<ul>
+<li>Git: a fine-grained personal access token (<code>GIT_TOKEN</code>, <code>GITHUB_TOKEN</code> or <code>GH_TOKEN</code>) or an SSH deploy key, from the runner's local secrets (<code>apps/runner/src/box/output.ts</code>).</li>
+<li>The token is in the box for the whole run, readable by the agent. The push runs in the box after the agent.</li>
+<li>Claude: a token from <code>claude setup-token</code> as a box secret.</li>
+</ul></div>
+<div><div class="where">What others do</div>
+<ul>
+<li>Short-lived, narrow tokens from a GitHub App, not a person's token.</li>
+<li>The real credential stays OUT of the agent's reach: Claude web swaps a scoped credential at a proxy; Codex removes secrets before the agent phase; Copilot "cannot directly run git push".</li>
+<li>Push only to one agent branch (Copilot: <code>copilot/</code>).</li>
+</ul></div>
+</div>
+
+<div class="wrap"><table class="prod">
+<thead><tr><th>Source</th><th>Fact</th><th>Link</th></tr></thead>
+<tbody>
+<tr><td>GitHub App token</td><td>"Installation tokens expire one hour from the time you create them." <code>repositories</code> narrows to listed repos; <code>permissions</code> narrows the scopes. Minted with a JWT (RS256, max 10 min).</td><td class="src"><a href="https://docs.github.com/en/rest/apps/apps#create-an-installation-access-token-for-an-app">docs.github.com: installation access token</a>, <a href="https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-json-web-token-jwt-for-a-github-app">JWT</a></td></tr>
+<tr><td>Fine-grained PAT</td><td>One user or org, chosen repos, default expiry 30 days, may wait for org approval. GitHub: "for long-lived integrations, you should use a GitHub App."</td><td class="src"><a href="https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens">docs.github.com: personal access tokens</a></td></tr>
+<tr><td>Copilot agent</td><td>Pushes only to its PR branch or a new <code>copilot/</code> branch; cannot run <code>git push</code> itself; cannot approve or merge its PR. Token lifetime not stated <span class="unc">UNCERTAIN</span>.</td><td class="src"><a href="https://docs.github.com/en/copilot/concepts/agents/cloud-agent/risks-and-mitigations">docs.github.com: risks and mitigations</a></td></tr>
+<tr><td>Claude Code on the web</td><td>"The git client inside the VM uses a scoped credential, which the proxy verifies and swaps for your actual GitHub token." The proxy rejects branch deletions and tag pushes, does not limit branches (use branch protection), serves only the attached repos. Network secrets: "the key itself stays outside the VM".</td><td class="src"><a href="https://code.claude.com/docs/en/cloud-environments">code.claude.com: cloud environments, GitHub proxy</a> (read again)</td></tr>
+<tr><td>Codex cloud</td><td>Secrets reach setup scripts only: "removed before the agent phase starts". Newer model: the program gets a placeholder, the proxy puts in the real value for allowed hosts.</td><td class="src"><a href="https://learn.chatgpt.com/docs/environments/cloud-environment">learn.chatgpt.com: cloud environment</a></td></tr>
+<tr><td>Claude Code GitHub Actions</td><td>Without a <code>github_token</code> it uses the Claude GitHub App through OIDC (<code>id-token: write</code>). For least privilege: your own app with Contents, Issues, Pull requests only. Model access: <code>ANTHROPIC_API_KEY</code> or <code>CLAUDE_CODE_OAUTH_TOKEN</code>; for shared use prefer an API key, "since an OAuth token is tied to the subscription of the person who ran <code>claude setup-token</code>".</td><td class="src"><a href="https://code.claude.com/docs/en/github-actions">code.claude.com: GitHub Actions</a></td></tr>
+<tr><td>Claude auth</td><td><code>claude setup-token</code>: a one-year OAuth token, "for CI pipelines and scripts", only model requests. Agent SDK page: "Anthropic does not allow third party developers to offer claude.ai login or rate limits for their products ... Use the API key authentication methods".</td><td class="src"><a href="https://code.claude.com/docs/en/authentication">code.claude.com: authentication</a>, <a href="https://code.claude.com/docs/en/agent-sdk/overview">agent SDK overview</a></td></tr>
+<tr><td>git credential helper</td><td>Protocol <code>get</code> / <code>store</code> / <code>erase</code>; a helper may "generate credentials ... via some API": the place to mint a token when git asks.</td><td class="src"><a href="https://git-scm.com/docs/gitcredentials">git-scm.com: gitcredentials</a></td></tr>
+</tbody>
+</table></div>
+
+<h3>Where we match, where we differ</h3>
+<ul>
+<li><b>Match:</b> secret values stay on the runner machine, never on the server (box decision B). Push to a branch per item (<code>mm/&lt;item&gt;</code>), PR opened for review: same shape as Copilot and Claude.</li>
+<li><b>Differ:</b> we use a person's token that lives for days or months (30 days by default); all others use a 1 h app token.</li>
+<li><b>Differ:</b> our agent can read the git token and push anywhere the token allows. Copilot, Claude web and Codex keep the real token out of the agent's reach.</li>
+<li><b>Open point for the human:</b> each user puts their OWN <code>setup-token</code> on their OWN runner. That looks like "CI and scripts" use. Mastermind does not offer a claude.ai login. But the Agent SDK sentence above is broad, and we cannot confirm how it applies here <span class="unc">UNCERTAIN</span>.</li>
+</ul>
+
+<div class="rec"><div class="head"><span class="tag change">change</span><b>Use a GitHub App token per task, kept out of the agent's reach. Make an API key the first choice for Claude.</b></div>
+<dl>
+<dt>What</dt><dd>(1) A GitHub App (one per Mastermind install, or the user's own app) with Contents + Pull requests on the chosen repos. For each task, mint a token for that ONE repo, valid 1 h. (2) The agent phase gets no git token: the runner pushes after the agent ends (like Copilot), or a git credential helper / proxy outside the agent's process gives it only for <code>mm/&lt;item&gt;</code>. Add branch protection on the base branch. (3) The environment UI shows <code>ANTHROPIC_API_KEY</code> first and <code>CLAUDE_CODE_OAUTH_TOKEN</code> as "your own subscription, your own risk". Keep the PAT path for other git hosts.</dd>
+<dt>Why</dt><dd>A leaked PAT gives write access to all its repos until it expires (30 days by default). A leaked app token gives 1 h on one repo. This is what GitHub itself recommends and what every agent product does.</dd>
+<dt>Cost</dt><dd>Medium: about 2 beads. Who holds the app private key (Mastermind server or the user's runner) is a design decision for the human; my pick is the runner owner's machine, the same as other secrets (decision B).</dd>
+</dl></div>
+
+<!-- ============================================================ 7 -->
+<h2><span class="n">7</span> Login by single-use code</h2>
+<div class="cmp">
+<div><div class="where">Mastermind today (mm-210.28)</div>
+<ul>
+<li><code>POST /api/auth/login/start</code> gives a code <code>ABCD-EFGH</code> (8 of 32 symbols, 40 bits, no 0/O/1/I), valid 10 min, plus a cookie.</li>
+<li>An APPROVER (operator CLI, or a logged-in account on /people) types the code; the approver sees the browser's user agent and the code's age.</li>
+<li>The browser polls <code>GET /api/auth/login/poll</code>: pending, expired or approved (session cookie). Code entry is rate limited. No "deny".</li>
+</ul></div>
+<div><div class="where">What others do</div>
+<ul>
+<li>RFC 8628 (device flow): the DEVICE shows the code; the SAME user, signed in elsewhere, types it.</li>
+<li>Admin approves a device: Tailscale (an admin approves a new device; until then it cannot send traffic). WhatsApp: the trusted phone scans the new device's QR code.</li>
+</ul></div>
+</div>
+
+<div class="wrap"><table class="prod">
+<thead><tr><th>Source</th><th>Fact</th><th>Link</th></tr></thead>
+<tbody>
+<tr><td>RFC 8628</td><td>Response: <code>device_code</code>, <code>user_code</code>, <code>verification_uri</code>, <code>expires_in</code> (required), <code>verification_uri_complete</code>, <code>interval</code> (default 5 s). Poll errors: <code>authorization_pending</code>, <code>slow_down</code> (+5 s), <code>access_denied</code>, <code>expired_token</code>. User code: base-20 <code>BCDFGHJKLMNPQRSTVWXZ</code>, 8 chars, about 34.5 bits, rate-limit attempts. 5.4: tell the user they authorize a device; keep the code short-lived.</td><td class="src"><a href="https://www.rfc-editor.org/rfc/rfc8628">rfc-editor.org/rfc/rfc8628</a></td></tr>
+<tr><td>GitHub device flow</td><td>"8 characters with a hyphen in the middle", <code>expires_in</code> 900 s, <code>slow_down</code> adds 5 s, 50 code submissions per hour per app.</td><td class="src"><a href="https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps#device-flow">docs.github.com: device flow</a></td></tr>
+<tr><td>Tailscale</td><td>Owner, Admin or IT admin approves the device in the console or API. "A device awaiting approval cannot send or receive traffic ... until it is approved."</td><td class="src"><a href="https://tailscale.com/kb/1099/device-approval">tailscale.com/kb/1099/device-approval</a></td></tr>
+<tr><td>WhatsApp linked devices</td><td>The new device shows a QR code; the trusted phone scans it after a biometric or PIN check.</td><td class="src"><a href="https://faq.whatsapp.com/1317564962315842">faq.whatsapp.com</a></td></tr>
+</tbody>
+</table></div>
+
+<h3>Where we match, where we differ</h3>
+<ul>
+<li><b>Match:</b> same shape as RFC 8628 and GitHub (short code with a hyphen, short life, polling, rate-limited entry). Our code is stronger (40 bits vs 34.5) and shorter-lived (10 vs 15 min).</li>
+<li><b>Differ, on purpose:</b> in the RFC the user approves their own device. In ours a different person approves, because the new user has no other session yet. That is Tailscale's device approval, not RFC 8628. So copying the RFC exactly gives no gain.</li>
+<li><b>Differ:</b> no deny (RFC <code>access_denied</code>), no <code>slow_down</code>. Our states have their own names.</li>
+</ul>
+
+<div class="rec"><div class="head"><span class="tag keep">keep</span><b>Keep the flow. Add Deny. Use RFC names only when a CLI logs in.</b></div>
+<dl>
+<dt>What</dt><dd>(1) The approver can Deny a code; the browser shows "denied" (<code>access_denied</code>). (2) Keep showing the approver what they approve (browser, age; add the IP country if cheap), per RFC 5.4. (3) If the runner or a CLI ever logs in as a human, implement RFC 8628 names and polling rules (<code>interval</code>, <code>slow_down</code>), so standard clients work.</dd>
+<dt>Why</dt><dd>The flow already follows the prior art that fits (admin approval). Renaming the browser API gives nothing to users now.</dd>
+<dt>Cost</dt><dd>Small: one bead for Deny. The RFC names only with a CLI login.</dd>
+</dl></div>
+
+<h2><span class="n">&#8226;</span> Not confirmed on an official page</h2>
+<ul>
+<li>Which exact file name Ona uses next to devcontainer.json; the end date of Gitpod Classic.</li>
+<li>Whether any agent product enforces egress with iptables instead of a proxy.</li>
+<li>Copilot agent: lifetime and scope of its git token. Codex: how its GitHub connector gets git credentials.</li>
+<li>How the Agent SDK sentence on claude.ai login applies to a user's own token on their own runner.</li>
+<li>Official statements that "JetStream is not a database", or named users with NATS as their only store.</li>
+<li>Temporal fairness: general availability status.</li>
+</ul>
+
+</main>
+</body>
+</html>
