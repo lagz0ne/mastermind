@@ -13,7 +13,12 @@ import {
 	subjects,
 	subscribe,
 } from "@mastermind/bus";
-import type { BeadEvent, NextReply, NextRequest } from "@mastermind/core";
+import type {
+	BeadEvent,
+	NextReply,
+	NextRequest,
+	RunnerDiagnostics,
+} from "@mastermind/core";
 import type { Msg, NatsConnection, Subscription } from "@nats-io/nats-core";
 import {
 	EMPTY_ENVIRONMENTS,
@@ -33,13 +38,16 @@ import {
 	type RoutingState,
 } from "../routing/model.ts";
 import { Dispatcher, type DispatcherOptions } from "./dispatcher.ts";
+import { natsOffer, OFFER_TIMEOUT_MS, Presence } from "./offer.ts";
 
 export { CONFIG_BUCKET, ROUTING_KEY };
 
 export type DispatchServiceOptions = Omit<
 	DispatcherOptions,
-	"notify" | "rules" | "resolveEnv"
+	"notify" | "rules" | "resolveEnv" | "offer" | "runnersOf"
 > & {
+	/** How long a runner has to answer a direct offer. Default 5 s. */
+	offerTimeoutMs?: number;
 	/** Sweep dead leases this often. Default 30 s; 0 turns it off. */
 	sweepMs?: number;
 	/** Journal events (the board's JournalHub). Returns an unsubscribe. */
@@ -120,8 +128,11 @@ export async function startDispatch(
 		events,
 		kvRules = true,
 		kvEnvironments = true,
+		offerTimeoutMs = OFFER_TIMEOUT_MS,
 		...rest
 	} = options;
+	// Online runners for account addresses: their status and `next` requests.
+	const presence = new Presence();
 	const onError = rest.onError;
 	const { work } = rest;
 	const actor = rest.actor ?? "mastermind";
@@ -137,6 +148,13 @@ export async function startDispatch(
 	const environments = kvEnvironments ? await watchEnvironments(nc) : null;
 	const dispatcher = new Dispatcher({
 		...rest,
+		observe: (seen) => {
+			if (seen.kind === "next")
+				presence.seen(seen.runner.account, seen.runner.id);
+			rest.observe?.(seen);
+		},
+		offer: natsOffer(nc, offerTimeoutMs),
+		runnersOf: (account) => presence.online(account),
 		...(routing
 			? {
 					rules: () => {
@@ -196,6 +214,15 @@ export async function startDispatch(
 				{ onError: (e) => onError?.(e) },
 			),
 		),
+		subscribe<RunnerDiagnostics>(nc, patterns.runnerStatus, (d, msg) => {
+			const s = parseSubject(msg.subject);
+			if (
+				s?.kind === "runnerStatus" &&
+				typeof d?.runner === "string" &&
+				d.runner
+			)
+				presence.seen(s.account, d.runner);
+		}),
 		subscribe(nc, patterns.ready, (_notice, msg) => {
 			const s = parseSubject(msg.subject);
 			if (s?.kind === "ready")
@@ -210,6 +237,7 @@ export async function startDispatch(
 		sweepMs > 0
 			? setInterval(() => {
 					dispatcher.sweep().catch((e) => onError?.(e));
+					dispatcher.retryDirect().catch((e) => onError?.(e));
 				}, sweepMs)
 			: null;
 	await nc.flush();

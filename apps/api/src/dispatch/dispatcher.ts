@@ -14,6 +14,13 @@
  * - sweep: beads whose lease died go back to their queue.
  * - onEvent: a journal event routes a bead with no queue and wakes the waiters
  *   of a queue that has ready work.
+ * - direct (mm-210.32): a bead with `to:<address>` is OFFERED to that runner,
+ *   or to each online runner of that account (served least recently first).
+ *   The runner accepts or declines with a reason; on accept the bead is
+ *   claimed for it and the dispatch goes back in the same exchange. When
+ *   nobody accepts, the bead gets {@link NOT_ACCEPTED_LABEL} and a note with
+ *   the reasons and waits (or goes to the rule's fallback queue); a waiting
+ *   bead is offered again every `retryMs` ({@link Dispatcher.retryDirect}).
  * - debug(): the waiters per queue and a ring of recent decisions (offers and
  *   declines with the reason), for GET /api/debug/state. In memory, this
  *   replica only.
@@ -27,8 +34,10 @@ import {
 	type BeadEvent,
 	type CompleteRequest,
 	columnOf,
+	type DirectOffer,
 	type Dispatch,
 	type DispatchEnv,
+	directQueue,
 	ENV_TRIAGE_LABEL,
 	envNameOf,
 	FAILED_START_LABEL,
@@ -38,19 +47,27 @@ import {
 	leaseState,
 	type NextReply,
 	type NextRequest,
+	NOT_ACCEPTED_LABEL,
+	type OfferResult,
+	parseAddress,
 	queueLabel,
 	queueOf,
 	type ReadyNotice,
 	type ReleaseRequest,
 	type ReportRequest,
 	type RunnerInfo,
+	TO_LABEL_PREFIX,
+	toLabel,
+	toOf,
 } from "@mastermind/core";
 import {
+	fallbackOf,
+	offerOrder,
 	type RoutingRule,
 	type RunnerState,
-	route,
 	selectBead,
 	selectWaiter,
+	target,
 } from "@mastermind/router";
 import { AlreadyClaimed, NotFound, WorkError } from "@mastermind/work";
 import { envOf } from "../beads/env.ts";
@@ -64,6 +81,24 @@ export const RELEASE_BACKOFF_MS = [60_000, 300_000] as const;
 
 /** Failed starts of a bead (any runner) before it is held back. */
 export const MAX_FAILED_STARTS = 3;
+
+/** A direct bead that nobody accepted is offered again after this. */
+export const DIRECT_RETRY_MS = 30_000;
+
+/**
+ * How one offer to one runner ended (the transport's view). `accepted`: the
+ * runner wants it; `reply` sends it the result (the dispatch, or null with
+ * the reason) and must be called exactly once.
+ */
+export type OfferExchange =
+	| {
+			kind: "accepted";
+			runner: RunnerInfo;
+			reply: (result: OfferResult) => void;
+	  }
+	| { kind: "declined"; reason: string }
+	| { kind: "offline" }
+	| { kind: "timeout" };
 
 /** Recent decisions kept for the debug view. */
 export const DECISIONS_KEPT = 100;
@@ -125,6 +160,16 @@ export type DispatcherOptions = {
 	waitMs?: number;
 	/** The actor the dispatcher writes as (routing labels). */
 	actor?: string;
+	/** Offer a direct bead to one runner. Without it, direct beads wait. */
+	offer?: (
+		account: string,
+		runner: string,
+		offer: DirectOffer,
+	) => Promise<OfferExchange>;
+	/** Ids of the online runners of an account (for an account address). */
+	runnersOf?: (account: string) => string[];
+	/** Offer a waiting direct bead again after this. Default {@link DIRECT_RETRY_MS}. */
+	retryMs?: number;
 	now?: () => Date;
 	onError?: (error: unknown) => void;
 };
@@ -248,6 +293,13 @@ export class Dispatcher {
 	readonly #locks = new Map<string, Promise<unknown>>();
 	/** Recent decisions, oldest first; at most {@link DECISIONS_KEPT}. */
 	readonly #decisions: DispatchDecision[] = [];
+	/** Direct beads with an offer round running in this replica. */
+	readonly #offering = new Set<string>();
+	/** Direct beads nobody accepted: their address, next try, last note. */
+	readonly #directWait = new Map<
+		string,
+		{ address: string; until: number; note: string }
+	>();
 	#stopped = false;
 
 	constructor(options: DispatcherOptions) {
@@ -458,8 +510,8 @@ export class Dispatcher {
 		const now = this.#now();
 		const released: string[] = [];
 		for (const bead of await this.#work.claimed()) {
-			// Only dispatched work: a bead on a queue, held by an actor.
-			if (!bead.assignee || !queueOf(bead)) continue;
+			// Only dispatched work: a bead on a queue or sent to an address, held by an actor.
+			if (!bead.assignee || !(queueOf(bead) || toOf(bead))) continue;
 			if (leaseState(bead.lease, now) !== "expired") continue;
 			try {
 				await this.#work.release(bead.id, bead.assignee);
@@ -482,21 +534,196 @@ export class Dispatcher {
 			if (columnOf(bead) === "ready") this.#signal(bead);
 			return;
 		}
+		if (toOf(bead)) {
+			if (columnOf(bead) === "ready" && !bead.assignee)
+				await this.direct(bead.id);
+			return;
+		}
 		if (bead.status !== "open") return;
 		const rules = this.#opts.rules?.() ?? [];
-		if (!route(bead, rules)) return;
+		if (!target(bead, rules)) return;
 		// The event's bead may be stale: a label change journals steps (old
 		// queue removed, then new one added). Decide on the bead as it is now,
 		// or a manual move to another queue gets undone.
 		const current = await this.#work.get(bead.id);
-		if (current.status !== "open" || queueOf(current)) return;
-		const target = route(current, rules);
-		if (!target) return;
-		// The label change is a new journal event; that one wakes the waiters.
+		if (current.status !== "open" || queueOf(current) || toOf(current)) return;
+		const t = target(current, rules);
+		if (!t) return;
+		// The label change is a new journal event; that one wakes the waiters
+		// (or starts the offers).
 		await this.#work.setLabels(bead.id, this.#actor, [
 			...current.labels,
-			queueLabel(target),
+			"queue" in t ? queueLabel(t.queue) : toLabel(t.to),
 		]);
+	}
+
+	/** Offer every waiting direct bead whose retry time has come. */
+	async retryDirect(): Promise<void> {
+		const now = this.#now().getTime();
+		for (const bead of await this.#work.unrouted()) {
+			const address = toOf(bead);
+			if (!address || columnOf(bead) !== "ready" || bead.assignee) continue;
+			const wait = this.#directWait.get(bead.id);
+			if (wait && wait.address === address && now < wait.until) continue;
+			await this.direct(bead.id).catch((e) => this.#opts.onError?.(e));
+		}
+	}
+
+	/**
+	 * One offer round for a direct bead: offer it to its address (each online
+	 * runner of an account in turn) until one accepts. Nobody: mark it, say
+	 * why, and wait (or move it to the rule's fallback queue).
+	 */
+	async direct(beadId: string): Promise<void> {
+		if (this.#offering.has(beadId) || this.#stopped) return;
+		this.#offering.add(beadId);
+		try {
+			await this.#offerRound(beadId);
+		} finally {
+			this.#offering.delete(beadId);
+		}
+	}
+
+	async #offerRound(beadId: string): Promise<void> {
+		const fresh = await this.#work.get(beadId);
+		const address = toOf(fresh);
+		if (
+			!address ||
+			queueOf(fresh) ||
+			columnOf(fresh) !== "ready" ||
+			fresh.assignee
+		)
+			return;
+		const wait = this.#directWait.get(beadId);
+		if (wait && wait.address === address && this.#now().getTime() < wait.until)
+			return;
+		const queue = directQueue(address);
+		const [bead] = await this.#dispatchable(queue, [fresh]);
+		if (!bead) return;
+		const to = parseAddress(address);
+		const lines: string[] = [];
+		const offer = this.#opts.offer;
+		if (!to)
+			lines.push(
+				`${address} is not an address (<account> or <account>/<runner>)`,
+			);
+		else if (!offer) lines.push("this Mastermind does not send direct offers");
+		else {
+			const runners = to.runner
+				? [to.runner]
+				: offerOrder(
+						(this.#opts.runnersOf?.(to.account) ?? []).map((runner) => {
+							const at = this.#served.get(`${to.account}/${runner}`);
+							return { runner, ...(at ? { lastServedAt: at } : {}) };
+						}),
+					).map((r) => r.runner);
+			if (runners.length === 0)
+				lines.push(`no runner of ${to.account} is online`);
+			const env = this.#envOf(bead, queue);
+			const message: DirectOffer = {
+				bead,
+				queue,
+				stage: "work",
+				env,
+				prompt: withInstructions(
+					promptOf(bead, await this.#notes(beadId)),
+					env,
+				),
+				address,
+			};
+			for (const runner of runners) {
+				const actor = `${to.account}/${runner}`;
+				if (!this.#eligible(actor, undefined, bead, queue)) {
+					lines.push(`${actor}: backs off after a release`);
+					continue;
+				}
+				let ex: OfferExchange;
+				try {
+					ex = await offer(to.account, runner, message);
+				} catch (error) {
+					ex = { kind: "declined", reason: `offer failed: ${error}` };
+				}
+				if (ex.kind !== "accepted") {
+					const why =
+						ex.kind === "offline"
+							? "offline (nobody answers its offer subject; a runner older than mm-210.32 does not take offers)"
+							: ex.kind === "timeout"
+								? "no answer in time"
+								: `declined: ${ex.reason}`;
+					this.#decide("decline", queue, beadId, actor, `offer ${why}`);
+					lines.push(`${actor}: ${why}`);
+					continue;
+				}
+				if (ex.runner.account !== to.account || ex.runner.id !== runner) {
+					ex.reply({ dispatch: null, reason: "answer from another runner" });
+					lines.push(`${actor}: answered as another runner`);
+					continue;
+				}
+				let dispatch: Dispatch | null;
+				try {
+					dispatch = await this.#claim(bead, actor, queue, "offer");
+				} catch (error) {
+					ex.reply({ dispatch: null, reason: "the claim failed" });
+					throw error;
+				}
+				if (!dispatch) {
+					ex.reply({ dispatch: null, reason: "somebody else took the bead" });
+					return;
+				}
+				ex.reply({ dispatch });
+				this.#directWait.delete(beadId);
+				await this.#note(
+					bead,
+					`sent to ${address}: ${[...lines, `${actor} accepted`].join("; ")}`,
+					bead.labels.filter((l) => l !== NOT_ACCEPTED_LABEL),
+				);
+				return;
+			}
+		}
+		const why = lines.join("; ");
+		const fallback = fallbackOf(bead, address, this.#opts.rules?.() ?? []);
+		if (fallback) {
+			this.#directWait.delete(beadId);
+			await this.#note(
+				bead,
+				`not accepted by ${address}: ${why}. Fallback: queue ${fallback}.`,
+				[
+					...bead.labels.filter(
+						(l) => !l.startsWith(TO_LABEL_PREFIX) && l !== NOT_ACCEPTED_LABEL,
+					),
+					queueLabel(fallback),
+				],
+			);
+			return;
+		}
+		const retryMs = this.#opts.retryMs ?? DIRECT_RETRY_MS;
+		const note = `not accepted by ${address}: ${why}. It waits; offered again every ${Math.round(retryMs / 1000)} s.`;
+		const marked = bead.labels.includes(NOT_ACCEPTED_LABEL);
+		// Set before the writes: their journal events must not start a round.
+		this.#directWait.set(beadId, {
+			address,
+			until: this.#now().getTime() + retryMs,
+			note,
+		});
+		if (marked && wait?.note === note) return;
+		await this.#note(
+			bead,
+			note,
+			marked ? bead.labels : [...bead.labels, NOT_ACCEPTED_LABEL],
+		);
+	}
+
+	/** A note on the bead, then its labels when they change. Errors go to onError. */
+	async #note(bead: Bead, text: string, labels: string[]): Promise<void> {
+		try {
+			await this.#work.comment(bead.id, this.#actor, text);
+			const same =
+				labels.length === bead.labels.length &&
+				labels.every((l, i) => l === bead.labels[i]);
+			if (!same) await this.#work.setLabels(bead.id, this.#actor, labels);
+		} catch (error) {
+			this.#opts.onError?.(error);
+		}
 	}
 
 	/** Answer every waiting request with no dispatch. */
@@ -547,7 +774,7 @@ export class Dispatcher {
 		bead: Bead,
 		actor: string,
 		queue: string,
-		via: "next" | "woken",
+		via: "next" | "woken" | "offer",
 	): Promise<Dispatch | null> {
 		const lost = (reason: string) => {
 			this.#decide("decline", queue, bead.id, actor, reason);
@@ -571,7 +798,7 @@ export class Dispatcher {
 			queue,
 			bead.id,
 			actor,
-			`claimed (${via === "next" ? "on next" : "waiter woken"}); lease until ${claimed.lease.expiresAt}`,
+			`claimed (${via === "next" ? "on next" : via === "woken" ? "waiter woken" : "offer accepted"}); lease until ${claimed.lease.expiresAt}`,
 		);
 		this.#served.set(actor, this.#now().toISOString());
 		this.#see({ kind: "holds", actor, beadId: bead.id });

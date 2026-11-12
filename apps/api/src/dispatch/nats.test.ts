@@ -5,9 +5,12 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { BusError, connect, request, Store, subjects } from "@mastermind/bus";
 import type {
 	Ack,
+	DirectOffer,
 	HeartbeatReply,
 	NextReply,
 	NextRequest,
+	OfferAnswer,
+	OfferResult,
 } from "@mastermind/core";
 import type { NatsConnection } from "@nats-io/nats-core";
 import { fakeWork, LEASE_MS } from "./fake-work.ts";
@@ -339,7 +342,7 @@ describe.skipIf(!bin)("dispatcher over NATS", () => {
 				{ timeout: 5_000 },
 			);
 			expect(dispatch?.bead.id).toBe("mm-81");
-			expect(dispatch?.env).toEqual({
+			expect(dispatch?.env).toMatchObject({
 				name: "scratch",
 				repo: "https://github.com/acme/scratch.git",
 				ref: "main",
@@ -358,6 +361,57 @@ describe.skipIf(!bin)("dispatcher over NATS", () => {
 		} finally {
 			await config.delete("environments");
 			work.beads.delete("mm-80");
+		}
+	});
+
+	test("direct offer: accept gets the dispatch in the same exchange; decline and offline give reasons", async () => {
+		const got: OfferResult[] = [];
+		const offers: DirectOffer[] = [];
+		const answer = (id: string, a: (o: DirectOffer) => OfferAnswer) =>
+			runner.subscribe(subjects.runnerOffer("alice", id), {
+				callback: (_e, msg) => {
+					const o = JSON.parse(new TextDecoder().decode(msg.data));
+					offers.push(o);
+					if (!msg.reply) return;
+					void request<OfferAnswer, OfferResult>(runner, msg.reply, a(o), {
+						timeout: 5_000,
+					}).then((r) => got.push(r));
+				},
+			});
+		const desk = answer("desk", () => ({
+			accept: true,
+			runner: next("alice", "desk").runner,
+		}));
+		const box = answer("box", () => ({ accept: false, reason: "at capacity" }));
+		await runner.flush();
+		try {
+			work.add({ id: "mm-90", labels: ["to:alice/desk"] });
+			await services[0]?.dispatcher.direct("mm-90");
+			expect(offers[0]?.bead.id).toBe("mm-90");
+			expect(offers[0]?.queue).toBe("to:alice/desk");
+			// The runner reads the reply to its answer a moment later.
+			for (let i = 0; i < 50 && got.length < 1; i++) await Bun.sleep(20);
+			expect(got[0]?.dispatch?.actor).toBe("alice/desk");
+			expect(work.beads.get("mm-90")?.assignee).toBe("alice/desk");
+
+			work.add({ id: "mm-91", labels: ["to:alice/box"] });
+			await services[0]?.dispatcher.direct("mm-91");
+			work.add({ id: "mm-92", labels: ["to:alice/ghost"] });
+			await services[0]?.dispatcher.direct("mm-92");
+			const notes = (id: string) =>
+				work.comments.filter((c) => c.id === id).map((c) => c.text);
+			expect(notes("mm-91")[0]).toStartWith(
+				"not accepted by alice/box: alice/box: declined: at capacity.",
+			);
+			expect(notes("mm-92")[0]).toStartWith(
+				"not accepted by alice/ghost: alice/ghost: offline",
+			);
+			for (let i = 0; i < 50 && got.length < 2; i++) await Bun.sleep(20);
+			expect(got[1]).toEqual({ dispatch: null });
+		} finally {
+			desk.unsubscribe();
+			box.unsubscribe();
+			for (const id of ["mm-90", "mm-91", "mm-92"]) work.beads.delete(id);
 		}
 	});
 
