@@ -9,8 +9,13 @@
  *                 target, host, provider, mode, the paseo command line
  *   d. paseo      daemon answers, the decided provider is available, its mode
  *                 does not ask for permission, checkouts are git dirs
- *   e. agent      --deep only: a REAL `paseo run` with the arguments a dispatch
- *                 uses ("Reply with the single word OK"), then archive it
+ *   e. agent      --deep only: a REAL agent run with the arguments a dispatch
+ *                 uses ("Reply with the single word OK"), then archive it. In
+ *                 box mode the probe takes the path of a task (mm-210.82,
+ *                 doctor-probe.ts): a box from the default image, the box's
+ *                 Paseo daemon, the model credential through the proxy. Only
+ *                 this proves the token: Paseo's provider login says logged
+ *                 in for a wrong one.
  *   f. secrets    every secret the environments need is present locally
  *                 (names only; FAIL with 'mastermind-runner secrets set <NAME>')
  *   g. box        the box engine answers (Docker/Podman API) and the default
@@ -29,6 +34,7 @@ import { type Dispatch, runnerVersionNotice } from "@mastermind/core";
 import type { Box, BoxDriver } from "./box/driver.ts";
 import { BOX_LABEL, ENGINE_RUNTIME } from "./box/driver.ts";
 import { DEFAULT_BOX_IMAGE } from "./box/image.ts";
+import { BoxLauncher } from "./box/launcher.ts";
 import { BOX_ENV } from "./box/run.ts";
 import {
 	type CredentialState,
@@ -36,6 +42,11 @@ import {
 	isAuthFailure,
 } from "./client.ts";
 import type { RunnerConfig, RunnerSettings } from "./config.ts";
+import {
+	BOX_LOGIN_FIX,
+	boxProbeLauncher,
+	type ModelSecretName,
+} from "./doctor-probe.ts";
 import {
 	type AgentLauncher,
 	type AgentSpec,
@@ -89,6 +100,10 @@ export type DoctorDeps = {
 	connect?: (o: ConnectOptions) => Promise<DoctorNats>;
 	/** How to reach Paseo; default: the SDK. */
 	paseo?: PaseoConnect;
+	/**
+	 * Step e's launcher (tests). Box mode: the box launcher under the probe
+	 * (default: the runner's own, {@link DoctorBox} `probe`, else a new one).
+	 */
 	launcher?: AgentLauncher & {
 		find(executionId: string, host?: string): Promise<string[]>;
 	};
@@ -119,6 +134,12 @@ export type DoctorInput = {
 	secrets?: () => Promise<SecretsState>;
 	/** Step e timeout, ms. */
 	agentTimeoutMs?: number;
+	/** Step e in box mode: the model credential a box gets (value never printed). */
+	modelSecret?: () => Promise<{
+		name: ModelSecretName;
+		value: string;
+		from: string;
+	} | null>;
 	/** Step g: box mode; absent: no step g. */
 	box?: DoctorBox;
 	/** Step g --deep: longest wait for the agent host in the box, ms. */
@@ -128,7 +149,13 @@ export type DoctorInput = {
 /** How the runner runs agents: in boxes (driver + default image) or not (--no-box). */
 export type DoctorBox =
 	| { noBox: true }
-	| { noBox?: false; driver: BoxDriver; image: string };
+	| {
+			noBox?: false;
+			driver: BoxDriver;
+			image: string;
+			/** The running runner's box launcher (remote doctor); absent: a new one, no sweep. */
+			probe?: AgentLauncher;
+	  };
 
 export const BOX_READY_TIMEOUT_MS = 60_000;
 const NO_BOX_FIX =
@@ -606,7 +633,20 @@ export async function runDoctor(
 			const { d } = first;
 			const cwd = d.binding?.dir ?? s.workdir ?? process.cwd();
 			const executionId = `doctor-${(deps.now?.() ?? new Date()).getTime()}`;
-			const launcher = deps.launcher ?? new PaseoLauncher({ connect: paseo });
+			const boxed = input.box && !input.box.noBox ? input.box : null;
+			const model = boxed ? ((await input.modelSecret?.()) ?? null) : null;
+			const launcher = boxed
+				? boxProbeLauncher(
+						boxed.probe ??
+							deps.launcher ??
+							new BoxLauncher({
+								driver: boxed.driver,
+								runnerId: s.id,
+								defaultImage: boxed.image,
+							}),
+						model,
+					)
+				: (deps.launcher ?? new PaseoLauncher({ connect: paseo }));
 			const labels = {
 				...d.labels,
 				purpose: "probe",
@@ -622,7 +662,12 @@ export async function runDoctor(
 				labels,
 				...(d.host ? { host: d.host } : {}),
 			};
-			st.ok(`queue ${first.queue}: ${paseoCommandLine({ ...spec, labels })}`);
+			if (boxed)
+				st.ok(
+					`queue ${first.queue}: in a box from ${boxed.image} (the path of a task), provider ${d.agent.provider ?? "-"}${d.agent.mode ? ` mode ${d.agent.mode}` : ""}; model credential ${model ? `${model.name} (${model.from}) through the box proxy` : "none on this machine (CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY)"}`,
+				);
+			else
+				st.ok(`queue ${first.queue}: ${paseoCommandLine({ ...spec, labels })}`);
 			const timeout = input.agentTimeoutMs ?? AGENT_TIMEOUT_MS;
 			const stop = new AbortController();
 			const timer = setTimeout(() => stop.abort(), timeout);
@@ -644,7 +689,9 @@ export async function runDoctor(
 						? `no answer within ${timeout / 1000} s`
 						: (login ? (msg.split("; fix: ")[0] ?? msg) : msg).slice(0, 600),
 					login
-						? PROVIDER_LOGIN_FIX
+						? boxed
+							? BOX_LOGIN_FIX
+							: PROVIDER_LOGIN_FIX
 						: /permission/i.test(msg)
 							? `the agent waits for permission: mastermind-runner start --mode ${UNATTENDED_MODE[p0] ?? "<a mode that does not ask>"} --save`
 							: /MISSING_PROVIDER/.test(msg)

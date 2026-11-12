@@ -53,7 +53,11 @@ import {
 } from "./access.ts";
 import { DockerDriver } from "./box/docker.ts";
 import { natsBoxFiles } from "./box/files.ts";
-import { DEFAULT_BOX_IMAGE, startBoxMode } from "./box/launcher.ts";
+import {
+	DEFAULT_BOX_IMAGE,
+	probeBoxLauncher,
+	startBoxMode,
+} from "./box/launcher.ts";
 import { checkRequirement, FileSetupMemory } from "./check.ts";
 import {
 	checkCredential,
@@ -81,6 +85,7 @@ import {
 	writeDoctor,
 } from "./diagnostics.ts";
 import { type DoctorBox, formatReport, runDoctor } from "./doctor.ts";
+import { probeModelSecret } from "./doctor-probe.ts";
 import { EnrolError, enrol } from "./enroll.ts";
 import {
 	EnvInitError,
@@ -696,6 +701,14 @@ function doctorInput(
 		version: VERSION,
 		secrets: () => secretsFor(cfg, routing, io),
 		box,
+		// Step e in box mode: the model credential a box gets (mm-210.82).
+		modelSecret: async () =>
+			probeModelSecret({
+				store: await new SecretStore(secretsPath(io.env))
+					.load()
+					.catch(() => ({})),
+				env: io.env,
+			}),
 	};
 }
 
@@ -704,11 +717,25 @@ function boxImage(f: Flags, io: Io): string {
 	return f["box-image"] || io.env.MASTERMIND_BOX_IMAGE || DEFAULT_BOX_IMAGE;
 }
 
-/** Step g of a local doctor: box mode unless --no-box. */
-function doctorBox(f: Flags, io: Io): DoctorBox {
-	return f["no-box"]
-		? { noBox: true }
-		: { driver: new DockerDriver({ env: io.env }), image: boxImage(f, io) };
+/**
+ * Steps e and g of a local doctor: box mode unless --no-box. The probe agent
+ * of --deep runs in a box over the same Paseo control as a task (mm-210.82).
+ */
+async function doctorBox(
+	f: Flags,
+	io: Io,
+	runnerId: string,
+	driver: DockerDriver = new DockerDriver({ env: io.env }),
+): Promise<DoctorBox> {
+	if (f["no-box"]) return { noBox: true };
+	const image = boxImage(f, io);
+	const probe = await probeBoxLauncher({
+		runnerId,
+		env: io.env,
+		image,
+		log: () => {},
+	}).catch(() => undefined);
+	return { driver, image, ...(probe ? { probe } : {}) };
 }
 
 async function cmdDoctor(path: string, f: Flags, io: Io): Promise<number> {
@@ -740,7 +767,15 @@ async function cmdDoctor(path: string, f: Flags, io: Io): Promise<number> {
 			});
 	}
 	const report = await runDoctor({
-		...doctorInput(path, cfg, s, routing, source, io, doctorBox(f, io)),
+		...doctorInput(
+			path,
+			cfg,
+			s,
+			routing,
+			source,
+			io,
+			await doctorBox(f, io, s.id),
+		),
 		deep: f.deep === true,
 		runnerProblems,
 	});
@@ -1004,7 +1039,9 @@ async function cmdOnboard(
 					routing as unknown as Routing,
 					source,
 					io,
-					driver ? { driver, image: boxImage(f, io) } : { noBox: true },
+					driver
+						? await doctorBox(f, io, settings.id, driver)
+						: { noBox: true },
 				),
 				deep: true,
 			});
@@ -1480,6 +1517,8 @@ async function runStart(
 							: {
 									driver: box?.driver ?? new DockerDriver({ env: io.env }),
 									image: boxImage(f, io),
+									// The probe goes the way this runner's tasks go.
+									...(box ? { probe: box.launcher } : {}),
 								},
 					),
 					deep,

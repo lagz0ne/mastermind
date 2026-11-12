@@ -371,3 +371,30 @@ export function boxDockerPath(
 	if (own) return own;
 	return /podman/i.test(engine) ? "podman" : "docker";
 }
+
+/**
+ * The box launcher of `doctor --deep` step e (mm-210.82): the probe agent
+ * runs over the same Paseo control as a task (a provider login error comes
+ * back whole; over `docker exec paseo run` it is cut to "Failed to ..."). No
+ * sweep (a running runner's boxes stay), no host registration, no code
+ * store: the probe has no repo.
+ */
+export async function probeBoxLauncher(
+	i: Pick<BoxModeInput, "runnerId" | "env" | "image" | "log" | "boxControl">,
+): Promise<BoxLauncher> {
+	const engine = new DockerDriver({ env: i.env, log: i.log });
+	const { driver, control } = await withPaseoLink(
+		engine,
+		{ ...i, outDir: "", paseoLink: false },
+		true,
+	);
+	return new BoxLauncher({
+		driver,
+		runnerId: i.runnerId,
+		defaultImage: i.image || i.env.MASTERMIND_BOX_IMAGE || DEFAULT_BOX_IMAGE,
+		log: i.log,
+		...(control
+			? { runAgent: paseoRunAgent(), runCommand: paseoRunCommand() }
+			: {}),
+	});
+}

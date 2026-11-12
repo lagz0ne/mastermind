@@ -14,6 +14,7 @@ import {
 	paseoError,
 	runDoctor,
 } from "../src/doctor.ts";
+import { BOX_LOGIN_FIX, probeEnv } from "../src/doctor-probe.ts";
 import {
 	type AgentSpec,
 	LaunchError,
@@ -531,5 +532,108 @@ describe("doctor step g: box", () => {
 		expect(g.status).toBe("fail");
 		expect(g.problem).toContain("no space");
 		expect(driver.boxes.size).toBe(0);
+	});
+});
+
+describe("doctor --deep step e in box mode (mm-210.82)", () => {
+	const image = "ghcr.io/x/box:1";
+	const model = {
+		name: "CLAUDE_CODE_OAUTH_TOKEN" as const,
+		value: "sk-ant-oat01-secretvalue",
+		from: "store",
+	};
+
+	test("a wrong token: the probe in a box fails with the provider's 401; FAIL with the setup-token fix, value never shown", async () => {
+		const { deps, calls } = world({
+			run: async () => {
+				throw new LaunchError(
+					"box agent failed: Failed to authenticate. API Error: 401 OAuth access token is invalid.",
+				);
+			},
+		});
+		const r = await runDoctor(
+			input({
+				deep: true,
+				box: { driver: new FakeDriver(), image },
+				modelSecret: async () => model,
+			}),
+			deps,
+		);
+		const e = step(r, "e");
+		expect(e.status).toBe("fail");
+		expect(e.problem).toContain("OAuth access token is invalid");
+		expect(e.fix).toBe(BOX_LOGIN_FIX);
+		expect(r.ok).toBe(false);
+		const spec = calls.specs[0] as AgentSpec;
+		expect(spec.recipe).toEqual(probeEnv("CLAUDE_CODE_OAUTH_TOKEN"));
+		expect(spec.env).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: model.value });
+		expect(e.detail[0]).toContain(
+			`in a box from ${image} (the path of a task)`,
+		);
+		expect(e.detail[0]).toContain(
+			"CLAUDE_CODE_OAUTH_TOKEN (store) through the box proxy",
+		);
+		const text = `${JSON.stringify(r)}\n${formatReport(r).join("\n")}`;
+		expect(text).not.toContain(model.value);
+		// The box is deleted with its agents: nothing to archive on this machine.
+		expect(calls.archived()).toEqual([]);
+	});
+
+	test("a valid token: the probe answers OK: PASS", async () => {
+		const { deps, calls } = world();
+		const e = step(
+			await runDoctor(
+				input({
+					deep: true,
+					box: { driver: new FakeDriver(), image },
+					modelSecret: async () => model,
+				}),
+				deps,
+			),
+			"e",
+		);
+		expect(e.status).toBe("pass");
+		expect(e.detail).toContain("agent answered: OK");
+		expect(calls.specs[0]?.host).toBeUndefined();
+	});
+
+	test("the running runner's own box launcher is used when given (remote doctor)", async () => {
+		const seen: AgentSpec[] = [];
+		const probe = {
+			async run(spec: AgentSpec) {
+				seen.push(spec);
+				return { status: "done" as const, summary: "OK" };
+			},
+		};
+		const { deps, calls } = world();
+		const r = await runDoctor(
+			input({
+				deep: true,
+				box: { driver: new FakeDriver(), image, probe },
+				modelSecret: async () => null,
+			}),
+			deps,
+		);
+		expect(step(r, "e").status).toBe("pass");
+		expect(seen).toHaveLength(1);
+		expect(calls.specs).toHaveLength(0);
+		expect(seen[0]?.env).toEqual({});
+		expect(step(r, "e").detail[0]).toContain("none on this machine");
+	});
+
+	test("--no-box keeps the local path and its fix", async () => {
+		const { deps, calls } = world({
+			run: async () => {
+				throw new LaunchError(
+					"Failed to authenticate. API Error: 401 OAuth access token is invalid.",
+				);
+			},
+		});
+		const e = step(
+			await runDoctor(input({ deep: true, box: { noBox: true } }), deps),
+			"e",
+		);
+		expect(e.fix).toBe(PROVIDER_LOGIN_FIX);
+		expect(calls.specs[0]?.recipe).toBeUndefined();
 	});
 });
