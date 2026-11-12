@@ -11,14 +11,19 @@ import {
 	moveRule,
 	parseLabels,
 	parseTry,
+	type Queue,
 	type RoutingDoc,
+	type Rule,
 	removeMember,
 	removeQueue,
 	saveRouting,
 	sendTo,
 	setDefaultQueue,
+	setQueue,
+	setRule,
 	setTargetKind,
 	suggestDefault,
+	withEnvironment,
 } from "./routing.ts";
 
 const DOC: RoutingDoc = {
@@ -187,5 +192,48 @@ describe("default queue", () => {
 		const d = setDefaultQueue(DOC, "web");
 		expect(removeQueue(d, "web").defaultQueue).toBeUndefined();
 		expect(removeQueue(d, "backend").defaultQueue).toBe("web");
+	});
+});
+
+describe("default environment", () => {
+	test("set and clear on a rule and on a queue; empty leaves no field", () => {
+		const rule: Rule = { match: { type: "bug" }, queue: "web" };
+		const named = withEnvironment(rule, "webenv");
+		expect(named).toEqual({ ...rule, environment: "webenv" });
+		expect(withEnvironment(named, "")).toEqual(rule);
+		expect("environment" in withEnvironment(named, "")).toBe(false);
+		const to: Rule = { match: {}, to: "bob", fallback: "web" };
+		const direct = withEnvironment(to, "e");
+		expect(direct).toEqual({
+			match: {},
+			to: "bob",
+			fallback: "web",
+			environment: "e",
+		});
+
+		const d = setQueue(DOC, "backend", { environment: "mastermind" });
+		expect(d.queues[0]?.environment).toBe("mastermind");
+		expect(changes(DOC, d)).toBe(1);
+		expect(
+			JSON.stringify(setQueue(d, "backend", { environment: undefined })),
+		).toBe(JSON.stringify(DOC));
+	});
+
+	test("save sends the queue and rule environments", async () => {
+		let body: Record<string, unknown> = {};
+		const fetcher = (async (url: string, init?: RequestInit) => {
+			if (url === "/api/auth/me") return Response.json({});
+			body = JSON.parse(String(init?.body));
+			return Response.json({ ...body });
+		}) as typeof fetch;
+		const doc = setRule(
+			setQueue(DOC, "backend", { environment: "mastermind" }),
+			0,
+			withEnvironment(DOC.rules[0] as Rule, "docs"),
+		);
+		const saved = await saveRouting(doc, 4, fetcher);
+		expect((body.queues as Queue[])[0]?.environment).toBe("mastermind");
+		expect((body.rules as Rule[])[0]?.environment).toBe("docs");
+		expect(docOf(saved)).toEqual(doc);
 	});
 });

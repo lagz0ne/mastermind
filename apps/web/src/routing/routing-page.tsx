@@ -8,6 +8,7 @@ import {
 } from "react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { getEnvironments } from "../environments/environments.ts";
 import {
 	ACCOUNT_ID,
 	ADDRESS,
@@ -35,6 +36,7 @@ import {
 	setTargetKind,
 	suggestDefault,
 	tryRouting,
+	withEnvironment,
 } from "./routing.ts";
 
 const input =
@@ -96,12 +98,60 @@ function MemberInput({ onAdd }: { onAdd: (account: string) => void }) {
 	);
 }
 
+/**
+ * The default environment of a queue or a rule: a name from /environments,
+ * or none. A saved name that no longer exists stays visible, marked.
+ */
+function EnvSelect({
+	label,
+	value,
+	names,
+	none,
+	onChange,
+}: {
+	label: string;
+	value: string | undefined;
+	names: string[];
+	none: string;
+	onChange: (name: string) => void;
+}) {
+	const known = !value || names.includes(value);
+	return (
+		<select
+			aria-label={label}
+			title={
+				known
+					? "Environment of a bead without an env: label"
+					: `Environment ${value} does not exist`
+			}
+			value={value ?? ""}
+			onChange={(e) => onChange(e.target.value)}
+			className={cn(
+				input,
+				"h-5 min-w-0 px-0.5 text-[11px]",
+				!value && "text-muted-foreground",
+				!known && "border-destructive",
+			)}
+		>
+			<option value="">{none}</option>
+			{!known && <option value={value}>{value} (missing)</option>}
+			{names.map((n) => (
+				<option key={n} value={n}>
+					env {n}
+				</option>
+			))}
+		</select>
+	);
+}
+
 function QueueRow({
 	queue,
+	envNames,
 	onChange,
 	onRemove,
 }: {
 	queue: Queue;
+	envNames: string[];
 	onChange: (patch: Partial<Queue>) => void;
 	onRemove: () => void;
 }) {
@@ -150,6 +200,18 @@ function QueueRow({
 						}
 					/>
 				</div>
+				<div
+					className="flex items-center gap-1"
+					data-doop-id={`queue-${queue.name}-env`}
+				>
+					<EnvSelect
+						label={`Default environment of ${queue.name}`}
+						value={queue.environment}
+						names={envNames}
+						none="no default environment"
+						onChange={(name) => onChange({ environment: name || undefined })}
+					/>
+				</div>
 			</div>
 			<input
 				aria-label={`Most beads of ${queue.name} one account may hold`}
@@ -180,6 +242,7 @@ function RuleRow({
 	index,
 	rule,
 	queues,
+	envNames,
 	last,
 	winning,
 	onChange,
@@ -189,6 +252,7 @@ function RuleRow({
 	index: number;
 	rule: Rule;
 	queues: Queue[];
+	envNames: string[];
 	last: boolean;
 	winning: boolean;
 	onChange: (rule: Rule) => void;
@@ -267,6 +331,7 @@ function RuleRow({
 				index={index}
 				rule={rule}
 				queues={queues}
+				envNames={envNames}
 				onChange={onChange}
 			/>
 			<span className="flex justify-end gap-1">
@@ -309,11 +374,13 @@ function RuleTarget({
 	index,
 	rule,
 	queues,
+	envNames,
 	onChange,
 }: {
 	index: number;
 	rule: Rule;
 	queues: Queue[];
+	envNames: string[];
 	onChange: (rule: Rule) => void;
 }) {
 	const kind = rule.to !== undefined ? "to" : "queue";
@@ -401,6 +468,19 @@ function RuleTarget({
 					</select>
 				</>
 			)}
+			<EnvSelect
+				label={`Default environment of rule ${index + 1}`}
+				value={rule.environment}
+				names={envNames}
+				none={
+					rule.to === undefined
+						? "queue's env"
+						: rule.fallback
+							? `${rule.fallback}'s env`
+							: "no env"
+				}
+				onChange={(name) => onChange(withEnvironment(rule, name))}
+			/>
 		</span>
 	);
 }
@@ -558,6 +638,12 @@ export function RoutingPage() {
 	const [error, setError] = useState<string | null>(null);
 	const [saving, setSaving] = useState(false);
 	const [winner, setWinner] = useState<number | null>(null);
+	const [envNames, setEnvNames] = useState<string[]>([]);
+	useEffect(() => {
+		getEnvironments()
+			.then((d) => setEnvNames(d.environments.map((e) => e.name)))
+			.catch(() => setEnvNames([]));
+	}, []);
 
 	const load = useCallback(() => {
 		setError(null);
@@ -719,6 +805,7 @@ export function RoutingPage() {
 						<QueueRow
 							key={q.name}
 							queue={q}
+							envNames={envNames}
 							onChange={(patch) => edit(setQueue(draft, q.name, patch))}
 							onRemove={() => edit(removeQueue(draft, q.name))}
 						/>
@@ -756,6 +843,7 @@ export function RoutingPage() {
 								index={i}
 								rule={r}
 								queues={draft.queues}
+								envNames={envNames}
 								last={i === draft.rules.length - 1}
 								winning={winner === i}
 								onChange={(rule) => edit(setRule(draft, i, rule))}

@@ -14,14 +14,20 @@ export type RuleMatch = {
  * address (direct: `<account>` or `<account>/<runner>`; `fallback`: the queue
  * when nobody there accepts, else it waits).
  */
-export type Rule =
+export type Rule = (
 	| { match: RuleMatch; queue: string; to?: undefined; fallback?: undefined }
-	| { match: RuleMatch; to: string; fallback?: string; queue?: undefined };
+	| { match: RuleMatch; to: string; fallback?: string; queue?: undefined }
+) & {
+	/** Default environment of the beads this rule routes (an env: label wins). */
+	environment?: string;
+};
 export type Queue = {
 	name: string;
 	description: string;
 	members: string[];
 	maxPerAccount?: number;
+	/** Default environment of its beads, when no env: label or rule names one. */
+	environment?: string;
 };
 export type RoutingDoc = {
 	queues: Queue[];
@@ -101,6 +107,18 @@ export function suggestDefault(doc: RoutingDoc): string | null {
 	if (doc.defaultQueue || doc.rules.length > 0 || doc.queues.length !== 1)
 		return null;
 	return doc.queues[0]?.name ?? null;
+}
+
+/**
+ * Set the default environment of a queue or a rule; empty removes it, so the
+ * saved document has no `environment: ""`.
+ */
+export function withEnvironment<T extends { environment?: string }>(
+	x: T,
+	name: string,
+): T {
+	const { environment: _old, ...rest } = x;
+	return (name ? { ...rest, environment: name } : rest) as T;
 }
 
 /** Move rule `i` by `delta` (-1 up, +1 down). Out of range: unchanged. */
