@@ -9,7 +9,8 @@
  * - checking: the first checks have not all run yet.
  * - ready: the runner-wide checks pass (Paseo, providers, workdir, box
  *   engine, queues). `readyEnvironments` lists the environments whose own
- *   checks pass (every needed secret present).
+ *   checks pass (every needed secret present, the box runtime it asks for,
+ *   its repo readable at its ref with its git credential).
  * - degraded: a runner-wide check fails (engine gone, Paseo down). It is
  *   ready again when the checks pass.
  *
@@ -17,6 +18,7 @@
  * the status (diagnostics) so that the dispatcher enforces it too.
  */
 import type { FailedCheck, RunnerReadiness } from "@mastermind/core";
+import { type AccessMap, candidateEnvironments } from "./access.ts";
 import { ENGINE_RUNTIME } from "./box/driver.ts";
 import type { RunnerSettings } from "./config.ts";
 import { type Checks, problems } from "./diagnostics.ts";
@@ -45,20 +47,12 @@ export type ReadinessFacts = {
 	secrets: SecretsState | undefined;
 	settings: RunnerSettings;
 	routing: Pick<Routing, "environments" | "implicit">;
+	/** Git access per environment (access.ts); undefined: not checked yet. */
+	access?: AccessMap;
 	/** The state before this evaluation (ready vs degraded). */
 	previous?: RunnerReadiness | null;
 	now?: () => Date;
 };
-
-/** Environments this runner may be offered: the bound ones, else all known. */
-function candidateEnvironments(
-	f: Pick<ReadinessFacts, "secrets" | "routing">,
-): string[] {
-	const known = f.secrets?.needs?.environments.map((e) => e.name) ?? [];
-	const bound = Object.keys(f.routing.environments);
-	if (f.routing.implicit || !bound.length) return known;
-	return known.filter((n) => bound.includes(n));
-}
 
 /** The readiness the facts give. Pure. */
 export function evaluate(f: ReadinessFacts): RunnerReadiness {
@@ -92,7 +86,7 @@ export function evaluate(f: ReadinessFacts): RunnerReadiness {
 		});
 
 	// Per environment: every needed secret present.
-	const envs = candidateEnvironments(f);
+	const envs = candidateEnvironments(f.secrets?.needs, f.routing);
 	const notReady = new Set<string>();
 	if (f.secrets && !f.secrets.needs)
 		failed.push({
@@ -128,6 +122,19 @@ export function evaluate(f: ReadinessFacts): RunnerReadiness {
 			environment: e.name,
 			problem: why.problem,
 			fix: why.fix,
+		});
+	}
+
+	// Per environment: its repo is readable at its ref (mm-lnm).
+	for (const env of envs) {
+		const a = f.access?.[env];
+		if (!a || a.ok) continue;
+		notReady.add(env);
+		failed.push({
+			check: "git",
+			environment: env,
+			problem: a.problem,
+			fix: a.fix,
 		});
 	}
 

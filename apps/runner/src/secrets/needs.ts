@@ -14,10 +14,17 @@ import type { Routing } from "../routing.ts";
 import type { SecretSource } from "./store.ts";
 
 /**
- * One environment as the runner sees it: its name and secret names, and the
- * box runtime it asks for (`gvisor`; readiness checks the engine has it).
+ * One environment as the runner sees it: its name and secret names, the box
+ * runtime it asks for (`gvisor`; readiness checks the engine has it), and its
+ * repo and ref (readiness checks git access: access.ts).
  */
-export type EnvSecrets = { name: string; secrets: string[]; runtime?: string };
+export type EnvSecrets = {
+	name: string;
+	secrets: string[];
+	runtime?: string;
+	repo?: string;
+	ref?: string;
+};
 
 /** The environments' secret names, as fetched (and cached) at `at`. */
 export type Needs = { at: string; environments: EnvSecrets[] };
@@ -47,6 +54,9 @@ function parseEnvironments(v: unknown): EnvSecrets[] {
 			secrets: [...e.secrets],
 			...(typeof e.runtime === "string" && e.runtime
 				? { runtime: e.runtime }
+				: {}),
+			...(typeof e.repo === "string" && e.repo
+				? { repo: e.repo, ref: typeof e.ref === "string" ? e.ref : "" }
 				: {}),
 		}));
 }

@@ -119,6 +119,33 @@ describe("evaluate", () => {
 		expect(r.readyEnvironments).toEqual(["web"]);
 	});
 
+	test("repo not readable: that environment drops out with the reason", () => {
+		const r = evaluate(
+			facts({
+				access: {
+					web: {
+						ok: false,
+						repo: "https://github.com/x/web.git",
+						ref: "main",
+						problem: "no access to https://github.com/x/web.git with GH_TOKEN",
+						fix: "give the credential read access",
+					},
+					plain: { ok: true, repo: "https://github.com/x/p.git", ref: "" },
+				},
+			}),
+		);
+		expect(r.state).toBe("ready");
+		expect(r.readyEnvironments).toEqual(["plain"]);
+		expect(r.failedChecks).toContainEqual({
+			check: "git",
+			environment: "web",
+			problem: "no access to https://github.com/x/web.git with GH_TOKEN",
+			fix: "give the credential read access",
+		});
+		expect(gateReason(r, "web")).toContain("no access to");
+		expect(gateReason(r, "plain")).toBeNull();
+	});
+
 	test("engine gone or Paseo down: degraded, no environment ready", () => {
 		const engine = evaluate(
 			facts({

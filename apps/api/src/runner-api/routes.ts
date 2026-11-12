@@ -2,13 +2,14 @@
  * Routes for runner adapters, with the service account credential
  * (`Authorization: Bearer <credential>`), not a browser session.
  *
- *   GET /api/runner/environments -> {environments: [{name, secrets}]}
+ *   GET /api/runner/environments -> {environments: [{name, secrets, runtime?, repo?, ref?}]}
  *       401 when the credential is invalid or revoked
  *       503 while auth or the environments store is not ready
  *
  * The runner learns which secret NAMES its environments need (mm-210.51), so
  * it can say what is missing before a task arrives. Only names: the values
- * live on the runner machine and never reach Mastermind.
+ * live on the runner machine and never reach Mastermind. With the repo and
+ * ref it checks git access per environment in its readiness (mm-lnm).
  */
 import {
 	type BoxRuntime,
@@ -34,12 +35,17 @@ const json = (body: unknown, status = 200) =>
 	});
 
 /**
- * Name and secret names of each environment, and its box runtime when it
- * asks for one (readiness: an engine without it is not ready for it).
+ * Name and secret names of each environment, its box runtime when it asks
+ * for one (readiness: an engine without it is not ready for it), and its repo
+ * and ref when it has a repo (readiness: git access check).
  */
-export function environmentSecrets(
-	environments: Environment[],
-): { name: string; secrets: string[]; runtime?: BoxRuntime }[] {
+export function environmentSecrets(environments: Environment[]): {
+	name: string;
+	secrets: string[];
+	runtime?: BoxRuntime;
+	repo?: string;
+	ref?: string;
+}[] {
 	return environments.map((e) => ({
 		name: e.name,
 		secrets: requiredSecrets({
@@ -47,6 +53,7 @@ export function environmentSecrets(
 			provider: e.provider,
 		}),
 		...(e.runtime ? { runtime: e.runtime } : {}),
+		...(e.repo ? { repo: e.repo, ref: e.ref ?? "" } : {}),
 	}));
 }
 

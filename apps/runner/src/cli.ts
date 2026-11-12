@@ -43,6 +43,11 @@ import {
 	type RunnerDiagnostics,
 	type RunnerInfo,
 } from "@mastermind/core";
+import {
+	type AccessMap,
+	accessStep,
+	checkEnvironmentsAccess,
+} from "./access.ts";
 import { DockerDriver } from "./box/docker.ts";
 import { natsBoxFiles } from "./box/files.ts";
 import { DEFAULT_BOX_IMAGE, startBoxMode } from "./box/launcher.ts";
@@ -397,6 +402,20 @@ async function secretsFor(
 		routing,
 		env: io.env,
 		fetch: io.fetch,
+	});
+}
+
+/** Git access of each environment this runner may be offered (readiness, onboard: access.ts). */
+async function accessFor(
+	state: SecretsState,
+	routing: Routing,
+	io: Io,
+): Promise<AccessMap> {
+	return checkEnvironmentsAccess({
+		needs: state.needs,
+		routing,
+		store: await new SecretStore(secretsPath(io.env)).load().catch(() => ({})),
+		env: io.env,
 	});
 }
 
@@ -870,6 +889,13 @@ async function cmdOnboard(
 		},
 	});
 	steps.push({
+		name: "git access",
+		run: async () => {
+			const r = routing as unknown as Routing;
+			return accessStep(await accessFor(await secretsFor(cfg, r, io), r, io));
+		},
+	});
+	steps.push({
 		name: "doctor --deep",
 		run: async () => {
 			const report = await runDoctor({
@@ -1149,6 +1175,7 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 		);
 	// Readiness: the runner asks for work only when it is ready (readiness.ts).
 	let secrets: SecretsState | undefined;
+	let access: AccessMap | undefined;
 	let publishNow = async () => {};
 	const reevaluate = () => {
 		const r = evaluate({
@@ -1156,6 +1183,7 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 			checks: diag.checks,
 			box: boxCheck,
 			secrets,
+			access,
 			settings,
 			routing,
 			previous: diag.readiness,
@@ -1314,6 +1342,8 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 			await checkBox();
 			try {
 				const x = await secretsFor(cfg, routing, io);
+				// Git access per environment (mm-lnm), set with the secrets.
+				access = await accessFor(x, routing, io);
 				secrets = x;
 				diag.secrets = x.diagnostics;
 				const missing = x.diagnostics.missing.join(", ");

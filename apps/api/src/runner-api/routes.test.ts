@@ -23,6 +23,7 @@ const doc = {
 			provider: { name: "claude", auth: "CLAUDE_CODE_OAUTH_TOKEN" },
 		}),
 		env({ name: "docs" }),
+		env({ name: "scratch", repo: "" }),
 		env({ name: "strong", runtime: "gvisor" }),
 	],
 };
@@ -50,15 +51,32 @@ const get = (auth?: string) =>
 	});
 
 describe("GET /api/runner/environments", () => {
-	test("a valid credential gets names and secret names only", async () => {
+	test("a valid credential gets names, secret names, repo and ref only", async () => {
 		const res = await routes()(get("Bearer mms_alice_1_ok"));
 		expect(res.status).toBe(200);
 		const body = await res.json();
 		expect(body).toEqual({
 			environments: [
-				{ name: "web", secrets: ["GITHUB_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"] },
-				{ name: "docs", secrets: [] },
-				{ name: "strong", secrets: [], runtime: "gvisor" },
+				{
+					name: "web",
+					secrets: ["GITHUB_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"],
+					repo: "https://github.com/x/web.git",
+					ref: "main",
+				},
+				{
+					name: "docs",
+					secrets: [],
+					repo: "https://github.com/x/web.git",
+					ref: "main",
+				},
+				{ name: "scratch", secrets: [] },
+				{
+					name: "strong",
+					secrets: [],
+					runtime: "gvisor",
+					repo: "https://github.com/x/web.git",
+					ref: "main",
+				},
 			],
 		});
 		expect(JSON.stringify(body)).not.toContain("bun install");
