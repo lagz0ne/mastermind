@@ -7,6 +7,9 @@ the runner reports for them.
 
 Needs: `paseo` with its daemon running, and a provider that is logged in.
 
+**Set up a worker, step by step:** [SETUP.md](SETUP.md) (also served by Mastermind at
+`<mastermind url>/download/runner-setup`, linked from `/people` → **Add runner**).
+
 ## Install (no clone, no bun)
 
 Mastermind serves the runner compiled for linux and darwin (x64, arm64), built from
