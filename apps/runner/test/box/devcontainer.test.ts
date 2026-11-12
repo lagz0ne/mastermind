@@ -35,6 +35,9 @@ import { boxDockerPath } from "../../src/box/launcher.ts";
 import { BoxStepError, runInBox } from "../../src/box/run.ts";
 import { FakeDriver } from "./fake-driver.ts";
 
+/** Tests that spawn real git: slow on a loaded machine (bun's default is 5 s). */
+const GIT_MS = 30_000;
+
 const tmp = mkdtempSync(join(tmpdir(), "mm-dc-test-"));
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 
@@ -261,47 +264,55 @@ async function repo(name: string, files: Record<string, string>) {
 }
 
 describe("checkAccess", () => {
-	test("readable repo, missing ref, missing repo", async () => {
-		const url = await repo("access", { "README.md": "hi\n" });
-		expect(await checkAccess(url, "main", {})).toEqual({ ok: true });
-		expect(await checkAccess(url, "", {})).toEqual({ ok: true });
-		expect(await checkAccess(url, "abc1234", {})).toEqual({ ok: true });
-		const missing = await checkAccess(url, "nope", {});
-		expect(missing).toMatchObject({ ok: false, kind: "ref-missing" });
-		const gone = await checkAccess(`file://${tmp}/no-such-repo`, "main", {});
-		expect(gone).toMatchObject({ ok: false, kind: "no-access" });
-		if (!gone.ok) expect(gone.reason).toContain("no git credential");
-	});
-	test("reasons by error, secret values redacted", () => {
-		const r = (stderr: string) => ({ code: 128, stdout: "", stderr });
-		const url = "https://github.com/acme/private.git";
-		expect(
-			classifyGitError(
+	test(
+		"readable repo, missing ref, missing repo",
+		async () => {
+			const url = await repo("access", { "README.md": "hi\n" });
+			expect(await checkAccess(url, "main", {})).toEqual({ ok: true });
+			expect(await checkAccess(url, "", {})).toEqual({ ok: true });
+			expect(await checkAccess(url, "abc1234", {})).toEqual({ ok: true });
+			const missing = await checkAccess(url, "nope", {});
+			expect(missing).toMatchObject({ ok: false, kind: "ref-missing" });
+			const gone = await checkAccess(`file://${tmp}/no-such-repo`, "main", {});
+			expect(gone).toMatchObject({ ok: false, kind: "no-access" });
+			if (!gone.ok) expect(gone.reason).toContain("no git credential");
+		},
+		GIT_MS,
+	);
+	test(
+		"reasons by error, secret values redacted",
+		() => {
+			const r = (stderr: string) => ({ code: 128, stdout: "", stderr });
+			const url = "https://github.com/acme/private.git";
+			expect(
+				classifyGitError(
+					r(
+						"fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+					),
+					url,
+					{},
+				),
+			).toMatchObject({ kind: "no-access" });
+			const bad = classifyGitError(
 				r(
-					"fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+					"remote: Repository not found. tok-123456\nfatal: repository not found",
 				),
 				url,
-				{},
-			),
-		).toMatchObject({ kind: "no-access" });
-		const bad = classifyGitError(
-			r(
-				"remote: Repository not found. tok-123456\nfatal: repository not found",
-			),
-			url,
-			{ GIT_TOKEN: "tok-123456" },
-		);
-		expect(bad.kind).toBe("no-access");
-		expect(bad.reason).toContain("with GIT_TOKEN");
-		expect(bad.reason).not.toContain("tok-123456");
-		expect(
-			classifyGitError(
-				r("fatal: unable to access: Could not resolve host: x"),
-				url,
-				{},
-			),
-		).toMatchObject({ kind: "network" });
-	});
+				{ GIT_TOKEN: "tok-123456" },
+			);
+			expect(bad.kind).toBe("no-access");
+			expect(bad.reason).toContain("with GIT_TOKEN");
+			expect(bad.reason).not.toContain("tok-123456");
+			expect(
+				classifyGitError(
+					r("fatal: unable to access: Could not resolve host: x"),
+					url,
+					{},
+				),
+			).toMatchObject({ kind: "network" });
+		},
+		GIT_MS,
+	);
 });
 
 type Call = { cmd: string[]; env?: Record<string, string> };
@@ -363,170 +374,199 @@ describe("prepareBox", () => {
 		{ postCreateCommand: "echo post > /tmp/post.ok", remoteUser: "vscode" },
 	];
 
-	test("repo with .devcontainer/devcontainer.json: cleaned, built by the CLI, never initializeCommand", async () => {
-		const url = await repo("with-config", {
-			".devcontainer/devcontainer.json": `// a comment\n${config}`,
-			"README.md": "x",
-		});
-		const h = fakeHost(meta);
-		const steps: string[] = [];
-		const p = await prepareBox(
-			{ beadId: "mm-1", env: { repo: url, ref: "main" }, secrets: {} },
-			deps(h.run),
-			(l) => steps.push(l),
-		);
-		expect(p?.image).toMatch(/^mastermind-dc:[0-9a-f]{16}$/);
-		expect(p?.user).toBe("vscode");
-		expect(p?.lifecycle).toEqual([
-			{
-				what: "postCreateCommand (devcontainer.json)",
-				cmd: ["/bin/sh", "-c", "echo post > /tmp/post.ok"],
-			},
-		]);
-		expect(p?.instructions).toBe("Use bun.");
-		expect(existsSync(marker)).toBe(false);
-		const build = h.calls.find((c) => c.cmd[0] === "fake-devcontainer");
-		expect(build?.cmd).toContain("--config");
-		expect(build?.cmd.at(build.cmd.indexOf("--config") + 1)).toEndWith(
-			".devcontainer/.mastermind.devcontainer.json",
-		);
-		expect(build?.cmd).toContain(`${p?.image}-base`);
-		expect(
-			h.calls.some((c) => c.cmd[0] === "docker" && c.cmd[1] === "build"),
-		).toBe(true);
-		expect(steps.join("\n")).toContain(
-			"not applied (they reach the host): initializeCommand, runArgs",
-		);
-
-		// The second task uses the cached image: no build.
-		const again = fakeHost(meta);
-		await prepareBox(
-			{ beadId: "mm-1", env: { repo: url, ref: "main" }, secrets: {} },
-			{ ...deps(again.run) },
-			() => {},
-		);
-		// (a new fake host has no images: it builds again; the key is stable)
-		const k2 = again.calls.find((c) => c.cmd[0] === "fake-devcontainer");
-		expect(k2?.cmd).toContain(`${p?.image}-base`);
-	});
-
-	test("initializeCommand runs on this machine only when the environment allows it", async () => {
-		const url = await repo("allow-init", {
-			".devcontainer.json": config,
-		});
-		const h = fakeHost(meta);
-		await prepareBox(
-			{
-				beadId: "mm-1",
-				env: {
-					repo: url,
-					ref: "main",
-					devcontainer: { allowHost: ["initializeCommand"] },
+	test(
+		"repo with .devcontainer/devcontainer.json: cleaned, built by the CLI, never initializeCommand",
+		async () => {
+			const url = await repo("with-config", {
+				".devcontainer/devcontainer.json": `// a comment\n${config}`,
+				"README.md": "x",
+			});
+			const h = fakeHost(meta);
+			const steps: string[] = [];
+			const p = await prepareBox(
+				{ beadId: "mm-1", env: { repo: url, ref: "main" }, secrets: {} },
+				deps(h.run),
+				(l) => steps.push(l),
+			);
+			expect(p?.image).toMatch(/^mastermind-dc:[0-9a-f]{16}$/);
+			expect(p?.user).toBe("vscode");
+			expect(p?.lifecycle).toEqual([
+				{
+					what: "postCreateCommand (devcontainer.json)",
+					cmd: ["/bin/sh", "-c", "echo post > /tmp/post.ok"],
 				},
-				secrets: {},
-			},
-			deps(h.run),
-			() => {},
-		);
-		expect(existsSync(marker)).toBe(true);
-		rmSync(marker);
-	});
+			]);
+			expect(p?.instructions).toBe("Use bun.");
+			expect(existsSync(marker)).toBe(false);
+			const build = h.calls.find((c) => c.cmd[0] === "fake-devcontainer");
+			expect(build?.cmd).toContain("--config");
+			expect(build?.cmd.at(build.cmd.indexOf("--config") + 1)).toEndWith(
+				".devcontainer/.mastermind.devcontainer.json",
+			);
+			expect(build?.cmd).toContain(`${p?.image}-base`);
+			expect(
+				h.calls.some((c) => c.cmd[0] === "docker" && c.cmd[1] === "build"),
+			).toBe(true);
+			expect(steps.join("\n")).toContain(
+				"not applied (they reach the host): initializeCommand, runArgs",
+			);
 
-	test("repo without a config: the default image (null)", async () => {
-		const url = await repo("no-config", {
-			"README.md": "x",
-			".devcontainer/python/devcontainer.json": config,
-		});
-		const h = fakeHost(meta);
-		const steps: string[] = [];
-		const p = await prepareBox(
-			{ beadId: "mm-1", env: { repo: url, ref: "main" }, secrets: {} },
-			deps(h.run),
-			(l) => steps.push(l),
-		);
-		expect(p).toBeNull();
-		expect(h.calls).toEqual([]);
-		expect(steps.at(-1)).toContain("name one in the environment's configPath");
-	});
+			// The second task uses the cached image: no build.
+			const again = fakeHost(meta);
+			await prepareBox(
+				{ beadId: "mm-1", env: { repo: url, ref: "main" }, secrets: {} },
+				{ ...deps(again.run) },
+				() => {},
+			);
+			// (a new fake host has no images: it builds again; the key is stable)
+			const k2 = again.calls.find((c) => c.cmd[0] === "fake-devcontainer");
+			expect(k2?.cmd).toContain(`${p?.image}-base`);
+		},
+		GIT_MS,
+	);
 
-	test("the environment's own config wins; an image recipe keeps the recipe", async () => {
-		const url = await repo("own-config", { "README.md": "x" });
-		const h = fakeHost(meta);
-		const p = await prepareBox(
-			{
-				beadId: "mm-1",
-				env: { repo: url, ref: "main", devcontainer: { config } },
-				secrets: {},
-			},
-			deps(h.run),
-			() => {},
-		);
-		expect(p?.image).toStartWith("mastermind-dc:");
-		const h2 = fakeHost(meta);
-		expect(
+	test(
+		"initializeCommand runs on this machine only when the environment allows it",
+		async () => {
+			const url = await repo("allow-init", {
+				".devcontainer.json": config,
+			});
+			const h = fakeHost(meta);
 			await prepareBox(
 				{
 					beadId: "mm-1",
-					env: { repo: url, ref: "main", image: "node:22" },
-					secrets: {},
-				},
-				deps(h2.run),
-				() => {},
-			),
-		).toBeNull();
-		expect(h2.calls).toEqual([]);
-	});
-
-	test("required secrets of customizations.mastermind; recommended ones only noted", async () => {
-		const url = await repo("secrets", {
-			".devcontainer.json": JSON.stringify({
-				image: "debian",
-				secrets: { NPM_TOKEN: {} },
-				customizations: { mastermind: { secrets: ["API_KEY"] } },
-			}),
-		});
-		const t = { beadId: "mm-1", env: { repo: url, ref: "main" }, secrets: {} };
-		await expect(
-			prepareBox(t, deps(fakeHost(meta).run), () => {}),
-		).rejects.toThrow(
-			"missing secrets named in .devcontainer.json (customizations.mastermind.secrets): API_KEY",
-		);
-		const steps: string[] = [];
-		const p = await prepareBox(
-			t,
-			{
-				...deps(fakeHost(meta).run),
-				lookupSecrets: async (names) => ({
-					values: (names.includes("API_KEY") ? { API_KEY: "v" } : {}) as Record<
-						string,
-						string
-					>,
-					missing: names.filter((n) => n !== "API_KEY"),
-				}),
-			},
-			(l) => steps.push(l),
-		);
-		expect(p?.secrets).toEqual({ API_KEY: "v" });
-		expect(steps.join("\n")).toContain(
-			"recommended secrets not set on this runner: NPM_TOKEN",
-		);
-	});
-
-	test("no access: a clear reason, nothing built", async () => {
-		const h = fakeHost(meta);
-		await expect(
-			prepareBox(
-				{
-					beadId: "mm-1",
-					env: { repo: `file://${tmp}/private`, ref: "main" },
+					env: {
+						repo: url,
+						ref: "main",
+						devcontainer: { allowHost: ["initializeCommand"] },
+					},
 					secrets: {},
 				},
 				deps(h.run),
 				() => {},
-			),
-		).rejects.toThrow(DevcontainerError);
-		expect(h.calls).toEqual([]);
-	});
+			);
+			expect(existsSync(marker)).toBe(true);
+			rmSync(marker);
+		},
+		GIT_MS,
+	);
+
+	test(
+		"repo without a config: the default image (null)",
+		async () => {
+			const url = await repo("no-config", {
+				"README.md": "x",
+				".devcontainer/python/devcontainer.json": config,
+			});
+			const h = fakeHost(meta);
+			const steps: string[] = [];
+			const p = await prepareBox(
+				{ beadId: "mm-1", env: { repo: url, ref: "main" }, secrets: {} },
+				deps(h.run),
+				(l) => steps.push(l),
+			);
+			expect(p).toBeNull();
+			expect(h.calls).toEqual([]);
+			expect(steps.at(-1)).toContain(
+				"name one in the environment's configPath",
+			);
+		},
+		GIT_MS,
+	);
+
+	test(
+		"the environment's own config wins; an image recipe keeps the recipe",
+		async () => {
+			const url = await repo("own-config", { "README.md": "x" });
+			const h = fakeHost(meta);
+			const p = await prepareBox(
+				{
+					beadId: "mm-1",
+					env: { repo: url, ref: "main", devcontainer: { config } },
+					secrets: {},
+				},
+				deps(h.run),
+				() => {},
+			);
+			expect(p?.image).toStartWith("mastermind-dc:");
+			const h2 = fakeHost(meta);
+			expect(
+				await prepareBox(
+					{
+						beadId: "mm-1",
+						env: { repo: url, ref: "main", image: "node:22" },
+						secrets: {},
+					},
+					deps(h2.run),
+					() => {},
+				),
+			).toBeNull();
+			expect(h2.calls).toEqual([]);
+		},
+		GIT_MS,
+	);
+
+	test(
+		"required secrets of customizations.mastermind; recommended ones only noted",
+		async () => {
+			const url = await repo("secrets", {
+				".devcontainer.json": JSON.stringify({
+					image: "debian",
+					secrets: { NPM_TOKEN: {} },
+					customizations: { mastermind: { secrets: ["API_KEY"] } },
+				}),
+			});
+			const t = {
+				beadId: "mm-1",
+				env: { repo: url, ref: "main" },
+				secrets: {},
+			};
+			await expect(
+				prepareBox(t, deps(fakeHost(meta).run), () => {}),
+			).rejects.toThrow(
+				"missing secrets named in .devcontainer.json (customizations.mastermind.secrets): API_KEY",
+			);
+			const steps: string[] = [];
+			const p = await prepareBox(
+				t,
+				{
+					...deps(fakeHost(meta).run),
+					lookupSecrets: async (names) => ({
+						values: (names.includes("API_KEY")
+							? { API_KEY: "v" }
+							: {}) as Record<string, string>,
+						missing: names.filter((n) => n !== "API_KEY"),
+					}),
+				},
+				(l) => steps.push(l),
+			);
+			expect(p?.secrets).toEqual({ API_KEY: "v" });
+			expect(steps.join("\n")).toContain(
+				"recommended secrets not set on this runner: NPM_TOKEN",
+			);
+		},
+		GIT_MS,
+	);
+
+	test(
+		"no access: a clear reason, nothing built",
+		async () => {
+			const h = fakeHost(meta);
+			await expect(
+				prepareBox(
+					{
+						beadId: "mm-1",
+						env: { repo: `file://${tmp}/private`, ref: "main" },
+						secrets: {},
+					},
+					deps(h.run),
+					() => {},
+				),
+			).rejects.toThrow(DevcontainerError);
+			expect(h.calls).toEqual([]);
+		},
+		GIT_MS,
+	);
 });
 
 describe("runInBox with prepare", () => {
