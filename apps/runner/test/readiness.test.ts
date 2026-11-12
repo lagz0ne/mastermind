@@ -155,6 +155,55 @@ describe("evaluate", () => {
 	test("--no-box: no engine check", () => {
 		expect(evaluate(facts({ box: null })).state).toBe("ready");
 	});
+
+	describe("runtime gvisor (mm-210.63)", () => {
+		const withStrong = (): SecretsState => {
+			const s = secrets([]);
+			s.needs?.environments.push({
+				name: "strong",
+				secrets: [],
+				runtime: "gvisor",
+			});
+			return s;
+		};
+		test("engine without runsc: only that environment is not ready, with the reason and a fix", () => {
+			const r = evaluate(
+				facts({
+					secrets: withStrong(),
+					box: { ok: true, runtimes: ["crun", "runc"] },
+				}),
+			);
+			expect(r.state).toBe("ready");
+			expect(r.readyEnvironments).toEqual(["web", "api", "plain"]);
+			const c = r.failedChecks.find((x) => x.environment === "strong");
+			expect(c?.check).toBe("runtime");
+			expect(c?.problem).toBe(
+				"runtime gvisor: the box engine has no runsc runtime (has: crun, runc)",
+			);
+			expect(c?.fix).toContain("gvisor.dev");
+			expect(gateReason(r, "strong")).toContain(
+				"environment strong is not ready here: runtime gvisor",
+			);
+		});
+		test("engine with runsc: ready", () => {
+			const r = evaluate(
+				facts({
+					secrets: withStrong(),
+					box: { ok: true, runtimes: ["runc", "runsc"] },
+				}),
+			);
+			expect(r.readyEnvironments).toContain("strong");
+			expect(r.failedChecks).toEqual([]);
+		});
+		test("runtimes unknown or --no-box: not ready for it", () => {
+			const unknown = evaluate(facts({ secrets: withStrong() }));
+			expect(unknown.readyEnvironments).not.toContain("strong");
+			const noBox = evaluate(facts({ secrets: withStrong(), box: null }));
+			expect(
+				noBox.failedChecks.find((x) => x.environment === "strong")?.problem,
+			).toContain("--no-box");
+		});
+	});
 });
 
 describe("gateReason", () => {

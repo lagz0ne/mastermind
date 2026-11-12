@@ -973,7 +973,9 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 					files: () =>
 						conn && !conn.isClosed() ? natsBoxFiles(conn, cfg.account) : null,
 				});
-			boxCheck = { ok: true };
+			// The installed runtimes (gVisor readiness per environment, mm-210.63).
+			const runtimes = await box.driver.runtimes?.().catch(() => undefined);
+			boxCheck = runtimes ? { ok: true, runtimes } : { ok: true };
 		} catch (error) {
 			boxCheck = {
 				ok: false,

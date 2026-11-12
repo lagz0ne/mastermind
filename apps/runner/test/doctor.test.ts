@@ -338,8 +338,28 @@ describe("doctor step g: box", () => {
 		);
 		expect(g.status).toBe("pass");
 		expect(g.detail.join("\n")).toContain("engine fake answers: fake 1.0");
+		expect(g.detail.join("\n")).not.toContain("runtimes:");
 		expect(driver.images).toEqual([{ image }]);
 		expect(driver.created).toHaveLength(0);
+	});
+
+	test("runtimes: gVisor available or not installed, never a failure (mm-210.63)", async () => {
+		const driver = new FakeDriver();
+		driver.runtimeList = ["crun", "runc"];
+		const g = step(
+			await runDoctor(input({ box: { driver, image } }), world().deps),
+			"g",
+		);
+		expect(g.status).toBe("pass");
+		expect(g.detail.join("\n")).toContain(
+			"runtimes: crun, runc; gVisor (runsc) not installed: environments with runtime gvisor are not ready here",
+		);
+		driver.runtimeList = ["runc", "runsc"];
+		const g2 = step(
+			await runDoctor(input({ box: { driver, image } }), world().deps),
+			"g",
+		);
+		expect(g2.detail.join("\n")).toContain("gVisor (runsc) available");
 	});
 
 	test("engine down: FAIL with the fix, --no-box included", async () => {

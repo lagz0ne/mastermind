@@ -74,6 +74,68 @@ function fakeHost(
 	return { calls, run, lines: () => calls.map((c) => c.cmd.join(" ")) };
 }
 
+describe("runInBox: network phases and runtime (mm-210.63)", () => {
+	const allowEnv = (over: Partial<BoxTask["env"]> = {}) =>
+		task({
+			env: {
+				...task().env,
+				network: { allow: ["api.anthropic.com"] },
+				...over,
+			},
+		});
+	test("allow list: the box starts with the setup list; the agent list is set after check and before the agent", async () => {
+		const d = new FakeDriver();
+		const steps: string[] = [];
+		const res = await runInBox(
+			allowEnv(),
+			{ ...opts(d), onStep: (l) => steps.push(l) },
+			never,
+		);
+		expect(res.status).toBe("done");
+		const net = d.created[0]?.network as { allow: string[] };
+		expect(net.allow).toContain("api.anthropic.com");
+		expect(net.allow).toContain("registry.npmjs.org");
+		expect(net.allow).toContain("github.com");
+		expect(d.allows).toHaveLength(1);
+		expect(d.allows[0]?.allow).toEqual(["api.anthropic.com"]);
+		const lines = cmdLines(d);
+		const at = d.allows[0]?.afterExecs ?? -1;
+		const checkAt = lines.findIndex((l) => l.includes("bun test"));
+		const agentAt = lines.findIndex((l) => l.startsWith("paseo run"));
+		expect(checkAt).toBeGreaterThanOrEqual(0);
+		expect(checkAt).toBeLessThan(at);
+		expect(agentAt).toBeGreaterThanOrEqual(at);
+		expect(steps).toContain("network: agent phase, only api.anthropic.com");
+	});
+	test("open network: one phase, no switch; runtime gvisor: the box runs with runsc", async () => {
+		const d = new FakeDriver();
+		await runInBox(
+			task({ env: { ...task().env, runtime: "gvisor" } }),
+			opts(d),
+			never,
+		);
+		expect(d.created[0]?.network).toBe("open");
+		expect(d.created[0]?.runtime).toBe("runsc");
+		expect(d.allows).toHaveLength(0);
+		const plain = new FakeDriver();
+		await runInBox(task(), opts(plain), never);
+		expect(plain.created[0]?.runtime).toBeUndefined();
+	});
+	test("a box that cannot switch: the agent never starts and the box is deleted", async () => {
+		const d = new FakeDriver();
+		const create = d.create.bind(d);
+		d.create = async (spec) => {
+			const b = await create(spec);
+			return { ...b, setAllow: undefined };
+		};
+		await expect(runInBox(allowEnv(), opts(d), never)).rejects.toBeInstanceOf(
+			BoxStepError,
+		);
+		expect(cmdLines(d).some((l) => l.startsWith("paseo run"))).toBe(false);
+		expect(d.boxes.size).toBe(0);
+	});
+});
+
 describe("runInBox", () => {
 	test("makes, fills, runs, takes out and deletes the box", async () => {
 		const d = new FakeDriver();

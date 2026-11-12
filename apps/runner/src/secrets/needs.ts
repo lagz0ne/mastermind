@@ -13,8 +13,11 @@ import { dirname, join } from "node:path";
 import type { Routing } from "../routing.ts";
 import type { SecretSource } from "./store.ts";
 
-/** One environment as the runner sees it: its name and secret names. */
-export type EnvSecrets = { name: string; secrets: string[] };
+/**
+ * One environment as the runner sees it: its name and secret names, and the
+ * box runtime it asks for (`gvisor`; readiness checks the engine has it).
+ */
+export type EnvSecrets = { name: string; secrets: string[]; runtime?: string };
 
 /** The environments' secret names, as fetched (and cached) at `at`. */
 export type Needs = { at: string; environments: EnvSecrets[] };
@@ -39,7 +42,13 @@ function parseEnvironments(v: unknown): EnvSecrets[] {
 			(e): e is EnvSecrets =>
 				!!e && typeof e.name === "string" && strings(e.secrets),
 		)
-		.map((e) => ({ name: e.name, secrets: [...e.secrets] }));
+		.map((e) => ({
+			name: e.name,
+			secrets: [...e.secrets],
+			...(typeof e.runtime === "string" && e.runtime
+				? { runtime: e.runtime }
+				: {}),
+		}));
 }
 
 /** GET <mastermind>/api/runner/environments with the runner's credential. */

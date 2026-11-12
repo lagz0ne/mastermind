@@ -23,6 +23,7 @@ const doc = {
 			provider: { name: "claude", auth: "CLAUDE_CODE_OAUTH_TOKEN" },
 		}),
 		env({ name: "docs" }),
+		env({ name: "strong", runtime: "gvisor" }),
 	],
 };
 
@@ -57,6 +58,7 @@ describe("GET /api/runner/environments", () => {
 			environments: [
 				{ name: "web", secrets: ["GITHUB_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"] },
 				{ name: "docs", secrets: [] },
+				{ name: "strong", secrets: [], runtime: "gvisor" },
 			],
 		});
 		expect(JSON.stringify(body)).not.toContain("bun install");

@@ -24,7 +24,7 @@ import { existsSync, statSync } from "node:fs";
 import { type ConnectOptions, connect, subjects } from "@mastermind/bus";
 import type { Dispatch } from "@mastermind/core";
 import type { Box, BoxDriver } from "./box/driver.ts";
-import { BOX_LABEL } from "./box/driver.ts";
+import { BOX_LABEL, ENGINE_RUNTIME } from "./box/driver.ts";
 import { DEFAULT_BOX_IMAGE } from "./box/image.ts";
 import { BOX_ENV } from "./box/run.ts";
 import {
@@ -725,6 +725,12 @@ export async function runDoctor(
 			try {
 				const engine = await driver.ping();
 				st.ok(`engine ${driver.name} answers: ${engine} (${ms(t0)} ms)`);
+				// gVisor for environments with runtime gvisor (mm-210.63): a fact, not a failure.
+				const runtimes = await driver.runtimes?.().catch(() => undefined);
+				if (runtimes)
+					st.ok(
+						`runtimes: ${runtimes.join(", ") || "none"}; gVisor (runsc) ${runtimes.includes(ENGINE_RUNTIME.gvisor) ? "available" : "not installed: environments with runtime gvisor are not ready here"}`,
+					);
 			} catch (error) {
 				// The driver's message may carry its own '; fix: ...'.
 				st.fail(

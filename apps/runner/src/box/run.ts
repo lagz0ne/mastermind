@@ -8,6 +8,8 @@
  *   of that one command) -> secrets as env and files (never the git credential)
  *   -> devcontainer lifecycle commands (onCreate, updateContent, postCreate,
  *   postStart) -> setup, then check (fail: the reason and the output tail)
+ *   -> network phase agent: an allow list drops the registries and the repo
+ *   host it had for setup (proxy.ts networkPhases, mm-210.63)
  *   -> the item's input files into INPUTS_DIR (files.ts, mm-210.60)
  *   -> wait for the Paseo daemon in the box -> `paseo run` inside, mode bypass
  *   -> take out a patch of the work -> outputs to Mastermind (the patch, files
@@ -43,6 +45,7 @@ import {
 	type Box,
 	type BoxDriver,
 	BoxError,
+	ENGINE_RUNTIME,
 	type ExecResult,
 } from "./driver.ts";
 import type { BoxFiles } from "./files.ts";
@@ -55,6 +58,7 @@ import {
 	redact,
 	splitGitSecrets,
 } from "./output.ts";
+import { networkPhases } from "./proxy.ts";
 import { untar } from "./tar.ts";
 
 export const WORKSPACE = "/workspace";
@@ -246,6 +250,9 @@ export async function runInBox(
 		const secretEnv: Record<string, string> = {};
 		for (const [k, v] of Object.entries(secrets))
 			if (ENV_NAME.test(k)) secretEnv[k] = v;
+		// Two network phases: setup gets more hosts than the agent.
+		const phases = networkPhases(env.network, env.repo);
+		const runtime = env.runtime ? ENGINE_RUNTIME[env.runtime] : undefined;
 		box = await driver.create({
 			image,
 			name: boxName(task.executionId),
@@ -258,7 +265,8 @@ export async function runInBox(
 				...(env.limits?.cpu ? { cpu: env.limits.cpu } : {}),
 				...(env.limits?.memoryMb ? { memoryMb: env.limits.memoryMb } : {}),
 			},
-			network: env.network ?? "open",
+			network: phases ? { allow: phases.setup } : (env.network ?? "open"),
+			...(runtime ? { runtime } : {}),
 			env: { ...BOX_ENV, ...prep?.env, ...opts.boxEnv, ...secretEnv },
 			...(opts.cmd ? { cmd: opts.cmd } : {}),
 		});
@@ -380,6 +388,23 @@ export async function runInBox(
 			await must(`check \`${cmd}\``, ["sh", "-c", cmd]);
 		if ((env.setup?.length ?? 0) + (env.check?.length ?? 0) > 0)
 			step("setup and check passed");
+		// The agent phase: only the environment's allow list from here on.
+		if (phases) {
+			if (!b.setAllow)
+				throw new BoxStepError(
+					`the box driver ${driver.name} cannot switch the network to the agent phase`,
+				);
+			try {
+				await b.setAllow(phases.agent);
+			} catch (error) {
+				if (all.aborted) throw stopped();
+				throw new BoxStepError(
+					error instanceof Error ? error.message : String(error),
+				);
+			}
+			if (all.aborted) throw stopped();
+			step(`network: agent phase, only ${phases.agent.join(", ")}`);
+		}
 
 		// The item's files: inputs into INPUTS_DIR; the agent leaves outputs in OUTPUTS_DIR.
 		const io = opts.files?.() ?? null;

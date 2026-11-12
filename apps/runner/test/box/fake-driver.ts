@@ -39,11 +39,19 @@ export class FakeDriver implements BoxDriver {
 	handler: Handler = () => undefined;
 	patch = "diff --git a/x b/x\n";
 	createError: Error | null = null;
+	/** Installed runtimes; null: the driver has no runtimes(). */
+	runtimeList: string[] | null = null;
+	/** setAllow calls per box: the network phases (mm-210.63). */
+	readonly allows: { box: string; allow: string[]; afterExecs: number }[] = [];
 	#n = 0;
 
 	async ping() {
 		return "fake 1.0";
 	}
+	runtimes?: () => Promise<string[]> = async () => {
+		if (!this.runtimeList) throw new Error("no runtimes");
+		return this.runtimeList;
+	};
 	async ensureImage(recipe: ImageRecipe) {
 		this.images.push(recipe);
 		return recipe.tools?.length ? `built:${recipe.hash}` : recipe.image;
@@ -72,6 +80,9 @@ export class FakeDriver implements BoxDriver {
 			},
 			async logs() {
 				return "daemon log";
+			},
+			async setAllow(allow) {
+				drv.allows.push({ box: id, allow, afterExecs: drv.execs.length });
 			},
 			async destroy() {
 				await drv.remove(id);

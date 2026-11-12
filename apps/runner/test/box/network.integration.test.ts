@@ -11,6 +11,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { DockerDriver } from "../../src/box/docker.ts";
 import { BOX_LABEL } from "../../src/box/driver.ts";
+import { networkPhases } from "../../src/box/proxy.ts";
 import { sweepBoxes } from "../../src/box/run.ts";
 
 const host = process.env.MM_BOX_DOCKER_HOST;
@@ -67,6 +68,69 @@ describe.skipIf(!host)("network allow list on a real engine", () => {
 		}
 		expect(await driver.list({ [BOX_LABEL.runner]: runnerId })).toEqual([]);
 		expect(await networkExists(`${name}-net`)).toBe(false);
+	}, 600_000);
+
+	test("two phases: setup reaches registry.npmjs.org, the agent phase does not; tunnels of setup are closed", async () => {
+		const phases = networkPhases(
+			{ allow: ["example.com"] },
+			"https://github.com/octocat/Hello-World.git",
+		);
+		if (!phases) throw new Error("no phases");
+		const name = `mm-box-it-net-phase-${Date.now()}`;
+		const box = await driver.create({
+			image: await driver.ensureImage({ image }),
+			name,
+			labels: labels(name),
+			network: { allow: phases.setup },
+			cmd: ["sleep", "infinity"],
+		});
+		try {
+			const sh = (c: string) =>
+				box.exec(["sh", "-c", c], { workdir: "/tmp", user: "root" });
+			// Setup: npm install from the registry works (curl through the proxy).
+			const npm =
+				"curl -sS -o /dev/null -w '%{http_code}' --max-time 20 https://registry.npmjs.org/left-pad";
+			const setup = await sh(
+				`mkdir -p p && cd p && npm install --no-audit --no-fund left-pad@1.3.0 >/dev/null && test -f node_modules/left-pad/package.json && ${npm}`,
+			);
+			expect(setup.stderr + setup.stdout).toContain("200");
+			expect(setup.code).toBe(0);
+			// A long tunnel opened in setup (a background download).
+			const bg = await sh(
+				"nohup setsid sh -c 'curl -sS --max-time 120 --limit-rate 2k -o /tmp/slow https://registry.npmjs.org/typescript > /tmp/slow.log 2>&1; echo done $? >> /tmp/slow.log' >/dev/null 2>&1 &",
+			);
+			expect(bg.code).toBe(0);
+			// Wait until the download is running (bytes arrive).
+			const started = Date.now() + 20_000;
+			while (Date.now() < started) {
+				if ((await sh("test -s /tmp/slow")).code === 0) break;
+				await Bun.sleep(250);
+			}
+			expect((await sh("test -s /tmp/slow")).code).toBe(0);
+			if (!box.setAllow) throw new Error("no setAllow");
+			await box.setAllow(phases.agent);
+			const agent = await sh(npm);
+			expect(agent.code).not.toBe(0);
+			expect(agent.stderr + agent.stdout).toMatch(/403|CONNECT/);
+			const ok = await sh(
+				"curl -sS -o /dev/null -w '%{http_code}' --max-time 20 https://example.com/",
+			);
+			expect(ok.stdout).toBe("200");
+			// The proxy closed the setup tunnel: no more bytes arrive (curl
+			// itself only notices at its --max-time).
+			const [proxy] = (
+				await driver.list({ [BOX_LABEL.execution]: name })
+			).filter((b) => b.name === `${name}-proxy`);
+			const plog = proxy ? await driver.logsOf(proxy.id, 50) : "";
+			expect(plog).toMatch(/mm-proxy allow 1: example\.com \(closed [1-9]/);
+			const size = async () =>
+				Number((await sh("wc -c < /tmp/slow")).stdout.trim());
+			const before = await size();
+			await Bun.sleep(3000);
+			expect(await size()).toBe(before);
+		} finally {
+			await box.destroy();
+		}
 	}, 600_000);
 
 	test("the sweep after a crash deletes the box, its proxy and its network", async () => {

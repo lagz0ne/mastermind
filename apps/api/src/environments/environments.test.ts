@@ -247,6 +247,37 @@ describe("devcontainer settings (mm-210.62)", () => {
 	});
 });
 
+describe("runtime (mm-210.63)", () => {
+	const rt = { repo: "https://github.com/acme/web.git" };
+	test("gvisor is kept and reaches the envelope; absent or empty: none; anything else is an error", () => {
+		const v = validate({
+			environments: [
+				{ ...rt, name: "strong", runtime: "gvisor" },
+				{ ...rt, name: "plain", runtime: "" },
+				{ ...rt, name: "bad", runtime: "kata" },
+			],
+		});
+		expect(v.ok).toBe(false);
+		if (v.ok) return;
+		expect(v.errors.map((e) => e.field)).toEqual(["environments.2.runtime"]);
+		const ok = validate({
+			environments: [
+				{ ...rt, name: "strong", runtime: "gvisor" },
+				{ ...rt, name: "plain", runtime: "" },
+			],
+		});
+		if (!ok.ok) throw new Error("invalid");
+		expect(ok.doc.environments[0]?.runtime).toBe("gvisor");
+		expect(ok.doc.environments[1] && "runtime" in ok.doc.environments[1]).toBe(
+			false,
+		);
+		const r = resolveEnv({ labels: ["env:strong"] }, ok.doc);
+		expect(r.ok && r.env.runtime).toBe("gvisor");
+		const p = resolveEnv({ labels: ["env:plain"] }, ok.doc);
+		expect(p.ok && "runtime" in p.env).toBe(false);
+	});
+});
+
 describe("recipeHash", () => {
 	test("stable for image + tools; any change in them changes it; other fields do not", () => {
 		const h = recipeHash(BOX);

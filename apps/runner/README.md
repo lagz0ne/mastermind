@@ -145,18 +145,31 @@ mastermind-runner secrets check            # exit 1 when a needed secret is miss
 
 The environment's `output` says how code leaves the box. After the agent says `done`:
 
-| output | What the runner does in the box |
+| output | What the runner does |
 |---|---|
 | `none` | Nothing. The patch stays on the runner (`results/<execution>.patch`). |
-| `branch` | Commit what the agent left (message: the item title), then `git push --force origin HEAD:mm/<item>`. |
+| `branch` | In the box: commit what the agent left (message: the item title) and take the new commits out as a git bundle. On this machine: `git push --force origin <commit>:refs/heads/mm/<item>`. |
 | `pr` | As `branch`, then on GitHub: open a pull request into `output.base` (default: the ref; a commit ref: the repo's default branch), or find the open one of an earlier try. Other git hosts: push only, and the ticket says so. |
 
 - No change against the checked-out commit: `no changes: nothing pushed`.
 - A retry starts again from the base and force-pushes the same branch: the pull request is updated.
 - The git credential is one of the environment's secrets: `GIT_TOKEN`, `GITHUB_TOKEN` or
   `GH_TOKEN` (the first one given; also used for the GitHub API), or `GIT_SSH_KEY` (a deploy
-  key). It is set on the checkout before the clone, so a private repo clones with it too. git
-  reads the token file only when it asks: the value is never in a URL, argv or `.git/config`.
+  key). `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` and `GITHUB_APP_SLUG` are held the same way.
+
+### The agent never sees the git credential
+
+Like the Copilot coding agent (it cannot run `git push`) and Codex (secrets are removed
+before the agent phase), the git credential stays out of the agent's reach:
+
+| Phase | Where the credential is |
+|---|---|
+| clone (in the box) | Only in the env of the one clone command: the token through a credential helper in `GIT_CONFIG_*` env, a deploy key as a file in `/run/mastermind/clone-credential`. That directory is deleted right after the clone, before the devcontainer commands, setup and the agent. |
+| lifecycle, setup, check, agent | Nowhere in the box: not box env, not `/run/mastermind/secrets`, not `.git/config`. |
+| push (on this machine) | A fresh repo in a temp dir, with git's env holding only the credential (no machine git config, helpers or SSH agent). It fetches the base from the git host and the commits from the bundle (checked with `fetch.fsckObjects`), then pushes exactly one ref: `refs/heads/mm/<item>`. The agent's git config, hooks and branches are never used. |
+
+An agent that needs a GitHub token for its own work (for example `gh`) gets it under another
+secret name, and that token is readable by the agent.
 - The line (`pull request opened: <url> (...)`) is added to the completion summary: the ticket
   shows it. A failed push or pull request fails the task with the reason. Closing the item
   merges nothing.
@@ -196,8 +209,34 @@ For an allow list the runner makes three things, and deletes all three with the 
 
 A tool that does not use the proxy (for example `ssh`, or git over ssh) has no network.
 Entries: `host` (any port), `host:port`, `*.host` (subdomains only, not `host` itself).
-List every host the task needs: the git host, the package registries, and the model API of
-the agent (for Claude Code: `api.anthropic.com`).
+List the hosts the agent needs, for example the model API of the agent (for Claude Code:
+`api.anthropic.com`).
+
+An allow list has two phases (prior art: Codex cloud turns internet on for setup and off or
+allow-listed for the agent; the Copilot agent firewall covers only the agent):
+
+| Phase | Steps | Allowed hosts |
+|---|---|---|
+| setup | clone, devcontainer lifecycle commands, `setup`, `check` | the list, the package registries, the repo's host |
+| agent | input files, the agent | only the list |
+
+The package registries are `SETUP_REGISTRIES` in `src/box/proxy.ts`: npm, PyPI, crates.io,
+the Go proxy, RubyGems, Maven, Gradle, Debian, Ubuntu and Alpine mirrors, GitHub (with
+`*.githubusercontent.com`) and the container registries. Before the agent starts, the runner
+writes the agent list into the proxy box; the proxy applies it and closes every open
+connection that the new list does not allow. The task box does not restart and keeps its
+address. A runner that cannot switch the phases refuses the task.
+
+## Box runtime: gVisor
+
+A box shares the host kernel. For stronger isolation an environment sets `"runtime": "gvisor"`:
+the box then runs with the engine runtime `runsc` ([gVisor](https://gvisor.dev), a kernel in
+user space). The proxy box keeps the default runtime. A runner whose engine has no `runsc`
+is not ready for that environment; the readiness check says why and how to fix it
+(`runtime gvisor: the box engine has no runsc runtime`). `doctor` lists the runtimes of the
+engine. Install: [gvisor.dev install](https://gvisor.dev/docs/user_guide/install/); for Docker
+then `sudo runsc install && sudo systemctl restart docker`; Podman finds `runsc` on its
+default paths (`/usr/bin/runsc`, `/usr/local/bin/runsc`).
 
 The proxy runs with `node` or `bun` from the task's image. For an image without both, set
 `MM_BOX_PROXY_IMAGE` (for example `node:24-alpine`). On Podman the internal network has no

@@ -19,6 +19,7 @@
  * `<account>` in turn); the runner accepts or declines with a reason.
  */
 import type {
+	BoxRuntime,
 	DevcontainerSettings,
 	EnvironmentAgent,
 	EnvironmentLimits,
@@ -144,6 +145,8 @@ export type DispatchEnv = {
 	recipeHash?: string;
 	limits?: EnvironmentLimits;
 	network?: EnvironmentNetwork;
+	/** Container runtime of the box; absent: the engine's default (mm-210.63). */
+	runtime?: BoxRuntime;
 	/** Provider and the name of its login secret (also listed in `secrets`). */
 	providerLogin?: EnvironmentProvider;
 	output?: EnvironmentOutput;

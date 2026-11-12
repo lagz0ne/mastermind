@@ -20,8 +20,10 @@ import {
 import {
 	PROXY_JS,
 	PROXY_READY,
+	PROXY_RULES,
 	PROXY_SH,
 	parseAllow,
+	proxyAllowLine,
 	proxyEnv,
 } from "./proxy.ts";
 import { tar, tarStream, untarFirst } from "./tar.ts";
@@ -165,6 +167,8 @@ export type DockerDriverOptions = {
 	proxyImage?: string;
 	/** Longest wait for the proxy box to listen. Default 30 s. */
 	proxyTimeoutMs?: number;
+	/** For tests: does a host path exist (Podman runtime binaries). */
+	exists?: (path: string) => boolean;
 };
 
 export class DockerDriver implements BoxDriver {
@@ -175,6 +179,7 @@ export class DockerDriver implements BoxDriver {
 	readonly #imageMs: number;
 	readonly #proxyImage: string | undefined;
 	readonly #proxyMs: number;
+	readonly #exists: (path: string) => boolean;
 	#podman: Promise<boolean> | undefined;
 	/** One build per image at a time. */
 	readonly #building = new Map<string, Promise<string>>();
@@ -189,6 +194,7 @@ export class DockerDriver implements BoxDriver {
 			opts.proxyImage ??
 			((opts.env ?? process.env).MM_BOX_PROXY_IMAGE?.trim() || undefined);
 		this.#proxyMs = opts.proxyTimeoutMs ?? 30_000;
+		this.#exists = opts.exists ?? existsSync;
 	}
 
 	get name(): string {
@@ -272,6 +278,23 @@ export class DockerDriver implements BoxDriver {
 				`${error instanceof Error ? error.message : error}; fix: start Docker, or set DOCKER_HOST (Podman: podman system service --time=0 unix://<path>), or start the runner with --no-box at your own risk`,
 			);
 		}
+	}
+
+	/**
+	 * Runtimes from GET /info. Podman lists every runtime of containers.conf,
+	 * also the ones that are not installed: on a local socket only those whose
+	 * binary exists count.
+	 */
+	async runtimes(): Promise<string[]> {
+		const info = (await (await this.#fetch("GET", "/info")).json()) as {
+			Runtimes?: Record<string, { path?: string }>;
+		};
+		const all = Object.entries(info.Runtimes ?? {});
+		const local = this.#ep.unix !== undefined && (await this.#isPodman());
+		return all
+			.filter(([, r]) => !local || !r.path || this.#exists(r.path))
+			.map(([name]) => name)
+			.sort();
 	}
 
 	async #imageUser(ref: string): Promise<string | null> {
@@ -372,6 +395,7 @@ export class DockerDriver implements BoxDriver {
 		if (spec.limits?.memoryMb) host.Memory = spec.limits.memoryMb * 1024 * 1024;
 		if (networkMode) host.NetworkMode = networkMode;
 		if (more.capDropAll) host.CapDrop = ["ALL"];
+		if (spec.runtime) host.Runtime = spec.runtime;
 		const res = await this.#fetch(
 			"POST",
 			`/containers/create?name=${encodeURIComponent(spec.name)}`,
@@ -450,6 +474,46 @@ export class DockerDriver implements BoxDriver {
 			if (made.proxy) await this.#delete(made.proxy).catch(() => {});
 			if (made.net) await this.#deleteNetwork(made.net);
 			throw error;
+		}
+	}
+
+	/**
+	 * @internal for DockerBox: write allow list generation `gen` into the rules
+	 * file of the proxy box, then wait until the proxy logs that it applied it.
+	 */
+	async setProxyAllow(
+		proxy: string,
+		allowIn: string[],
+		gen: number,
+	): Promise<void> {
+		const allow = parseAllow(allowIn);
+		if (typeof allow === "string") throw new BoxError(allow);
+		const w = await new DockerBox(this, proxy, "proxy").exec(
+			[
+				"/bin/sh",
+				"-c",
+				'printf "%s\\n%s" "$1" "$2" > "$3.new" && mv -f "$3.new" "$3"',
+				"rules",
+				String(gen),
+				allow.join(","),
+				PROXY_RULES,
+			],
+			{ user: "65534:65534", workdir: "/" },
+		);
+		if (w.code !== 0)
+			throw new BoxError(
+				`network phase: cannot write the proxy rules: ${`${w.stdout}${w.stderr}`.trim().slice(-300)}`,
+			);
+		const line = proxyAllowLine(gen);
+		const until = Date.now() + this.#proxyMs;
+		for (;;) {
+			const logs = await this.logsOf(proxy, 200);
+			if (logs.includes(line)) return;
+			if (Date.now() > until)
+				throw new BoxError(
+					`network phase: the proxy did not apply the new allow list in ${this.#proxyMs / 1000} s: ${logs.trim().slice(-300)}`,
+				);
+			await Bun.sleep(100);
 		}
 	}
 
@@ -720,6 +784,16 @@ class DockerBox implements Box {
 
 	logs(tail = 100): Promise<string> {
 		return this.driver.logsOf(this.id, tail);
+	}
+
+	#gen = 0;
+	async setAllow(allow: string[]): Promise<void> {
+		const proxy = this.extra[0];
+		if (!proxy)
+			throw new BoxError(
+				"network phase: this box has no allow list (no proxy box)",
+			);
+		await this.driver.setProxyAllow(proxy, allow, ++this.#gen);
 	}
 
 	destroy(): Promise<void> {

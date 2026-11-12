@@ -1,11 +1,45 @@
 import { afterAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
+	networkPhases,
 	PROXY_JS,
 	PROXY_READY,
 	parseAllow,
+	proxyAllowLine,
 	proxyEnv,
+	repoHost,
+	SETUP_REGISTRIES,
 } from "../../src/box/proxy.ts";
+
+describe("networkPhases", () => {
+	test("open and none: one phase", () => {
+		expect(networkPhases("open")).toBeNull();
+		expect(networkPhases("none")).toBeNull();
+		expect(networkPhases(undefined)).toBeNull();
+	});
+	test("allow list: setup gets the registries and the repo host, the agent only the list", () => {
+		const p = networkPhases(
+			{ allow: ["api.anthropic.com"] },
+			"https://git.example.com:8443/acme/web.git",
+		);
+		expect(p?.agent).toEqual(["api.anthropic.com"]);
+		expect(p?.setup).toContain("api.anthropic.com");
+		expect(p?.setup).toContain("registry.npmjs.org");
+		expect(p?.setup).toContain("git.example.com:8443");
+		expect(p?.agent).not.toContain("registry.npmjs.org");
+		// every preset entry is a valid allow entry
+		expect(parseAllow([...SETUP_REGISTRIES])).toEqual([...SETUP_REGISTRIES]);
+	});
+	test("repoHost: http(s) only", () => {
+		expect(repoHost("https://github.com/a/b.git")).toBe("github.com");
+		expect(repoHost("git@github.com:a/b.git")).toBeNull();
+		expect(repoHost("ssh://git@github.com/a/b.git")).toBeNull();
+		expect(repoHost("")).toBeNull();
+	});
+});
 
 describe("parseAllow", () => {
 	test("normalises hosts, host:port, *.host", () => {
@@ -34,10 +68,21 @@ const target = Bun.serve({
 });
 afterAll(() => target.stop(true));
 
+const rulesDir = mkdtempSync(join(tmpdir(), "mm-proxy-rules-"));
+afterAll(() => rmSync(rulesDir, { recursive: true, force: true }));
+let rulesN = 0;
+
 async function startProxy(bin: string, allow: string) {
 	const port = 20000 + Math.floor(Math.random() * 20000);
+	const rules = join(rulesDir, `rules-${++rulesN}`);
+	const lines: string[] = [];
 	const p = Bun.spawn([bin, "-e", PROXY_JS], {
-		env: { ...process.env, MM_PROXY_ALLOW: allow, MM_PROXY_PORT: String(port) },
+		env: {
+			...process.env,
+			MM_PROXY_ALLOW: allow,
+			MM_PROXY_PORT: String(port),
+			MM_PROXY_RULES: rules,
+		},
 		stdout: "pipe",
 		stderr: "inherit",
 	});
@@ -48,7 +93,26 @@ async function startProxy(bin: string, allow: string) {
 		if (done) throw new Error(`proxy ended: ${seen}`);
 		seen += new TextDecoder().decode(value);
 	}
-	return { port, stop: () => p.kill() };
+	lines.push(seen);
+	(async () => {
+		for (;;) {
+			const { value, done } = await reader.read();
+			if (done) return;
+			lines.push(new TextDecoder().decode(value));
+		}
+	})();
+	/** Write rules generation `gen` like the driver does; wait for the ack. */
+	const setAllow = async (gen: number, list: string) => {
+		writeFileSync(`${rules}.new`, `${gen}\n${list}`);
+		renameSync(`${rules}.new`, rules);
+		const until = Date.now() + 5000;
+		while (!lines.join("").includes(proxyAllowLine(gen))) {
+			if (Date.now() > until) throw new Error(`no ack: ${lines.join("")}`);
+			await Bun.sleep(20);
+		}
+		return lines.join("");
+	};
+	return { port, setAllow, stop: () => p.kill() };
 }
 
 /** Send raw bytes, return everything the proxy sends back. */
@@ -111,6 +175,50 @@ for (const bin of bins)
 					"CONNECT nowhere.ok.test:443 HTTP/1.1\r\n\r\n",
 				);
 				expect(gone).toContain("502 Bad Gateway");
+			} finally {
+				proxy.stop();
+			}
+		}, 20_000);
+
+		test("a new rules generation switches the list and closes tunnels it no longer allows", async () => {
+			const t = target.port ?? 0;
+			const proxy = await startProxy(bin, `127.0.0.1:${t}`);
+			try {
+				// A tunnel opened in the setup phase.
+				const s = connect(proxy.port, "127.0.0.1");
+				let got = "";
+				let closed = false;
+				s.on("data", (d) => {
+					got += d.toString();
+				});
+				s.on("close", () => {
+					closed = true;
+				});
+				s.on("error", () => {});
+				s.write(`CONNECT 127.0.0.1:${t} HTTP/1.1\r\n\r\n`);
+				const until = Date.now() + 3000;
+				while (!got.includes("200 Connection Established")) {
+					if (Date.now() > until) throw new Error(got);
+					await Bun.sleep(20);
+				}
+				// Agent phase: only *.ok.test.
+				const log = await proxy.setAllow(1, "*.ok.test");
+				expect(log).toContain("mm-proxy allow 1: *.ok.test (closed 1)");
+				const until2 = Date.now() + 3000;
+				while (!closed && Date.now() < until2) await Bun.sleep(20);
+				expect(closed).toBe(true);
+				const r = await raw(
+					proxy.port,
+					`CONNECT 127.0.0.1:${t} HTTP/1.1\r\n\r\n`,
+				);
+				expect(r).toContain("403 Forbidden");
+				// And back: generation 2 allows the target again.
+				await proxy.setAllow(2, `127.0.0.1:${t}`);
+				const ok = await raw(
+					proxy.port,
+					`GET http://127.0.0.1:${t}/again HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n`,
+				);
+				expect(ok).toContain("hi /again");
 			} finally {
 				proxy.stop();
 			}

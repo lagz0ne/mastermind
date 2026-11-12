@@ -9,7 +9,9 @@
 import {
 	ALLOW_HOST_FIELDS,
 	type Bead,
+	BOX_RUNTIMES,
 	type BoxRecipe,
+	type BoxRuntime,
 	DEFAULT_LIMITS,
 	DEFAULT_NETWORK,
 	DEFAULT_OUTPUT,
@@ -267,6 +269,11 @@ export function validate(
 			// Before box recipes the provider was a preference in `agent`.
 			env.provider = { name: env.agent.provider };
 		}
+		if (e.runtime !== undefined && e.runtime !== null && e.runtime !== "") {
+			if (!(BOX_RUNTIMES as readonly unknown[]).includes(e.runtime))
+				err(`${at}.runtime`, "gvisor, or absent for the engine's default");
+			else env.runtime = e.runtime as BoxRuntime;
+		}
 		const instructions = str("instructions", false);
 		if (instructions) env.instructions = instructions;
 		if (e.devcontainer !== undefined && e.devcontainer !== null) {
@@ -440,6 +447,7 @@ export function resolveEnv(
 		network: def.network,
 		output: def.output,
 	};
+	if (def.runtime) env.runtime = def.runtime;
 	const provider = labelValue(bead, PROVIDER_LABEL_PREFIX);
 	if (provider) env.provider = provider;
 	if (def.provider) env.providerLogin = def.provider;

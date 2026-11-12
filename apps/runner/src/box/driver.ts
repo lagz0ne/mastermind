@@ -41,7 +41,12 @@ export type BoxSpec = {
 	cmd?: string[];
 	/** Box-wide environment. Not for secret values: use exec env or files. */
 	env?: Record<string, string>;
+	/** OCI runtime name of the engine, for example `runsc` (gVisor). Absent: the engine's default. */
+	runtime?: string;
 };
+
+/** The engine runtime of each environment runtime (mm-210.63). */
+export const ENGINE_RUNTIME = { gvisor: "runsc" } as const;
 
 export type ExecOptions = {
 	env?: Record<string, string>;
@@ -85,6 +90,12 @@ export interface Box {
 	copyOutStream?(
 		path: string,
 	): Promise<{ size: number; data: ReadableStream<Uint8Array> } | null>;
+	/**
+	 * Re-point the network allow list of a box made with one (network phases,
+	 * mm-210.63). Resolves after the proxy applies it and has closed the
+	 * connections the new list does not allow. Absent: the driver cannot.
+	 */
+	setAllow?(allow: string[]): Promise<void>;
 	/** The tail of the box's own output (its main process). */
 	logs(tail?: number): Promise<string>;
 	/** Stop and delete the box and its anonymous volumes. Never throws on "gone". */
@@ -96,6 +107,11 @@ export interface BoxDriver {
 	readonly name: string;
 	/** Is the engine reachable? Throws a {@link BoxError} with a fix when not. */
 	ping(): Promise<string>;
+	/**
+	 * The OCI runtimes the engine can start boxes with (for example `runc`,
+	 * `runsc`), only those that are installed. Absent: the driver cannot tell.
+	 */
+	runtimes?(): Promise<string[]>;
 	/** The image to start boxes from; pulls and builds when needed. */
 	ensureImage(recipe: ImageRecipe): Promise<string>;
 	create(spec: BoxSpec): Promise<Box>;

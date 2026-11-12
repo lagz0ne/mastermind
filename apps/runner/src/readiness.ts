@@ -17,6 +17,7 @@
  * the status (diagnostics) so that the dispatcher enforces it too.
  */
 import type { FailedCheck, RunnerReadiness } from "@mastermind/core";
+import { ENGINE_RUNTIME } from "./box/driver.ts";
 import type { RunnerSettings } from "./config.ts";
 import { type Checks, problems } from "./diagnostics.ts";
 import type { Routing } from "./routing.ts";
@@ -27,7 +28,8 @@ export const RECHECK_MS = 5 * 60_000;
 
 /** The box engine as the last check saw it. */
 export type BoxCheck =
-	| { ok: true }
+	/** `runtimes`: the installed OCI runtimes; absent: unknown. */
+	| { ok: true; runtimes?: string[] }
 	| { ok: false; problem: string; fix: string }
 	/** --no-box: no engine needed. */
 	| null;
@@ -115,6 +117,20 @@ export function evaluate(f: ReadinessFacts): RunnerReadiness {
 		});
 	}
 
+	// Per environment: the box runtime it asks for (mm-210.63).
+	for (const e of f.secrets?.needs?.environments ?? []) {
+		if (!e.runtime || !envs.includes(e.name)) continue;
+		const why = runtimeProblem(e.runtime, f.box);
+		if (!why) continue;
+		notReady.add(e.name);
+		failed.push({
+			check: "runtime",
+			environment: e.name,
+			problem: why.problem,
+			fix: why.fix,
+		});
+	}
+
 	const runnerWide = failed.some((c) => !c.environment);
 	const pending =
 		!f.checks.checkedAt || f.box === undefined || f.secrets === undefined;
@@ -131,6 +147,35 @@ export function evaluate(f: ReadinessFacts): RunnerReadiness {
 			state === "ready" ? envs.filter((e) => !notReady.has(e)) : [],
 		failedChecks: failed,
 		checkedAt: f.checks.checkedAt ?? null,
+	};
+}
+
+/** Why the engine cannot start boxes with `runtime`; null: it can (or the engine check fails anyway). */
+export function runtimeProblem(
+	runtime: string,
+	box: BoxCheck | undefined,
+): { problem: string; fix: string } | null {
+	const engine = (ENGINE_RUNTIME as Record<string, string>)[runtime];
+	if (!engine)
+		return {
+			problem: `runtime ${runtime} is not known to this runner`,
+			fix: "install a newer mastermind-runner",
+		};
+	if (box === null)
+		return {
+			problem: `runtime ${runtime} needs a box; this runner runs with --no-box`,
+			fix: "start the runner without --no-box",
+		};
+	if (!box?.ok) return null;
+	if (!box.runtimes)
+		return {
+			problem: `runtime ${runtime}: cannot read the runtimes of the box engine`,
+			fix: "mastermind-runner doctor",
+		};
+	if (box.runtimes.includes(engine)) return null;
+	return {
+		problem: `runtime ${runtime}: the box engine has no ${engine} runtime (has: ${box.runtimes.join(", ") || "none"})`,
+		fix: `install gVisor and register ${engine} with the engine (gvisor.dev/docs/user_guide/install; Docker: sudo runsc install && sudo systemctl restart docker; Podman: install runsc in /usr/bin or /usr/local/bin, the paths of containers.conf [engine.runtimes])`,
 	};
 }
 

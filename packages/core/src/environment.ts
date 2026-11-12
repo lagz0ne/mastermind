@@ -17,6 +17,16 @@ export type EnvironmentLimits = {
 /** Network of a box: open, or only these hosts (`host` or `host:port`, `*.host`). */
 export type EnvironmentNetwork = "open" | { allow: string[] };
 
+/**
+ * The container runtime of a box (mm-210.63). Absent: the engine's default
+ * (runc or crun: the box shares the host kernel). `gvisor`: runsc, a user
+ * space kernel between the box and the host (gvisor.dev); a runner whose
+ * engine has no runsc is not ready for the environment.
+ */
+export type BoxRuntime = "gvisor";
+
+export const BOX_RUNTIMES = ["gvisor"] as const;
+
 /** The agent provider in the box, and the secret that logs it in. */
 export type EnvironmentProvider = {
 	/** For example `claude`. */
@@ -81,6 +91,8 @@ export type Environment = {
 	check: string[];
 	limits: EnvironmentLimits;
 	network: EnvironmentNetwork;
+	/** Container runtime; absent: the engine's default. See {@link BoxRuntime}. */
+	runtime?: BoxRuntime;
 	// --- what goes in
 	/** Git remote URL of the repo to work in. */
 	repo: string;

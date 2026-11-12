@@ -119,6 +119,8 @@ let buildError: string | null = null;
 let containers = new Map<string, unknown>();
 let networks = new Map<string, unknown>();
 let proxyLogs = "mm-proxy listening on 3128\n";
+let execExit = 3;
+let engineName = "Fake Engine";
 const server = Bun.serve({
 	unix: sock,
 	async fetch(req) {
@@ -137,7 +139,15 @@ const server = Bun.serve({
 		const json = (v: unknown, status = 200) => Response.json(v, { status });
 		if (path === "/slow/v1.41/version") await Bun.sleep(500);
 		if (path === "/version" || path === "/slow/v1.41/version")
-			return json({ Components: [{ Name: "Fake Engine", Version: "9.9" }] });
+			return json({ Components: [{ Name: engineName, Version: "9.9" }] });
+		if (path === "/info")
+			return json({
+				Runtimes: {
+					runc: { path: "/usr/bin/runc" },
+					runsc: { path: "/nowhere/runsc" },
+					crun: {},
+				},
+			});
 		const img = path.match(/^\/images\/(.+)\/json$/);
 		if (img) {
 			const name = decodeURIComponent(img[1] ?? "");
@@ -198,7 +208,8 @@ const server = Bun.serve({
 			return new Response(
 				new Uint8Array([...frame(1, "hello\n"), ...frame(2, "warn\n")]),
 			);
-		if (path === "/exec/e1/json") return json({ Running: false, ExitCode: 3 });
+		if (path === "/exec/e1/json")
+			return json({ Running: false, ExitCode: execExit });
 		if (/^\/containers\/\w+\/archive$/.test(path)) {
 			if (req.method === "PUT") return new Response(null, { status: 200 });
 			return new Response(tar([{ name: "r.patch", data: "diff" }]));
@@ -243,6 +254,8 @@ beforeEach(() => {
 	containers = new Map();
 	networks = new Map();
 	proxyLogs = "mm-proxy listening on 3128\n";
+	execExit = 3;
+	engineName = "Fake Engine";
 });
 const driver = () =>
 	new DockerDriver({ env: { DOCKER_HOST: `unix://${sock}` } });
@@ -398,6 +411,65 @@ describe("DockerDriver (fake engine)", () => {
 		]);
 		expect(containers.size).toBe(0);
 		expect(networks.size).toBe(0);
+	});
+
+	test("runtimes: from /info; on a local Podman socket only installed ones (mm-210.63)", async () => {
+		expect(await driver().runtimes()).toEqual(["crun", "runc", "runsc"]);
+		engineName = "Podman Engine";
+		const podman = new DockerDriver({
+			env: { DOCKER_HOST: `unix://${sock}` },
+			exists: (p) => p === "/usr/bin/runc",
+		});
+		expect(await podman.runtimes()).toEqual(["crun", "runc"]);
+	});
+
+	test("runtime: the task box gets HostConfig.Runtime, the proxy box does not", async () => {
+		await driver().create({
+			image: "img",
+			name: "mm-box-1",
+			labels: {},
+			network: { allow: ["github.com"] },
+			runtime: "runsc",
+		});
+		const [proxy, task] = reqs.filter((r) =>
+			r.path.startsWith("/containers/create"),
+		);
+		const hc = (r: Req | undefined) =>
+			(r?.body as { HostConfig: Record<string, unknown> } | undefined)
+				?.HostConfig ?? {};
+		expect(hc(proxy).Runtime).toBeUndefined();
+		expect(hc(task).Runtime).toBe("runsc");
+	});
+
+	test("setAllow: writes the rules in the proxy box as nobody and waits for its ack", async () => {
+		const d = new DockerDriver({
+			env: { DOCKER_HOST: `unix://${sock}` },
+			proxyTimeoutMs: 500,
+		});
+		const box = await d.create({
+			image: "img",
+			name: "mm-box-1",
+			labels: {},
+			network: { allow: ["*.npmjs.org", "github.com"] },
+		});
+		execExit = 0;
+		reqs = [];
+		proxyLogs += "mm-proxy allow 1: github.com (closed 2)\n";
+		await box.setAllow?.(["GitHub.com"]);
+		const ex = reqs.find((r) => r.path === "/containers/c1/exec");
+		const b = ex?.body as { Cmd: string[]; User: string };
+		expect(b.User).toBe("65534:65534");
+		expect(b.Cmd.slice(-3)).toEqual(["1", "github.com", "/tmp/mm-proxy-allow"]);
+		// generation 2 never acknowledged: a BoxError, not a hang
+		await expect(box.setAllow?.(["github.com"])).rejects.toThrow(
+			"did not apply the new allow list",
+		);
+		// a bad entry: refused before the proxy is touched
+		reqs = [];
+		await expect(box.setAllow?.(["https://x"])).rejects.toThrow(
+			"is not a host",
+		);
+		expect(reqs).toHaveLength(0);
 	});
 
 	test("allow list: a bad entry is refused before anything is made", async () => {

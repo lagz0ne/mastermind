@@ -10,7 +10,11 @@
  * it can say what is missing before a task arrives. Only names: the values
  * live on the runner machine and never reach Mastermind.
  */
-import { type Environment, requiredSecrets } from "@mastermind/core";
+import {
+	type BoxRuntime,
+	type Environment,
+	requiredSecrets,
+} from "@mastermind/core";
 import { clientIp, RateLimit } from "../auth/rate-limit.ts";
 import type { Auth } from "../auth/service.ts";
 import type { EnvironmentStore } from "../environments/store.ts";
@@ -29,16 +33,20 @@ const json = (body: unknown, status = 200) =>
 		headers: { "cache-control": "no-store" },
 	});
 
-/** Name and secret names of each environment, nothing else. */
+/**
+ * Name and secret names of each environment, and its box runtime when it
+ * asks for one (readiness: an engine without it is not ready for it).
+ */
 export function environmentSecrets(
 	environments: Environment[],
-): { name: string; secrets: string[] }[] {
+): { name: string; secrets: string[]; runtime?: BoxRuntime }[] {
 	return environments.map((e) => ({
 		name: e.name,
 		secrets: requiredSecrets({
 			secrets: e.secrets ?? [],
 			provider: e.provider,
 		}),
+		...(e.runtime ? { runtime: e.runtime } : {}),
 	}));
 }
 
