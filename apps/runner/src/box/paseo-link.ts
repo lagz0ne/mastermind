@@ -3,9 +3,9 @@
  *
  * When a box starts, the runner registers the box's Paseo daemon as a
  * CONNECTED HOST of the runner machine's own Paseo daemon (Paseo 0.13+,
- * `paseo host add`). The user sees the boxed agent live in the Paseo desktop
- * and mobile app and can steer it. When the box is deleted, the host is
- * removed (`paseo host rm`). A sweep at runner start removes the hosts that
+ * the SDK's addHost, like `paseo host add`). The user sees the boxed agent
+ * live in the Paseo desktop and mobile app and can steer it. When the box is
+ * deleted, the host is removed (removeHost). A sweep at runner start removes the hosts that
  * an earlier run of this runner left behind (crash).
  *
  *   outer Paseo daemon --unix://<linkDir>/<execution>.sock--> runner (relay)
@@ -38,6 +38,13 @@ import net from "node:net";
 import { join } from "node:path";
 import { Duplex } from "node:stream";
 import { createHostClient } from "@getpaseo/client/node";
+import {
+	connectPaseo,
+	type HostRow,
+	type PaseoConnect,
+	paseoMessage,
+	withPaseo,
+} from "../paseo/client.ts";
 import type { DockerEndpoint } from "./docker.ts";
 import { BOX_LABEL, type Box, type BoxDriver, type BoxSpec } from "./driver.ts";
 import type {
@@ -76,43 +83,14 @@ export function bridgeScript(): string {
 /** A byte stream into the box: what the relay needs from the engine. */
 export type OpenStream = (boxId: string) => Promise<Duplex>;
 
-/** Result of one `paseo` CLI call on this machine. */
-export type PaseoCall = (
-	args: string[],
-) => Promise<{ code: number; stdout: string; stderr: string }>;
-
-/** `paseo <args>` against the local Paseo home (never with a secret in argv). */
-export const paseoCall: PaseoCall = async (args) => {
-	try {
-		const p = Bun.spawn(["paseo", ...args], {
-			stdout: "pipe",
-			stderr: "pipe",
-			stdin: "ignore",
-		});
-		const timer = setTimeout(() => p.kill(), 20_000);
-		const [stdout, stderr, code] = await Promise.all([
-			new Response(p.stdout).text(),
-			new Response(p.stderr).text(),
-			p.exited,
-		]);
-		clearTimeout(timer);
-		return { code, stdout, stderr };
-	} catch (error) {
-		return {
-			code: 127,
-			stdout: "",
-			stderr: error instanceof Error ? error.message : String(error),
-		};
-	}
-};
-
 export type PaseoLinkOptions = {
 	/** Directory of the relay sockets; made 0700. Keep the path short (unix: ~100 bytes). */
 	dir: string;
 	runnerId: string;
 	/** A byte stream to the bridge in a box (default: Docker exec, {@link dockerExecStream}). */
 	open: OpenStream;
-	paseo?: PaseoCall;
+	/** This machine's Paseo daemon (the SDK); default {@link connectPaseo}, the local home. */
+	paseo?: PaseoConnect;
 	/**
 	 * Register the box as a host of this machine's Paseo (the user's view).
 	 * Default true. false: the relay and the SDK connection only (box control).
@@ -160,24 +138,16 @@ export async function connectBoxClient(
 	return c as unknown as BoxClient;
 }
 
-type HostRow = {
-	registrationId: string;
-	label?: string | null;
-	metadata?: Record<string, string>;
-};
-
 function firstLine(s: string): string {
 	return s.trim().split("\n")[0]?.slice(0, 300) ?? "";
 }
 
-/** The hosts this runner registered (by metadata), from `paseo host ls`. */
+/** The hosts this runner registered (by metadata). */
 async function ownHosts(
-	paseo: PaseoCall,
+	paseo: PaseoConnect,
 	runnerId: string,
 ): Promise<HostRow[]> {
-	const r = await paseo(["host", "ls", "--json"]);
-	if (r.code !== 0) throw new Error(firstLine(r.stderr || r.stdout));
-	const rows = JSON.parse(r.stdout || "[]") as HostRow[];
+	const rows = await withPaseo(paseo, undefined, (p) => p.hosts());
 	return rows.filter((h) => h.metadata?.[LINK_META.runner] === runnerId);
 }
 
@@ -188,17 +158,22 @@ async function ownHosts(
 export async function sweepPaseoLinks(
 	o: Pick<PaseoLinkOptions, "dir" | "runnerId" | "paseo" | "log">,
 ): Promise<string[]> {
-	const paseo = o.paseo ?? paseoCall;
+	const paseo = o.paseo ?? connectPaseo;
 	const log = o.log ?? (() => {});
 	const gone: string[] = [];
 	try {
-		for (const h of await ownHosts(paseo, o.runnerId)) {
-			const r = await paseo(["host", "rm", h.registrationId, "--json"]);
-			if (r.code === 0) gone.push(h.registrationId);
-		}
+		const own = await ownHosts(paseo, o.runnerId);
+		if (own.length)
+			await withPaseo(paseo, undefined, async (p) => {
+				for (const h of own)
+					await p.removeHost(h.registrationId).then(
+						() => gone.push(h.registrationId),
+						() => {},
+					);
+			});
 	} catch (error) {
 		log(
-			`paseo link: cannot list Paseo hosts (${error instanceof Error ? error.message : error}); boxes will not show in the Paseo app`,
+			`paseo link: cannot list Paseo hosts (${paseoMessage(error)}); boxes will not show in the Paseo app`,
 		);
 	}
 	for (const f of await readdir(o.dir).catch(() => [] as string[]))
@@ -286,25 +261,21 @@ export class PaseoLink {
 			await Bun.sleep(2000);
 		}
 		if (this.#stopped || this.o.register === false) return;
-		const r = await (this.o.paseo ?? paseoCall)([
-			"host",
-			"add",
-			`unix://${this.socketPath}`,
-			"--label",
-			this.label,
-			"--meta",
-			`${LINK_META.item}=${this.item}`,
-			"--meta",
-			`${LINK_META.runner}=${this.o.runnerId}`,
-			"--meta",
-			`${LINK_META.execution}=${this.execution}`,
-			"--json",
-		]);
-		if (r.code !== 0)
+		const row = await withPaseo(this.o.paseo ?? connectPaseo, undefined, (p) =>
+			p.addHost({
+				connection: `unix://${this.socketPath}`,
+				label: this.label,
+				metadata: {
+					[LINK_META.item]: this.item,
+					[LINK_META.runner]: this.o.runnerId,
+					[LINK_META.execution]: this.execution,
+				},
+			}),
+		).catch((error) => {
 			throw new Error(
-				`paseo host add failed: ${firstLine(r.stderr || r.stdout)}`,
+				`paseo host add failed: ${firstLine(paseoMessage(error))}`,
 			);
-		const row = JSON.parse(r.stdout) as HostRow;
+		});
 		this.#registration = row.registrationId;
 		if (this.#stopped) {
 			await this.#unregister();
@@ -362,11 +333,13 @@ export class PaseoLink {
 		const id = this.#registration;
 		if (!id) return;
 		this.#registration = null;
-		const r = await (this.o.paseo ?? paseoCall)(["host", "rm", id, "--json"]);
-		if (r.code !== 0)
+		await withPaseo(this.o.paseo ?? connectPaseo, undefined, (p) =>
+			p.removeHost(id),
+		).catch((error) =>
 			(this.o.log ?? (() => {}))(
-				`paseo link ${this.item}: host rm ${id} failed: ${firstLine(r.stderr || r.stdout)} (the next start removes it)`,
-			);
+				`paseo link ${this.item}: host rm ${id} failed: ${firstLine(paseoMessage(error))} (the next start removes it)`,
+			),
+		);
 	}
 
 	/** Remove the host, close the relay. Never throws. */

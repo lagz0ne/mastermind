@@ -141,7 +141,9 @@ describe("secrets end to end (names only)", () => {
 			},
 			{
 				fetch: fakeFetch,
-				paseo: async () => ({ code: 1, stdout: "", stderr: "no paseo" }),
+				paseo: async () => {
+					throw new Error("no paseo");
+				},
 				isGitDir: async () => true,
 			},
 		);

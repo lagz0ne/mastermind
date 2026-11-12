@@ -1,5 +1,7 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, rmSync } from "node:fs";
+import { describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	type AgentSpec,
 	isLocalHost,
@@ -11,15 +13,10 @@ import {
 	RESULT_SCHEMA,
 	runFailure,
 } from "../src/launcher.ts";
-import { FAKE_PASEO, fakePaseoDir } from "./fakes.ts";
+import { FakePaseo } from "./paseo/fake.ts";
 
-const fake = fakePaseoDir();
-afterAll(() => rmSync(fake.dir, { recursive: true, force: true }));
-
-const launcher = new PaseoLauncher({
-	command: FAKE_PASEO,
-	env: { FAKE_PASEO_DIR: fake.dir, PASEO_AGENT_ID: "" },
-});
+const fake = new FakePaseo();
+const launcher = new PaseoLauncher({ connect: fake.connect });
 let n = 0;
 const spec = (prompt: string, over: Partial<AgentSpec> = {}): AgentSpec => ({
 	executionId: `mm-1-${++n}`,
@@ -31,64 +28,60 @@ const spec = (prompt: string, over: Partial<AgentSpec> = {}): AgentSpec => ({
 	...over,
 });
 const never = new AbortController().signal;
+const created = (from: number) =>
+	fake.agents.slice(from).at(-1) as (typeof fake.agents)[number];
 
-describe("PaseoLauncher (fake paseo CLI)", () => {
-	test("runs paseo with cwd, provider, mode, labels and the result schema", async () => {
+describe("PaseoLauncher (fake Paseo SDK)", () => {
+	test("creates the agent with cwd, provider, model, mode, labels and the result schema", async () => {
+		const before = fake.agents.length;
 		const s = spec("fix the bug");
 		const res = await launcher.run(s, never);
 		expect(res).toEqual({ status: "done", summary: "did: fix the bug" });
-		const run = fake.calls().find((c) => c.args[0] === "run");
-		const args = run?.args ?? [];
-		const after = (flag: string) => args[args.indexOf(flag) + 1];
-		expect(after("--cwd")).toBe("/repo");
-		expect(after("--provider")).toBe("claude/claude-haiku-5-5");
-		expect(after("--mode")).toBe("bypassPermissions");
-		expect(JSON.parse(after("--output-schema") as string)).toEqual(
-			RESULT_SCHEMA,
-		);
-		expect(args).toContain(`mastermind.execution=${s.executionId}`);
-		expect(args).toContain("mastermind.bead=mm-1");
-		expect(args.at(-1)).toBe("fix the bug");
+		const a = created(before);
+		expect(a.cwd).toBe("/repo");
+		expect(a.provider).toBe("claude");
+		expect(a.model).toBe("claude-haiku-5-5");
+		expect(a.modeId).toBe("bypassPermissions");
+		expect(a.labels).toMatchObject({
+			"mastermind.execution": s.executionId,
+			"mastermind.bead": "mm-1",
+		});
+		expect(a.prompt).toStartWith("fix the bug");
+		expect(a.prompt).toContain(JSON.stringify(RESULT_SCHEMA, null, 2));
+		const opts = fake.ops("createAgent").at(-1)?.arg as {
+			outputSchema: unknown;
+		};
+		expect(opts.outputSchema).toEqual(RESULT_SCHEMA);
+		expect(fake.open).toBe(0);
 	});
 
-	test("a routed target's host and labels go to ls and run", async () => {
-		const before = fake.calls().length;
+	test("a routed target's host and labels go to the lookup and the agent", async () => {
+		const from = fake.calls.length;
 		const s = spec("routed", {
 			host: "gpu-box:6767",
 			labels: { pool: "gpu" },
 		});
 		await launcher.run(s, never);
-		const calls = fake.calls().slice(before);
-		for (const c of calls)
-			expect(c.args[c.args.indexOf("--host") + 1]).toBe("gpu-box:6767");
-		const args = calls.find((c) => c.args[0] === "run")?.args ?? [];
-		expect(args).toContain("pool=gpu");
+		const calls = fake.calls.slice(from);
+		expect(calls.length).toBeGreaterThan(2);
+		for (const c of calls) expect(c.host).toBe("gpu-box:6767");
+		expect(fake.agents.at(-1)?.labels.pool).toBe("gpu");
 	});
 
-	type EnvFile = { path: string; text: string; mode: number; dirMode: number };
-	const runCall = (from: number) =>
-		fake
-			.calls()
-			.slice(from)
-			.find((c) => c.args[0] === "run") as
-			| { args: string[]; envFile: EnvFile | null }
-			| undefined;
-
-	test("secret values never go on argv: the agent gets a private env file, deleted after", async () => {
-		const before = fake.calls().length;
+	test("secret values never go to Paseo: the agent gets a private env file, deleted after", async () => {
+		const before = fake.agents.length;
 		const env = { HF_TOKEN: "hf-s3cret", GH_TOKEN: "it's\nmulti" };
 		await launcher.run(spec("with secrets", { env }), never);
-		const run = runCall(before);
-		const argv = run?.args.join("\n") ?? "";
-		for (const v of Object.values(env)) expect(argv).not.toContain(v);
-		for (const k of Object.keys(env)) expect(argv).not.toContain(`${k}=`);
-		const f = run?.envFile;
+		const a = created(before);
+		const sent = JSON.stringify(fake.ops("createAgent").at(-1)?.arg);
+		for (const v of Object.values(env)) expect(sent).not.toContain(v);
+		const f = a.envFile;
 		if (!f) throw new Error("no env file during the run");
 		expect(f.mode).toBe(0o600);
 		expect(f.dirMode).toBe(0o700);
-		expect(argv).toContain(`MASTERMIND_SECRETS_DIR=${f.path.slice(0, -4)}`);
+		expect(a.env?.MASTERMIND_SECRETS_DIR).toBe(f.path.slice(0, -4));
 		// The env file (copied: the original is gone) gives back the exact values.
-		const copy = `${fake.dir}/env.copy`;
+		const copy = join(tmpdir(), `mm-env-copy-${process.pid}`);
 		await Bun.write(copy, f.text);
 		const out = Bun.spawnSync([
 			"sh",
@@ -97,27 +90,27 @@ describe("PaseoLauncher (fake paseo CLI)", () => {
 		]);
 		expect(out.stdout.toString()).toBe(`${env.HF_TOKEN}|${env.GH_TOKEN}`);
 		// The prompt names the secrets (not the values) and how to load them.
-		expect(run?.args.at(-1)).toContain("HF_TOKEN, GH_TOKEN");
+		expect(a.prompt).toContain("HF_TOKEN, GH_TOKEN");
 		expect(existsSync(f.path)).toBe(false);
 	});
 
 	test("the secrets file is deleted when the agent fails", async () => {
-		const before = fake.calls().length;
+		const before = fake.agents.length;
 		await launcher
 			.run(spec("FAKE:crash", { env: { A: "x" } }), never)
 			.catch(() => {});
-		const f = runCall(before)?.envFile;
+		const f = created(before)?.envFile;
 		expect(f).toBeTruthy();
 		expect(existsSync(f?.path ?? "/")).toBe(false);
 	});
 
 	test("secrets are not sent to a Paseo host on another machine", async () => {
-		const before = fake.calls().length;
+		const before = fake.agents.length;
 		const err = await launcher
 			.run(spec("x", { host: "gpu-box:6767", env: { A: "x" } }), never)
 			.catch((e: Error) => e.message);
-		expect(err).toContain("secrets cannot go to the Paseo host gpu-box:6767");
-		expect(runCall(before)).toBeUndefined();
+		expect(err).toContain("the Paseo host gpu-box:6767 cannot read them");
+		expect(fake.agents.length).toBe(before);
 		expect(isLocalHost("localhost:6767")).toBe(true);
 		expect(isLocalHost("tcp://127.0.0.1:6767")).toBe(true);
 		expect(isLocalHost("/home/me/.paseo/paseo.sock")).toBe(true);
@@ -125,21 +118,20 @@ describe("PaseoLauncher (fake paseo CLI)", () => {
 		expect(isLocalHost("ssh://gpu-box")).toBe(false);
 	});
 
-	test("paseo's JSON error is the reason; a permission wait names the fix", async () => {
+	test("no provider, or a mode that asks: the reason and the fix", async () => {
 		const run = (agent: AgentSpec["agent"]) =>
 			launcher.run(spec("x", { agent }), never).then(
 				() => "ok",
 				(e: Error) => e.message,
 			);
-		expect(await run({})).toBe(
-			"paseo run exited 1: MISSING_PROVIDER: Provider is required: Pass --provider <provider> or --provider <provider>/<model>",
-		);
+		expect(await run({})).toStartWith("no provider for the agent; fix: ");
 		expect(await run({ provider: "claude", mode: "plan" })).toBe(
-			"paseo run exited 1: OUTPUT_SCHEMA_FAILED: Agent is waiting for permission before producing structured output (the agent mode asks for permission; fix: mastermind-runner start --mode auto --save)",
+			"the Paseo agent failed: paseo: the agent is waiting for permission before producing structured output (the agent mode asks for permission; fix: mastermind-runner start --mode auto --save)",
 		);
 	});
 
-	test("an agent that cannot log in to its provider fails with the reason and the fix (mm-210.72)", async () => {
+	test("an agent that cannot log in to its provider fails with the reason and the fix, at once (mm-210.72)", async () => {
+		const sends = fake.ops("sendMessage").length;
 		const err = await launcher.run(spec("FAKE:nologin"), never).then(
 			() => null,
 			(e: Error) => e,
@@ -148,24 +140,16 @@ describe("PaseoLauncher (fake paseo CLI)", () => {
 		expect(err?.message).toStartWith(
 			'provider login failed: the agent\'s provider answered "Not logged"',
 		);
-		expect(err?.message).toContain("OUTPUT_SCHEMA_FAILED");
+		expect(err?.message).toContain("Not logged in · Please run /login");
 		expect(err?.message).toEndWith(`; fix: ${PROVIDER_LOGIN_FIX}`);
+		expect(fake.ops("sendMessage").length).toBe(sends);
 	});
 
-	test("does not pass the caller's Paseo agent scope to the CLI", async () => {
-		const scoped = new PaseoLauncher({
-			command: FAKE_PASEO,
-			env: { FAKE_PASEO_DIR: fake.dir },
-		});
-		const before = process.env.PASEO_AGENT_ID;
-		process.env.PASEO_AGENT_ID = "caller";
-		try {
-			await scoped.run(spec("scoped"), never);
-		} finally {
-			if (before === undefined) delete process.env.PASEO_AGENT_ID;
-			else process.env.PASEO_AGENT_ID = before;
-		}
-		expect(fake.calls().at(-1)?.agentEnv).toBeNull();
+	test("a daemon that does not answer: Paseo's reason", async () => {
+		fake.down.add("down:6767");
+		await expect(
+			launcher.run(spec("x", { host: "down:6767" }), never),
+		).rejects.toThrow(/paseo: the Paseo daemon at down:6767 does not answer/);
 	});
 
 	test("the agent's failed answer comes back as failed", async () => {
@@ -175,14 +159,16 @@ describe("PaseoLauncher (fake paseo CLI)", () => {
 		});
 	});
 
-	test("a CLI error or an answer that is not the schema throws", async () => {
+	test("a dropped connection or an answer that is not the schema throws (2 retries)", async () => {
 		await expect(launcher.run(spec("FAKE:crash"), never)).rejects.toThrow(
-			/exited 2:[\s\S]*daemon is not running/,
+			/daemon connection closed/,
 		);
+		const sends = fake.ops("sendMessage").length;
 		await expect(launcher.run(spec("FAKE:garbage"), never)).rejects.toThrow(
-			LaunchError,
+			/does not match the result schema/,
 		);
-	});
+		expect(fake.ops("sendMessage").length).toBe(sends + 2);
+	}, 30_000);
 
 	test("never starts a second agent for one execution id", async () => {
 		const s = spec("once");
@@ -190,7 +176,7 @@ describe("PaseoLauncher (fake paseo CLI)", () => {
 		await expect(launcher.run(s, never)).rejects.toThrow(/already exists/);
 	});
 
-	test("abort kills the run and stops the agent", async () => {
+	test("abort cancels the agent", async () => {
 		const ctl = new AbortController();
 		const s = spec("FAKE:slow");
 		const running = launcher.run(s, ctl.signal);
@@ -200,8 +186,8 @@ describe("PaseoLauncher (fake paseo CLI)", () => {
 		}
 		ctl.abort();
 		await expect(running).rejects.toThrow(/stopped/);
-		const stop = fake.calls().find((c) => c.args[0] === "stop");
-		expect(stop?.args[1]).toStartWith("agent-");
+		const id = (await launcher.find(s.executionId))[0];
+		expect(fake.ops("cancelAgent").map((c) => c.arg)).toContain(id);
 	});
 });
 
@@ -241,6 +227,8 @@ describe("provider login failures (mm-210.72)", () => {
 			'API Error: 401 {"type":"error","error":{"type":"authentication_error"}}',
 			"OAuth token has expired",
 			"unexpected status 401 Unauthorized",
+			// production, mm-awdc (Claude Code 2.1.322 with a refused setup-token):
+			"Failed to authenticate. API Error: 401 OAuth access token is invalid.",
 		])
 			expect(providerLoginMessage(t)).not.toBeNull();
 		for (const t of [

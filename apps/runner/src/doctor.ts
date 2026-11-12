@@ -18,6 +18,9 @@
  *                 wait for `paseo status --json` in it, delete it (times each).
  *                 SKIP when the runner runs with --no-box.
  *
+ * Every Paseo call goes through the SDK adapter (paseo/client.ts). The
+ * `paseo run ...` line in c is the equivalent command, for a human to run.
+ *
  * No secret is printed: secrets reach the agent as files; the command line shows only their directory.
  */
 import { existsSync, statSync } from "node:fs";
@@ -42,6 +45,13 @@ import {
 	RESULT_SCHEMA,
 	secretsArgs,
 } from "./launcher.ts";
+import {
+	connectPaseo,
+	type PaseoConnect,
+	type ProviderState,
+	paseoMessage,
+	withPaseo,
+} from "./paseo/client.ts";
 import { type Decision, type Routing, route } from "./routing.ts";
 import type { SecretsState } from "./secrets/state.ts";
 
@@ -74,15 +84,11 @@ export type DoctorNats = {
 	getServer(): string;
 };
 
-export type PaseoExec = (
-	args: string[],
-	host?: string,
-) => Promise<{ code: number; stdout: string; stderr: string }>;
-
 export type DoctorDeps = {
 	fetch?: typeof fetch;
 	connect?: (o: ConnectOptions) => Promise<DoctorNats>;
-	paseo?: PaseoExec;
+	/** How to reach Paseo; default: the SDK. */
+	paseo?: PaseoConnect;
 	launcher?: AgentLauncher & {
 		find(executionId: string, host?: string): Promise<string[]>;
 	};
@@ -184,38 +190,6 @@ export function paseoCommandLine(
 	return args.map((s) => (s === "<prompt>" ? s : q(s))).join(" ");
 }
 
-function withoutPaseoAgentEnv(): Record<string, string> {
-	const env: Record<string, string> = {};
-	for (const [k, v] of Object.entries(process.env))
-		if (v !== undefined && k !== "PASEO_AGENT_ID" && k !== "PASEO_AGENT_CWD")
-			env[k] = v;
-	return env;
-}
-
-const paseoExec: PaseoExec = async (args, host) => {
-	try {
-		const proc = Bun.spawn(
-			["paseo", ...args, ...(host ? ["--host", host] : [])],
-			{
-				env: withoutPaseoAgentEnv(),
-				stdout: "pipe",
-				stderr: "pipe",
-				stdin: "ignore",
-			},
-		);
-		const timer = setTimeout(() => proc.kill(), 15_000);
-		const [stdout, stderr] = await Promise.all([
-			new Response(proc.stdout).text(),
-			new Response(proc.stderr).text(),
-		]);
-		const code = await proc.exited;
-		clearTimeout(timer);
-		return { code, stdout, stderr };
-	} catch (error) {
-		return { code: 127, stdout: "", stderr: String(error) };
-	}
-};
-
 async function gitDir(dir: string): Promise<boolean> {
 	try {
 		const proc = Bun.spawn(["git", "-C", dir, "rev-parse"], {
@@ -229,7 +203,7 @@ async function gitDir(dir: string): Promise<boolean> {
 	}
 }
 
-/** A Paseo CLI failure in one line: its JSON error (code: message), else the output tail. */
+/** A `paseo` CLI failure (in a box, over exec) in one line: its JSON error (code: message), else the output tail. */
 export function paseoError(r: {
 	code: number;
 	stdout: string;
@@ -279,12 +253,6 @@ class Step {
 	}
 }
 
-type ProviderInfo = {
-	provider?: string;
-	status?: string;
-	defaultMode?: string;
-};
-
 /** A sample dispatch for `queue`: what the routing decides for plain work there. */
 function sample(queue: string): Dispatch {
 	return {
@@ -313,7 +281,7 @@ export async function runDoctor(
 	deps: DoctorDeps = {},
 ): Promise<DoctorReport> {
 	const clock = deps.clock ?? (() => performance.now());
-	const paseo = deps.paseo ?? paseoExec;
+	const paseo = deps.paseo ?? connectPaseo;
 	const isGit = deps.isGitDir ?? gitDir;
 	const s = input.settings;
 	const cfg = input.config;
@@ -479,28 +447,20 @@ export async function runDoctor(
 	const hosts = [...new Set(targetHosts.length ? targetHosts : [undefined])];
 	const paseoAt = new Map<
 		string | undefined,
-		{ daemon: string | null; providers: ProviderInfo[] }
+		{ daemon: string | null; providers: ProviderState[] }
 	>();
 	for (const h of hosts) {
-		const ls = await paseo(["ls", "--json"], h);
-		if (ls.code !== 0) {
-			paseoAt.set(h, {
-				daemon: paseoError(ls),
-				providers: [],
-			});
-			continue;
-		}
-		const pl = await paseo(["provider", "ls", "--json"], h);
-		let providers: ProviderInfo[] = [];
 		try {
-			providers = pl.code === 0 ? JSON.parse(pl.stdout || "[]") : [];
-		} catch {}
-		paseoAt.set(h, { daemon: null, providers });
+			const providers = await withPaseo(paseo, h, (p) => p.providers());
+			paseoAt.set(h, { daemon: null, providers });
+		} catch (error) {
+			paseoAt.set(h, { daemon: paseoMessage(error), providers: [] });
+		}
 	}
 	const available: Record<string, boolean> = {};
 	for (const { providers } of paseoAt.values())
 		for (const p of providers)
-			if (p.provider) available[p.provider] ||= p.status === "available";
+			available[p.provider] ||= p.status === "ready" && p.enabled;
 
 	// c. routing
 	const decisions: { queue: string; d: Extract<Decision, { ok: true }> }[] = [];
@@ -554,6 +514,8 @@ export async function runDoctor(
 	});
 
 	// d. Paseo
+	// Agents run on these daemons with --no-box (or when the box mode is unknown).
+	const agentsHere = !input.box || input.box.noBox === true;
 	await timed("d", "paseo", async (st) => {
 		for (const [h, info] of paseoAt) {
 			const where = h ?? "local";
@@ -576,15 +538,33 @@ export async function runDoctor(
 			seen.add(key);
 			const info = paseoAt.get(d.host);
 			if (!info || info.daemon) continue;
+			const where = d.host ?? "local";
 			const x = info.providers.find((y) => y.provider === p);
-			if (x?.status === "available")
-				st.ok(
-					`provider ${p} available on ${d.host ?? "local"} (default mode ${x.defaultMode ?? "-"})`,
+			if (x?.status !== "ready" || !x.enabled) {
+				st.fail(
+					`provider ${p} is ${!x ? "not listed" : !x.enabled ? "disabled" : x.status}${x?.error ? ` (${x.error})` : ""} in Paseo on ${where}`,
+					`log in to ${p} on that machine (or install it), then check: paseo provider ls`,
+				);
+				continue;
+			}
+			// Paseo's own diagnostic: Auth {loggedIn, authMethod}, Status.
+			const login = await withPaseo(paseo, d.host, (c) => c.login(p)).catch(
+				(error) => paseoMessage(error),
+			);
+			const base = `provider ${p} on ${where}: ready, default mode ${x.defaultMode ?? "-"}`;
+			if (typeof login === "string")
+				st.warn(
+					`${base}; Paseo's diagnostic failed: ${login}`,
+					`check by hand: paseo provider diagnostic ${p}`,
+				);
+			else if (login.loggedIn === false)
+				st[agentsHere ? "fail" : "warn"](
+					`${base}; NOT logged in (Paseo: loggedIn false${login.authMethod ? `, authMethod ${login.authMethod}` : ""})${agentsHere ? "" : " (box mode: the box agent logs in with the runner's secrets)"}`,
+					`log ${p} in on that machine, then check: paseo provider diagnostic ${p}`,
 				);
 			else
-				st.fail(
-					`provider ${p} is ${x ? x.status : "not listed"} on ${d.host ?? "local"}`,
-					`log in to ${p} on that machine, then check: paseo provider ls`,
+				st.ok(
+					`${base}; ${login.loggedIn ? `logged in${login.authMethod ? ` (${login.authMethod})` : ""}` : "login not reported"}${login.status ? `, status ${login.status}` : ""}${agentsHere ? "; Paseo sees a credential, doctor --deep proves the provider accepts it" : ""}`,
 				);
 		}
 		if (s.workdir) {
@@ -626,7 +606,7 @@ export async function runDoctor(
 			const { d } = first;
 			const cwd = d.binding?.dir ?? s.workdir ?? process.cwd();
 			const executionId = `doctor-${(deps.now?.() ?? new Date()).getTime()}`;
-			const launcher = deps.launcher ?? new PaseoLauncher();
+			const launcher = deps.launcher ?? new PaseoLauncher({ connect: paseo });
 			const labels = {
 				...d.labels,
 				purpose: "probe",
@@ -677,11 +657,16 @@ export async function runDoctor(
 					.find(executionId, d.host)
 					.catch(() => [] as string[]);
 				for (const id of ids) {
-					const res = await paseo(["archive", "--force", id], d.host);
-					if (res.code === 0) st.ok(`probe agent ${id} archived`);
+					const err = await withPaseo(paseo, d.host, (c) =>
+						c.archiveAgent(id),
+					).then(
+						() => null,
+						(error) => paseoMessage(error),
+					);
+					if (!err) st.ok(`probe agent ${id} archived`);
 					else
 						st.warn(
-							`cannot archive probe agent ${id}: ${paseoError(res)}`,
+							`cannot archive probe agent ${id}: ${err}`,
 							`paseo archive --force ${id}`,
 						);
 				}
@@ -795,6 +780,9 @@ export async function runDoctor(
 				const timeout = input.boxReadyTimeoutMs ?? BOX_READY_TIMEOUT_MS;
 				const sleep = deps.sleep ?? ((n: number) => Bun.sleep(n));
 				for (;;) {
+					// Listed gap (mm-210.85): the CLI INSIDE the probe box, over
+					// docker exec, the same readiness wait as run.ts. An SDK
+					// call needs the box relay (paseo-link.ts); follow-up bead.
 					const r = await b.exec(["paseo", "status", "--json"], {
 						workdir: "/",
 						...user,

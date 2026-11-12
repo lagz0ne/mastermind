@@ -1,7 +1,4 @@
 // In-memory Mastermind and agent launcher for runner tests.
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { BusError } from "@mastermind/bus";
 import type {
 	Dispatch,
@@ -175,24 +172,4 @@ export async function until(cond: () => boolean, ms = 3000): Promise<void> {
 		if (Date.now() > end) throw new Error("timed out waiting");
 		await Bun.sleep(5);
 	}
-}
-
-export const FAKE_PASEO = [
-	process.execPath,
-	join(import.meta.dir, "fake-paseo.ts"),
-];
-
-export function fakePaseoDir() {
-	const dir = mkdtempSync(join(tmpdir(), "mm-fake-paseo-"));
-	return {
-		dir,
-		calls: (): { args: string[]; agentEnv: string | null }[] => {
-			const f = join(dir, "calls.jsonl");
-			if (!existsSync(f)) return [];
-			return readFileSync(f, "utf8")
-				.trim()
-				.split("\n")
-				.map((l) => JSON.parse(l));
-		},
-	};
 }

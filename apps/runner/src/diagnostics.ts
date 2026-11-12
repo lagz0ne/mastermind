@@ -18,6 +18,12 @@ import type {
 } from "@mastermind/core";
 import type { RunnerSettings } from "./config.ts";
 import type { DoctorReport } from "./doctor.ts";
+import {
+	connectPaseo,
+	type PaseoConnect,
+	PaseoUnreachable,
+	paseoMessage,
+} from "./paseo/client.ts";
 import type { SecretsDiagnostics } from "./secrets/needs.ts";
 
 export const STATUS_EVERY_MS = 15_000;
@@ -91,75 +97,111 @@ export async function readDoctor(
 /** Is this log line worth keeping as a problem? */
 export const isProblem = (line: string) => PROBLEM.test(line);
 
-/** Result of one environment check run. */
-export type Checks = RunnerDiagnostics["checks"];
+/**
+ * Result of one environment check run. `why`: Paseo's own reason for each
+ * false value (sent with the status; older servers ignore it).
+ */
+export type Checks = RunnerDiagnostics["checks"] & {
+	why?: {
+		paseo?: { problem: string; fix: string };
+		providers?: Record<string, { problem: string; fix: string }>;
+	};
+};
 
 export type CheckRunDeps = {
-	/** Run the paseo CLI; resolves with exit code and stdout. */
-	paseo?: (args: string[]) => Promise<{ code: number; stdout: string }>;
+	/** How to reach Paseo; default: the SDK. */
+	connect?: PaseoConnect;
 	exists?: (path: string) => boolean;
 	now?: () => Date;
 };
-
-async function paseoCli(
-	args: string[],
-	host?: string,
-): Promise<{ code: number; stdout: string }> {
-	try {
-		const env: Record<string, string> = {};
-		for (const [k, v] of Object.entries(process.env))
-			if (v !== undefined && k !== "PASEO_AGENT_ID" && k !== "PASEO_AGENT_CWD")
-				env[k] = v;
-		const proc = Bun.spawn(
-			["paseo", ...args, ...(host ? ["--host", host] : [])],
-			{ env, stdout: "pipe", stderr: "pipe", stdin: "ignore" },
-		);
-		const timer = setTimeout(() => proc.kill(), 10_000);
-		const stdout = await new Response(proc.stdout).text();
-		const code = await proc.exited;
-		clearTimeout(timer);
-		return { code, stdout };
-	} catch {
-		return { code: 127, stdout: "" };
-	}
-}
 
 /** Providers the runner may start: its list plus the agent's default. */
 function providersOf(s: RunnerSettings): string[] {
 	return [
 		...new Set([
 			...s.providers,
-			...(s.agent.provider ? [s.agent.provider] : []),
+			...(s.agent.provider ? [s.agent.provider.split("/")[0] as string] : []),
 		]),
 	];
 }
 
-/** Paseo daemon reachable, providers available, workdir present. */
+/**
+ * Ask Paseo: the daemon answers, each provider is ready there, and (with
+ * `login`, for --no-box: the agent runs on that daemon) its login as Paseo's
+ * diagnostic shows it. A box agent logs in in the box, so `login` is off then.
+ * Also: workdir present.
+ */
 export async function runChecks(
 	s: RunnerSettings,
-	opts: { paseoHost?: string } & CheckRunDeps = {},
+	opts: { paseoHost?: string; login?: boolean } & CheckRunDeps = {},
 ): Promise<Checks> {
-	const paseo = opts.paseo ?? ((a) => paseoCli(a, opts.paseoHost));
+	const connect = opts.connect ?? connectPaseo;
 	const exists = opts.exists ?? existsSync;
-	const ls = await paseo(["ls", "--json"]);
-	const daemon = ls.code === 0;
 	const providers: Record<string, boolean> = {};
-	if (daemon) {
-		const res = await paseo(["provider", "ls", "--json"]);
-		let list: { provider?: string; status?: string }[] = [];
+	const why: NonNullable<Checks["why"]> = {};
+	const notReady: Record<string, { problem: string; fix: string }> = {};
+	const wanted = providersOf(s);
+	let daemon = false;
+	try {
+		const p = await connect(opts.paseoHost);
 		try {
-			list = res.code === 0 ? JSON.parse(res.stdout || "[]") : [];
-		} catch {}
-		for (const p of providersOf(s))
-			providers[p] = list.some(
-				(x) => x.provider === p && x.status === "available",
-			);
-	} else for (const p of providersOf(s)) providers[p] = false;
+			daemon = true;
+			const list = await p.providers();
+			for (const name of wanted) {
+				const x = list.find((y) => y.provider === name);
+				const fix = `log in to ${name} on this machine (or install it), then check: paseo provider ls`;
+				if (x?.status !== "ready" || !x.enabled) {
+					providers[name] = false;
+					notReady[name] = {
+						problem: `provider ${name} is not available in Paseo on ${p.where}: ${
+							!x
+								? "not listed"
+								: !x.enabled
+									? "disabled"
+									: `${x.status}${x.error ? ` (${x.error})` : ""}`
+						}`,
+						fix,
+					};
+					continue;
+				}
+				providers[name] = true;
+				if (!opts.login) continue;
+				const l = await p.login(name).catch(() => null);
+				if (l?.loggedIn === false) {
+					providers[name] = false;
+					notReady[name] = {
+						problem: `provider ${name} is not logged in on ${p.where} (Paseo: loggedIn false${l.authMethod ? `, authMethod ${l.authMethod}` : ""})`,
+						fix: `log ${name} in on this machine (claude: claude /login, or set CLAUDE_CODE_OAUTH_TOKEN for the Paseo daemon), then check: paseo provider diagnostic ${name}`,
+					};
+				}
+			}
+		} finally {
+			await p.close();
+		}
+	} catch (error) {
+		if (!daemon)
+			why.paseo = {
+				problem: `the Paseo daemon does not answer: ${paseoMessage(error)}`,
+				fix:
+					error instanceof PaseoUnreachable
+						? error.fix
+						: "start it: paseo daemon start (or check --paseo-host)",
+			};
+		else
+			why.paseo = {
+				problem: `the Paseo daemon does not answer: ${paseoMessage(error)}`,
+				fix: "check the Paseo daemon: paseo daemon status",
+			};
+		daemon = false;
+		for (const name of wanted) providers[name] = false;
+	}
+	if (Object.keys(notReady).length) why.providers = notReady;
 	return {
 		paseo: daemon,
 		providers,
 		workdir: s.workdir ? exists(s.workdir) : null,
 		checkedAt: (opts.now?.() ?? new Date()).toISOString(),
+		...(Object.keys(why).length ? { why } : {}),
 	};
 }
 
@@ -170,16 +212,20 @@ export function problems(
 ): { problem: string; fix: string }[] {
 	const out: { problem: string; fix: string }[] = [];
 	if (c.paseo === false)
-		out.push({
-			problem: "the Paseo daemon does not answer (paseo ls failed)",
-			fix: "start it: paseo daemon start (or check --paseo-host)",
-		});
+		out.push(
+			c.why?.paseo ?? {
+				problem: "the Paseo daemon does not answer",
+				fix: "start it: paseo daemon start (or check --paseo-host)",
+			},
+		);
 	for (const [p, ok] of Object.entries(c.providers))
 		if (!ok && c.paseo)
-			out.push({
-				problem: `provider ${p} is not available in Paseo`,
-				fix: `log in to ${p} on this machine, then check: paseo provider ls`,
-			});
+			out.push(
+				c.why?.providers?.[p] ?? {
+					problem: `provider ${p} is not available in Paseo`,
+					fix: `log in to ${p} on this machine, then check: paseo provider ls`,
+				},
+			);
 	if (c.workdir === false)
 		out.push({
 			problem: `workdir ${s.workdir} does not exist`,

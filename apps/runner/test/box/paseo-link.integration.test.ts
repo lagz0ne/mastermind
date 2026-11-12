@@ -19,12 +19,12 @@ import {
 	dockerExecStream,
 	LINK_META,
 	linkDriver,
-	type PaseoCall,
 	type PaseoLink,
-	paseoCall,
 	sweepPaseoLinks,
 } from "../../src/box/paseo-link.ts";
 import { BOX_ENV, sweepBoxes } from "../../src/box/run.ts";
+import { connectPaseo, withPaseo } from "../../src/paseo/client.ts";
+import { FakePaseo } from "../paseo/fake.ts";
 
 const host = process.env.MM_BOX_DOCKER_HOST;
 const real = process.env.MM_PASEO_LINK_REAL === "1";
@@ -41,20 +41,11 @@ afterAll(async () => {
 	await rm(join(dir, ".."), { recursive: true, force: true });
 });
 
-const fake: PaseoCall = async (args) =>
-	args[1] === "add"
-		? { code: 0, stdout: '{"registrationId":"it"}', stderr: "" }
-		: { code: 0, stdout: "[]", stderr: "" };
+const fake = new FakePaseo().connect;
 
-async function hosts(): Promise<
-	{
-		registrationId: string;
-		status: string;
-		metadata?: Record<string, string>;
-	}[]
-> {
-	const r = await paseoCall(["host", "ls", "--json"]);
-	return JSON.parse(r.stdout || "[]");
+/** This machine's Paseo hosts (the real daemon, through the SDK). */
+function hosts() {
+	return withPaseo(connectPaseo, undefined, (p) => p.hosts());
 }
 
 describe.skipIf(!host)("paseo link on a real engine", () => {
@@ -64,7 +55,7 @@ describe.skipIf(!host)("paseo link on a real engine", () => {
 			dir,
 			runnerId,
 			open: dockerExecStream(dockerEndpoint(env)),
-			paseo: real ? paseoCall : fake,
+			paseo: real ? connectPaseo : fake,
 			step: (_i, l) => steps.push(l),
 			log: (l) => steps.push(l),
 		});

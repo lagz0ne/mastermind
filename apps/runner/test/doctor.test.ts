@@ -22,6 +22,12 @@ import {
 } from "../src/launcher.ts";
 import { implicitRouting } from "../src/routing.ts";
 import { FakeDriver } from "./box/fake-driver.ts";
+import {
+	FakePaseo,
+	type FakeProvider,
+	LOGGED_IN,
+	NOT_LOGGED_IN,
+} from "./paseo/fake.ts";
 
 const settings = (over: Partial<RunnerSettings> = {}): RunnerSettings => ({
 	id: "laptop",
@@ -67,7 +73,7 @@ type World = {
 	credential?: number;
 	server?: string;
 	connect?: DoctorDeps["connect"];
-	providers?: unknown[];
+	providers?: FakeProvider[];
 	run?: (
 		spec: AgentSpec,
 	) => Promise<{ status: "done" | "failed"; summary: string }>;
@@ -75,8 +81,10 @@ type World = {
 
 /** Fakes for every outside call; records what happened. */
 function world(w: World = {}) {
+	const fake = new FakePaseo();
+	if (w.providers) fake.providers = w.providers;
 	const calls = {
-		paseo: [] as string[][],
+		archived: () => fake.ops("archiveAgent").map((c) => c.arg),
 		specs: [] as AgentSpec[],
 		published: [] as string[],
 	};
@@ -97,20 +105,7 @@ function world(w: World = {}) {
 					flush: async () => {},
 					close: async () => {},
 				}) satisfies DoctorNats),
-		paseo: async (args) => {
-			calls.paseo.push(args);
-			if (args[0] === "provider")
-				return {
-					code: 0,
-					stdout: JSON.stringify(
-						w.providers ?? [
-							{ provider: "claude", status: "available", defaultMode: "auto" },
-						],
-					),
-					stderr: "",
-				};
-			return { code: 0, stdout: "[]", stderr: "" };
-		},
+		paseo: fake.connect,
 		launcher: {
 			async run(spec) {
 				calls.specs.push(spec);
@@ -124,7 +119,7 @@ function world(w: World = {}) {
 		isGitDir: async () => true,
 		now: () => new Date("2026-11-11T07:00:00Z"),
 	};
-	return { deps, calls };
+	return { deps, calls, fake };
 }
 
 const step = (r: DoctorReport, id: string): DoctorStep => {
@@ -153,7 +148,7 @@ describe("runner doctor", () => {
 			"mastermind.doctor": "1",
 		});
 		expect(spec.agent).toEqual({ provider: "claude", mode: "auto" });
-		expect(calls.paseo).toContainEqual(["archive", "--force", "agent-1"]);
+		expect(calls.archived()).toEqual(["agent-1"]);
 		expect(step(r, "c").detail.join("\n")).toContain(
 			"--provider claude --mode auto",
 		);
@@ -183,7 +178,7 @@ describe("runner doctor", () => {
 		expect(e.detail.join("\n")).toContain("MISSING_PROVIDER");
 		expect(e.fix).toContain("https://mm.example/install.sh");
 		expect(r.ok).toBe(false);
-		expect(calls.paseo).toContainEqual(["archive", "--force", "agent-1"]);
+		expect(calls.archived()).toEqual(["agent-1"]);
 	});
 
 	test("an agent waiting for permission: step e fails with a mode fix", async () => {
@@ -305,12 +300,62 @@ describe("runner doctor", () => {
 	test("an unavailable provider and a missing workdir fail step d", async () => {
 		const s = settings({ workdir: "/no/such/dir-mm" });
 		const { deps } = world({
-			providers: [{ provider: "claude", status: "unavailable" }],
+			providers: [
+				{
+					provider: "claude",
+					status: "unavailable",
+					error: "claude not found on PATH",
+				},
+			],
 		});
 		const d = step(await runDoctor(input({}, s), deps), "d");
 		expect(d.status).toBe("fail");
-		expect(d.detail.join("\n")).toContain("provider claude is unavailable");
+		expect(d.detail.join("\n")).toContain(
+			"provider claude is unavailable (claude not found on PATH) in Paseo on local",
+		);
 		expect(d.detail.join("\n")).toContain("/no/such/dir-mm does not exist");
+	});
+});
+
+describe("runner doctor: Paseo's provider login (mm-210.85)", () => {
+	test("--no-box: a provider Paseo says is not logged in fails step d with Paseo's words", async () => {
+		const { deps } = world({
+			providers: [
+				{
+					provider: "claude",
+					defaultModeId: "auto",
+					diagnostic: NOT_LOGGED_IN,
+				},
+			],
+		});
+		const d = step(await runDoctor(input({ box: { noBox: true } }), deps), "d");
+		expect(d.status).toBe("fail");
+		expect(d.problem).toBe(
+			"provider claude on local: ready, default mode auto; NOT logged in (Paseo: loggedIn false, authMethod none)",
+		);
+		expect(d.fix).toContain("paseo provider diagnostic claude");
+	});
+
+	test("logged in: PASS with the method, and the note that only --deep proves the token", async () => {
+		const { deps } = world({
+			providers: [
+				{ provider: "claude", defaultModeId: "auto", diagnostic: LOGGED_IN },
+			],
+		});
+		const d = step(await runDoctor(input({ box: { noBox: true } }), deps), "d");
+		expect(d.status).toBe("pass");
+		expect(d.detail).toContain(
+			"provider claude on local: ready, default mode auto; logged in (oauth_token), status Ready; Paseo sees a credential, doctor --deep proves the provider accepts it",
+		);
+	});
+
+	test("the daemon does not answer: step d fails with Paseo's reason", async () => {
+		const { deps, fake } = world();
+		fake.down.add(undefined);
+		const d = step(await runDoctor(input(), deps), "d");
+		expect(d.status).toBe("fail");
+		expect(d.problem).toContain("Paseo daemon on local does not answer");
+		expect(d.problem).toContain("ECONNREFUSED");
 	});
 });
 

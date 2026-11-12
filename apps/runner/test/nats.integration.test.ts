@@ -22,13 +22,14 @@ import { connectRunner, natsClient } from "../src/client.ts";
 import { defaultSettings } from "../src/config.ts";
 import { PaseoLauncher } from "../src/launcher.ts";
 import { Runner } from "../src/runner.ts";
-import { dispatch, FAKE_PASEO, fakePaseoDir, until } from "./fakes.ts";
+import { dispatch, until } from "./fakes.ts";
+import { FakePaseo } from "./paseo/fake.ts";
 
 const bin = process.env.NATS_SERVER ?? Bun.which("nats-server");
 
 describe.skipIf(!bin)("runner over NATS", () => {
 	const dir = mkdtempSync(join(tmpdir(), "mm-runner-nats-"));
-	const fake = fakePaseoDir();
+	const fake = new FakePaseo();
 	const base = 20_000 + Math.floor(Math.random() * 20_000);
 	const url = `ws://127.0.0.1:${base + 2}`;
 	let server: ReturnType<typeof Bun.spawn> | undefined;
@@ -58,7 +59,8 @@ describe.skipIf(!bin)("runner over NATS", () => {
 			await Bun.sleep(100);
 		}
 		mm = await connect({ servers: url, name: "fake-mastermind" });
-		// Stand-in dispatcher: long poll of 300 ms, then null.
+		// Stand-in dispatcher: long poll of 300 ms (an item that arrives while
+		// it waits is handed over, like the real one), then null.
 		serve<NextRequest, NextReply>(
 			mm,
 			patterns.next,
@@ -71,7 +73,7 @@ describe.skipIf(!bin)("runner over NATS", () => {
 				const d = queue.shift();
 				if (d) return { dispatch: d };
 				await Bun.sleep(300);
-				return { dispatch: null };
+				return { dispatch: queue.shift() ?? null };
 			},
 		);
 		serve<Record<string, unknown>, unknown>(
@@ -107,10 +109,7 @@ describe.skipIf(!bin)("runner over NATS", () => {
 				serviceAccount: "0a1b2c",
 				capabilities: [],
 			}),
-			launcher: new PaseoLauncher({
-				command: FAKE_PASEO,
-				env: { FAKE_PASEO_DIR: fake.dir },
-			}),
+			launcher: new PaseoLauncher({ connect: fake.connect }),
 			settings,
 			idleMs: 60_000,
 			heartbeatMs: 100,
@@ -124,7 +123,6 @@ describe.skipIf(!bin)("runner over NATS", () => {
 		await mm?.close();
 		server?.kill();
 		rmSync(dir, { recursive: true, force: true });
-		rmSync(fake.dir, { recursive: true, force: true });
 	});
 
 	test("takes a dispatch, runs the agent, heartbeats, completes", async () => {
@@ -153,8 +151,7 @@ describe.skipIf(!bin)("runner over NATS", () => {
 			id: "laptop",
 			account: "alice",
 		});
-		const run = fake.calls().find((c) => c.args[0] === "run");
-		expect(run?.args).toContain(dir);
+		expect(fake.agents[0]?.cwd).toBe(dir);
 	}, 15_000);
 
 	test("a failing agent releases the bead with its reason", async () => {

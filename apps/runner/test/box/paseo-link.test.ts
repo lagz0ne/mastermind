@@ -14,11 +14,12 @@ import {
 	bridgeScript,
 	LINK_META,
 	linkDriver,
-	type PaseoCall,
 	PaseoLink,
 	type PaseoLinkOptions,
 	sweepPaseoLinks,
 } from "../../src/box/paseo-link.ts";
+import type { PaseoConnect } from "../../src/paseo/client.ts";
+import { FakePaseo } from "../paseo/fake.ts";
 
 let dir: string;
 let echo: net.Server;
@@ -42,23 +43,43 @@ afterEach(async () => {
 	await rm(join(dir, ".."), { recursive: true, force: true });
 });
 
-/** A fake `paseo` CLI: records argv, answers host add / ls / rm. */
-function fakePaseo(hosts: Record<string, unknown>[] = []) {
-	const calls: string[][] = [];
-	const call: PaseoCall = async (args) => {
-		calls.push(args);
-		if (args[1] === "add")
-			return {
-				code: 0,
-				stdout: JSON.stringify({ registrationId: "reg-1", label: args[4] }),
-				stderr: "",
-			};
-		if (args[1] === "ls")
-			return { code: 0, stdout: JSON.stringify(hosts), stderr: "" };
-		return { code: 0, stdout: "{}", stderr: "" };
+/** A fake Paseo SDK: its host calls as ["ls"], ["add", input], ["rm", id]. */
+function fakePaseo(
+	hosts: {
+		registrationId: string;
+		label?: string;
+		metadata?: Record<string, string>;
+	}[] = [],
+) {
+	const f = new FakePaseo();
+	f.hosts = hosts.map((h) => ({
+		label: null,
+		metadata: {},
+		connection: "",
+		...h,
+	}));
+	const names: Record<string, string> = {
+		listHosts: "ls",
+		addHost: "add",
+		removeHost: "rm",
 	};
-	return { calls, call };
+	return {
+		call: f.connect,
+		get calls(): unknown[][] {
+			return f.calls
+				.filter((c) => names[c.op])
+				.map((c) =>
+					c.arg === undefined ? [names[c.op]] : [names[c.op], c.arg],
+				);
+		},
+	};
 }
+
+const refusing =
+	(message: string): PaseoConnect =>
+	async () => {
+		throw new Error(message);
+	};
 
 function fakeBox(id = "box-1"): Box & { destroyed: boolean } {
 	return {
@@ -76,7 +97,7 @@ function fakeBox(id = "box-1"): Box & { destroyed: boolean } {
 }
 
 function opts(
-	paseo: PaseoCall,
+	paseo: PaseoConnect,
 	extra: Partial<PaseoLinkOptions> = {},
 ): PaseoLinkOptions & { steps: string[]; logs: string[] } {
 	const steps: string[] = [];
@@ -128,18 +149,16 @@ describe("PaseoLink", () => {
 		await link.start();
 
 		expect(p.calls[0]).toEqual([
-			"host",
 			"add",
-			`unix://${join(dir, "exec-abc.sock")}`,
-			"--label",
-			"mastermind:mm-7",
-			"--meta",
-			`${LINK_META.item}=mm-7`,
-			"--meta",
-			`${LINK_META.runner}=r1`,
-			"--meta",
-			`${LINK_META.execution}=exec-abc`,
-			"--json",
+			{
+				connection: `unix://${join(dir, "exec-abc.sock")}`,
+				label: "mastermind:mm-7",
+				metadata: {
+					[LINK_META.item]: "mm-7",
+					[LINK_META.runner]: "r1",
+					[LINK_META.execution]: "exec-abc",
+				},
+			},
 		]);
 		expect(link.registration).toBe("reg-1");
 		expect(o.steps).toEqual([
@@ -152,16 +171,16 @@ describe("PaseoLink", () => {
 		expect(await roundTrip(link.socketPath, "hello box")).toBe("hello box");
 
 		await link.stop();
-		expect(p.calls[1]).toEqual(["host", "rm", "reg-1", "--json"]);
+		expect(p.calls[1]).toEqual(["rm", "reg-1"]);
 		expect(await readdir(dir)).toEqual([]);
 	});
 
-	test("no password and no secret in any paseo argv", async () => {
+	test("no password and no secret in any Paseo call", async () => {
 		const p = fakePaseo();
 		const link = new PaseoLink(opts(p.call), fakeBox(), "mm-7", "e1");
 		await link.start();
 		await link.stop();
-		expect(p.calls.flat().join(" ")).not.toMatch(/password|token/i);
+		expect(JSON.stringify(p.calls)).not.toMatch(/password|token/i);
 	});
 
 	test("waits for the box daemon before it adds the host", async () => {
@@ -175,7 +194,7 @@ describe("PaseoLink", () => {
 		);
 		await link.start();
 		expect(n).toBe(2);
-		expect(p.calls[0]?.[1]).toBe("add");
+		expect(p.calls[0]?.[0]).toBe("add");
 		await link.stop();
 	});
 
@@ -255,12 +274,7 @@ describe("PaseoLink", () => {
 	});
 
 	test("paseo missing or host add failing: logged, the task goes on", async () => {
-		const failing: PaseoCall = async () => ({
-			code: 127,
-			stdout: "",
-			stderr: "paseo: not found",
-		});
-		const o = opts(failing);
+		const o = opts(refusing("paseo: not found"));
 		const link = new PaseoLink(o, fakeBox(), "mm-7", "e1");
 		await link.start();
 		expect(link.registration).toBeNull();
@@ -335,9 +349,9 @@ describe("linkDriver", () => {
 		);
 		expect(box.id).toBe("mm-box-1");
 		await (box as unknown as { paseoLink: PaseoLink }).paseoLink.start();
-		expect(p.calls[0]?.[4]).toBe("mastermind:mm-9");
+		expect(p.calls[0]?.[1]).toMatchObject({ label: "mastermind:mm-9" });
 		await box.destroy();
-		expect(p.calls.at(-1)).toEqual(["host", "rm", "reg-1", "--json"]);
+		expect(p.calls.at(-1)).toEqual(["rm", "reg-1"]);
 		expect(boxes[0]?.destroyed).toBe(true);
 	});
 
@@ -363,7 +377,7 @@ describe("sweepPaseoLinks", () => {
 		await writeFile(join(dir, "old.sock"), "");
 		const gone = await sweepPaseoLinks({ dir, runnerId: "r1", paseo: p.call });
 		expect(gone).toEqual(["a", "d"]);
-		expect(p.calls.filter((c) => c[1] === "rm").map((c) => c[2])).toEqual([
+		expect(p.calls.filter((c) => c[0] === "rm").map((c) => c[1])).toEqual([
 			"a",
 			"d",
 		]);
@@ -375,11 +389,7 @@ describe("sweepPaseoLinks", () => {
 		const gone = await sweepPaseoLinks({
 			dir,
 			runnerId: "r1",
-			paseo: async () => ({
-				code: 1,
-				stdout: "",
-				stderr: "daemon not running",
-			}),
+			paseo: refusing("daemon not running"),
 			log: (l) => logs.push(l),
 		});
 		expect(gone).toEqual([]);
@@ -415,7 +425,7 @@ describe("startBoxMode with the Paseo link", () => {
 			...base(log),
 			paseoLink: { dir, paseo: p.call, open, ready: async () => true },
 		});
-		expect(p.calls[1]).toEqual(["host", "rm", "old", "--json"]);
+		expect(p.calls[1]).toEqual(["rm", "old"]);
 		expect(log.join("\n")).toContain("removed 1 host(s) left");
 		const box = await m.driver.create({
 			image: "i",
@@ -485,7 +495,7 @@ describe("startBoxMode with the Paseo link", () => {
 			paseoLink: {
 				dir,
 				open,
-				paseo: async () => ({ code: 1, stdout: "", stderr: "no daemon" }),
+				paseo: refusing("no daemon"),
 			},
 		});
 		expect(await linked(down)).toBe(false);

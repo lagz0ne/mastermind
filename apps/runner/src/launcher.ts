@@ -1,12 +1,25 @@
 /**
- * How the runner starts an agent and gets its result. The default is Paseo
- * (`paseo run`); tests and other agent hosts plug in their own launcher.
+ * How the runner starts an agent and gets its result. The default is Paseo,
+ * through the SDK (paseo/client.ts); tests and other agent hosts plug in
+ * their own launcher.
  */
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DispatchEnv, WorkOutput } from "@mastermind/core";
 import type { AgentSettings } from "./config.ts";
+import {
+	providerLoginMessage,
+	RESULT_SCHEMA,
+	splitProvider,
+} from "./paseo/agent.ts";
+import {
+	connectPaseo,
+	type PaseoConnect,
+	paseoMessage,
+} from "./paseo/client.ts";
+
+export { providerLoginMessage, RESULT_SCHEMA };
 
 export type AgentSpec = {
 	/**
@@ -45,17 +58,6 @@ export interface AgentLauncher {
 	run(spec: AgentSpec, signal: AbortSignal): Promise<AgentResult>;
 }
 
-/** JSON schema the agent's final answer must match. */
-export const RESULT_SCHEMA = {
-	type: "object",
-	properties: {
-		status: { type: "string", enum: ["done", "failed"] },
-		summary: { type: "string" },
-	},
-	required: ["status", "summary"],
-	additionalProperties: false,
-} as const;
-
 /** Labels that mark an agent as started by this runner for Mastermind. */
 export const LABEL = {
 	execution: "mastermind.execution",
@@ -66,25 +68,9 @@ export class LaunchError extends Error {
 	override name = "LaunchError";
 }
 
-/**
- * What agent CLIs say when they cannot log in to their provider. Paseo does
- * not report this as an agent error (mm-210.71 Q6): the agent goes idle,
- * 'finished', lastError null, 0 tokens, and its only message is the text, e.g.
- * Claude Code "Not logged in · Please run /login". `paseo run --output-schema`
- * then fails with OUTPUT_SCHEMA_FAILED and only a cut of that text
- * ('Invalid JSON: Unexpected token 'N', "Not logged"... is not valid JSON').
- */
-const PROVIDER_LOGIN =
-	/\bnot logged\b|please run \/login|invalid api key|invalid x-api-key|authentication_error|oauth token (?:has )?expired|\b401\b[^\n]{0,40}unauthori[sz]ed/i;
-
 /** The fix line for a provider login failure (box: runner secrets; --no-box: this machine's login). */
 export const PROVIDER_LOGIN_FIX =
 	"mastermind-runner onboard (Claude login), or mastermind-runner secrets set ANTHROPIC_API_KEY (or the key of your provider); with --no-box: log the provider in on this machine";
-
-/** The provider's auth message in a failure text, or null. */
-export function providerLoginMessage(text: string): string | null {
-	return text.match(PROVIDER_LOGIN)?.[0] ?? null;
-}
 
 /**
  * Why `paseo run` failed, from its JSON error on stdout
@@ -102,13 +88,18 @@ export function runFailure(res: {
 	const text = err
 		? [err.code, err.message, err.details].filter(Boolean).join(": ")
 		: res.stderr.trim();
+	return agentFailure(text, `paseo run exited ${res.code}`);
+}
+
+/** Why an agent run failed (`how`: what failed), with a fix when known. */
+export function agentFailure(text: string, how: string): string {
 	const login = providerLoginMessage(text);
 	if (login)
-		return `provider login failed: the agent's provider answered "${login}" (paseo run exited ${res.code}: ${text.slice(-300)}); fix: ${PROVIDER_LOGIN_FIX}`;
+		return `provider login failed: the agent's provider answered "${login}" (${how}: ${text.slice(-300)}); fix: ${PROVIDER_LOGIN_FIX}`;
 	const fix = /waiting for permission/i.test(text)
 		? " (the agent mode asks for permission; fix: mastermind-runner start --mode auto --save)"
 		: "";
-	return `paseo run exited ${res.code}: ${text.slice(-500)}${fix}`;
+	return `${how}: ${text.slice(-500)}${fix}`;
 }
 
 /** The agent's own answer: status and summary (the box adds the output). */
@@ -139,11 +130,11 @@ export const SECRETS_ENV = {
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /**
- * `paseo run` has no env file option, and `--env K=V` puts the value on argv
- * (visible in `ps`). So a `--no-box` agent gets its secrets as files in a
- * private directory (0700, files 0600): `<dir>/<NAME>` holds one value and
- * `<dir>/env` exports them all for a shell. Only the two paths go on argv.
- * The caller deletes the directory when the agent ends.
+ * A `--no-box` agent gets its secrets as files in a private directory (0700,
+ * files 0600): `<dir>/<NAME>` holds one value and `<dir>/env` exports them
+ * all for a shell. Only the two paths go to Paseo (the agent's environment),
+ * never a value: no value in the daemon's create request, its agent record
+ * or `ps`. The caller deletes the directory when the agent ends.
  */
 export function writeSecretsDir(env: Record<string, string>): {
 	dir: string;
@@ -173,6 +164,14 @@ export function secretsArgs(dir: string): string[] {
 	];
 }
 
+/** The agent environment that points it at a secrets directory (paths only). */
+export function secretsEnv(dir: string): Record<string, string> {
+	return {
+		[SECRETS_ENV.dir]: dir,
+		[SECRETS_ENV.file]: join(dir, "env"),
+	};
+}
+
 /** The prompt lines that tell the agent how to use its secrets. */
 export function secretsPrompt(names: string[]): string {
 	return `
@@ -194,76 +193,52 @@ export function isLocalHost(host: string | undefined): boolean {
 }
 
 export type PaseoOptions = {
-	/** The paseo CLI as argv. Default `["paseo"]`. */
-	command?: string[];
-	/** `--host` of the Paseo daemon; default: the local home. */
+	/** The Paseo daemon of agents with no routed host; default: the local home. */
 	host?: string;
-	/** Extra environment for the CLI. */
-	env?: Record<string, string>;
+	/** How to reach a daemon; default: the SDK ({@link connectPaseo}). */
+	connect?: PaseoConnect;
 };
 
 /**
- * Runs agents with the Paseo CLI:
+ * Runs agents through the Paseo SDK, one connection per run:
  *
- *   paseo ls -a -g --label mastermind.execution=<id> --json   (never twice)
- *   paseo run --json --output-schema <RESULT_SCHEMA> --cwd ... --label ... <prompt>
- *   paseo stop <agent>                                        (on abort)
+ *   agents with label mastermind.execution=<id>   (never twice)
+ *   a structured run (paseo/agent.ts): workspace at cwd, createAgent with the
+ *   result schema, wait, read the answer
+ *   cancel (on abort)
  *
- * The CLI runs without PASEO_AGENT_ID/PASEO_AGENT_CWD: when the runner itself
- * runs inside a Paseo agent, those would put the new agent in the caller's
- * workspace instead of `--cwd`.
+ * Unlike the CLI, nothing comes from the runner's own environment
+ * (PASEO_AGENT_ID / PASEO_AGENT_CWD): the agent gets exactly `cwd`.
  */
 export class PaseoLauncher implements AgentLauncher {
-	readonly #cmd: string[];
 	readonly #opts: PaseoOptions;
+	readonly #connect: PaseoConnect;
 
 	constructor(opts: PaseoOptions = {}) {
-		this.#cmd = opts.command ?? ["paseo"];
 		this.#opts = opts;
+		this.#connect = opts.connect ?? connectPaseo;
 	}
 
-	#env(): Record<string, string> {
-		const env: Record<string, string> = {};
-		for (const [k, v] of Object.entries(process.env))
-			if (v !== undefined && k !== "PASEO_AGENT_ID" && k !== "PASEO_AGENT_CWD")
-				env[k] = v;
-		return { ...env, ...this.#opts.env };
-	}
-
-	#host(host = this.#opts.host): string[] {
-		return host ? ["--host", host] : [];
-	}
-
-	async #exec(args: string[], signal?: AbortSignal) {
-		const proc = Bun.spawn([...this.#cmd, ...args], {
-			env: this.#env(),
-			stdout: "pipe",
-			stderr: "pipe",
-			stdin: "ignore",
-			signal,
-		});
-		const [stdout, stderr] = await Promise.all([
-			new Response(proc.stdout).text(),
-			new Response(proc.stderr).text(),
-		]);
-		return { code: await proc.exited, stdout, stderr };
+	async #open(host: string | undefined, reconnect = false) {
+		try {
+			return await this.#connect(host ?? this.#opts.host, { reconnect });
+		} catch (error) {
+			throw new LaunchError(`paseo: ${paseoMessage(error)}`);
+		}
 	}
 
 	/** Ids of agents labelled with this execution id. */
 	async find(executionId: string, host?: string): Promise<string[]> {
-		const res = await this.#exec([
-			"ls",
-			"-a",
-			"-g",
-			"--label",
-			`${LABEL.execution}=${executionId}`,
-			"--json",
-			...this.#host(host),
-		]);
-		if (res.code !== 0)
-			throw new LaunchError(`paseo ls failed: ${res.stderr.trim()}`);
-		const list = JSON.parse(res.stdout || "[]") as { id: string }[];
-		return list.map((a) => a.id);
+		const p = await this.#open(host);
+		try {
+			return await p.agentIds({ [LABEL.execution]: executionId });
+		} catch (error) {
+			throw new LaunchError(
+				`paseo: cannot list agents: ${paseoMessage(error)}`,
+			);
+		} finally {
+			await p.close();
+		}
 	}
 
 	async run(spec: AgentSpec, signal: AbortSignal): Promise<AgentResult> {
@@ -276,61 +251,50 @@ export class PaseoLauncher implements AgentLauncher {
 		const secrets = Object.keys(spec.env ?? {}).length > 0;
 		if (secrets && !isLocalHost(spec.host)) {
 			throw new LaunchError(
-				`secrets cannot go to the Paseo host ${spec.host} without their values on the command line; run this task in a box, or route it to a target on this machine`,
+				`secrets are files on this machine; the Paseo host ${spec.host} cannot read them: run this task in a box, or route it to a target on this machine`,
 			);
 		}
-		const labels = {
-			...spec.labels,
-			[LABEL.execution]: spec.executionId,
-			[LABEL.bead]: spec.beadId,
-		};
 		const a = spec.agent;
-		const args = [
-			"run",
-			"--json",
-			"--output-schema",
-			JSON.stringify(RESULT_SCHEMA),
-			"--title",
-			spec.title,
-			"--cwd",
-			spec.cwd,
-			...(a.provider ? ["--provider", a.provider] : []),
-			...(a.model ? ["--model", a.model] : []),
-			...(a.mode ? ["--mode", a.mode] : []),
-			...Object.entries(labels).flatMap(([k, v]) => ["--label", `${k}=${v}`]),
-		];
+		if (!a.provider)
+			throw new LaunchError(
+				"no provider for the agent; fix: mastermind-runner start --provider <provider> --save (or set provider on the target or rule)",
+			);
+		const p = await this.#open(spec.host, true);
 		// Written last: nothing above can throw and leave it behind.
 		const vault = secrets ? writeSecretsDir(spec.env ?? {}) : undefined;
-		if (vault) args.push(...secretsArgs(vault.dir));
-		args.push(
-			...this.#host(spec.host),
-			vault ? spec.prompt + secretsPrompt(vault.names) : spec.prompt,
-		);
-		const child = new AbortController();
-		const onAbort = () => child.abort();
-		signal.addEventListener("abort", onAbort, { once: true });
 		try {
-			const res = await this.#exec(args, child.signal);
-			if (signal.aborted) {
-				await this.#stop(spec.executionId, spec.host);
-				throw new LaunchError("agent stopped");
-			}
-			if (res.code !== 0) {
-				throw new LaunchError(runFailure(res));
-			}
-			return parseResult(res.stdout);
+			const { provider, model } = splitProvider(a.provider, a.model);
+			const r = await p.runAgent(
+				{
+					provider,
+					...(model ? { model } : {}),
+					...(a.mode ? { modeId: a.mode } : {}),
+					cwd: spec.cwd,
+					title: spec.title,
+					prompt: vault
+						? spec.prompt + secretsPrompt(vault.names)
+						: spec.prompt,
+					labels: {
+						...spec.labels,
+						[LABEL.execution]: spec.executionId,
+						[LABEL.bead]: spec.beadId,
+					},
+					...(vault ? { env: secretsEnv(vault.dir) } : {}),
+				},
+				signal,
+			);
+			if (signal.aborted) throw new LaunchError("agent stopped");
+			if (r.code !== 0)
+				throw new LaunchError(agentFailure(r.stderr, "the Paseo agent failed"));
+			return parseResult(r.stdout);
+		} catch (error) {
+			if (error instanceof LaunchError) throw error;
+			throw new LaunchError(
+				signal.aborted ? "agent stopped" : `paseo: ${paseoMessage(error)}`,
+			);
 		} finally {
-			signal.removeEventListener("abort", onAbort);
+			await p.close();
 			if (vault) rmSync(vault.dir, { recursive: true, force: true });
 		}
-	}
-
-	async #stop(executionId: string, host?: string): Promise<void> {
-		const ids = await this.find(executionId, host).catch(() => []);
-		await Promise.all(
-			ids.map((id) =>
-				this.#exec(["stop", id, ...this.#host(host)]).catch(() => {}),
-			),
-		);
 	}
 }

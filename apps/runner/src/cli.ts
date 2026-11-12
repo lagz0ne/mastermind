@@ -842,7 +842,10 @@ async function cmdOnboard(
 	steps.push({
 		name: "Paseo and providers",
 		run: async () => {
-			const c = await runChecks(settings, { paseoHost: f["paseo-host"] });
+			const c = await runChecks(settings, {
+				paseoHost: f["paseo-host"],
+				login: noBox,
+			});
 			const p = problems(c, settings).find((x) => x.problem !== "no queues");
 			if (p) return fail(p.problem, p.fix);
 			return pass(
@@ -1350,7 +1353,10 @@ async function runStart(
 		check: async () => {
 			// A local `doctor` run writes doctor.json; send it as lastDoctor.
 			diag.doctor(await readDoctor(path));
-			const c = await runChecks(settings, { paseoHost: f["paseo-host"] });
+			const c = await runChecks(settings, {
+				paseoHost: f["paseo-host"],
+				login: noBox,
+			});
 			diag.checks = c;
 			reevaluate();
 			return c;

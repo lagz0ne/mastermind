@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { rmSync } from "node:fs";
 import { NO_BOX_REPORT } from "../src/box/run.ts";
 import type { CheckResult } from "../src/check.ts";
 import { defaultSettings, type RunnerSettings } from "../src/config.ts";
@@ -13,14 +12,8 @@ import {
 	Runner,
 	scrub,
 } from "../src/runner.ts";
-import {
-	dispatch,
-	FAKE_PASEO,
-	FakeLauncher,
-	FakeMastermind,
-	fakePaseoDir,
-	until,
-} from "./fakes.ts";
+import { dispatch, FakeLauncher, FakeMastermind, until } from "./fakes.ts";
+import { FakePaseo } from "./paseo/fake.ts";
 
 const settings = (over: Partial<RunnerSettings> = {}): RunnerSettings => ({
 	...defaultSettings("laptop"),
@@ -64,17 +57,13 @@ function make(
 
 describe("Runner", () => {
 	test("no --provider configured: paseo run still gets one (mm-210.46)", async () => {
-		// The fake paseo fails like the real one without --provider.
-		const fake = fakePaseoDir();
+		const fake = new FakePaseo();
 		try {
 			const mm = new FakeMastermind();
 			mm.push(dispatch("mm-1"));
 			runner = new Runner({
 				client: mm,
-				launcher: new PaseoLauncher({
-					command: FAKE_PASEO,
-					env: { FAKE_PASEO_DIR: fake.dir, PASEO_AGENT_ID: "" },
-				}),
+				launcher: new PaseoLauncher({ connect: fake.connect }),
 				settings: settings({ agent: {}, providers: ["codex", "claude"] }),
 				check: pass,
 				providerStatus: () => ({ codex: false, claude: true }),
@@ -87,14 +76,12 @@ describe("Runner", () => {
 			expect(mm.verbs("report")[0]?.text).toBe(
 				"target default on local, provider claude, mode auto (runner laptop, rule 1)",
 			);
-			const run = fake.calls().find((c) => c.args[0] === "run")?.args ?? [];
-			expect(run[run.indexOf("--provider") + 1]).toBe("claude");
-			expect(run[run.indexOf("--mode") + 1]).toBe("auto");
+			expect(fake.agents[0]?.provider).toBe("claude");
+			expect(fake.agents[0]?.modeId).toBe("auto");
 			expect(mm.verbs("release")).toEqual([]);
 		} finally {
 			await runner?.stop();
 			runner = undefined;
-			rmSync(fake.dir, { recursive: true, force: true });
 		}
 	});
 
