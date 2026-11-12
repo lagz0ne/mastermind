@@ -205,12 +205,13 @@ export function formatState(s: Any): string {
 	);
 	section("nats connections", s.nats, (v) =>
 		table(
-			["name", "state", "server", "reconnects", "last error"],
+			["name", "state", "server", "reconnects", "expired", "last error"],
 			(v as Any[]).map((c) => [
 				c.name,
 				c.state,
 				c.server ?? "-",
 				String(c.reconnects),
+				String(c.expiries ?? "-"),
 				c.lastError ? `${c.lastError} (${ago(c.lastErrorAt, now)})` : "-",
 			]),
 		),

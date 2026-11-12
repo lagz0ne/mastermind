@@ -20,6 +20,12 @@ import type { ServiceAccountView } from "./service.ts";
  *                     requests of its account's runners
  *   mastermind app    APP, no limits (KV buckets, dispatcher)
  *   mastermind sys    SYS (connz + kick, to disconnect revoked clients)
+ *
+ * Expiry: NATS cuts a connection when its user JWT expires, and the client
+ * must reconnect (work in flight on it fails). Mastermind's own connections
+ * get no expiry. A service account gets a long one (24 h): revoke kicks its
+ * connections at once, so the expiry is only a backstop for a kick that
+ * failed, and the reconnect picks up the ready signals of queues it joined.
  */
 
 export const CALLOUT_SUBJECT = "$SYS.REQ.USER.AUTH";
@@ -30,7 +36,12 @@ export type Grant = {
 	name: string;
 	account: "APP" | "SYS";
 	permissions?: Permissions;
+	/** False: the user JWT never expires (Mastermind's own connections). */
+	expires?: boolean;
 };
+
+/** Default user JWT lifetime of a service account: 24 h. */
+export const SERVICE_ACCOUNT_TTL_SECONDS = 24 * 60 * 60;
 
 /** The JWT user name of a service account: `<account>/<id>`. */
 export const serviceAccountUser = (sa: { account: string; id: string }) =>
@@ -81,9 +92,9 @@ export function internalGrant(
 	token: string,
 ): Grant | null {
 	if (sameSecret(token, tokens.app))
-		return { name: "mastermind", account: "APP" };
+		return { name: "mastermind", account: "APP", expires: false };
 	if (sameSecret(token, tokens.sys))
-		return { name: "mastermind-sys", account: "SYS" };
+		return { name: "mastermind-sys", account: "SYS", expires: false };
 	return null;
 }
 
@@ -101,14 +112,43 @@ export type CalloutOptions = {
 	issuer: KeyPair;
 	/** Map a CONNECT token to a grant, or null to refuse. */
 	resolve: (token: string) => Promise<Grant | null>;
-	/** User JWT lifetime. When it ends, the client reconnects and is checked again. */
+	/**
+	 * User JWT lifetime of a grant that expires (default
+	 * {@link SERVICE_ACCOUNT_TTL_SECONDS}). When it ends, NATS drops the
+	 * connection; the client reconnects and is checked again.
+	 */
 	ttlSeconds?: number;
 	onError?: (error: unknown) => void;
 };
 
+/**
+ * The user JWT for `grant`: audience = target account, expiry `ttlSeconds`
+ * from `now`, or none when the grant does not expire.
+ */
+export function userJwt(
+	grant: Grant,
+	userNkey: string,
+	issuer: KeyPair,
+	ttlSeconds: number,
+	now: Date = new Date(),
+): Promise<string> {
+	return encodeUser(
+		grant.name,
+		userNkey,
+		issuer,
+		grant.permissions ?? {},
+		grant.expires === false
+			? { aud: grant.account }
+			: {
+					aud: grant.account,
+					exp: Math.floor(now.getTime() / 1000) + ttlSeconds,
+				},
+	);
+}
+
 /** Answer authorization requests until the subscription is closed. */
 export function serveCallout(opts: CalloutOptions): Subscription {
-	const ttl = opts.ttlSeconds ?? 3600;
+	const ttl = opts.ttlSeconds ?? SERVICE_ACCOUNT_TTL_SECONDS;
 	const sub = opts.nc.subscribe(CALLOUT_SUBJECT);
 	(async () => {
 		for await (const msg of sub) {
@@ -136,16 +176,7 @@ export function serveCallout(opts: CalloutOptions): Subscription {
 					await reply({ error: "not authorized" });
 					continue;
 				}
-				const jwt = await encodeUser(
-					grant.name,
-					req.user_nkey,
-					opts.issuer,
-					grant.permissions ?? {},
-					{
-						aud: grant.account,
-						exp: Math.floor(Date.now() / 1000) + ttl,
-					},
-				);
+				const jwt = await userJwt(grant, req.user_nkey, opts.issuer, ttl);
 				await reply({ jwt });
 			} catch (error) {
 				opts.onError?.(error);

@@ -2,7 +2,7 @@
  * NATS connection state for GET /api/debug/state: current state, reconnect
  * count and the last error, read from each connection's status stream.
  */
-import type { NatsConnection } from "@nats-io/nats-core";
+import { errors, type NatsConnection } from "@nats-io/nats-core";
 
 export type ConnectionView = {
 	name: string;
@@ -10,6 +10,8 @@ export type ConnectionView = {
 	server: string | null;
 	reconnects: number;
 	disconnects: number;
+	/** Drops because the user JWT expired ('User Authentication Expired'). */
+	expiries: number;
 	lastError: string | null;
 	lastErrorAt: string | null;
 	lastChangeAt: string | null;
@@ -34,6 +36,7 @@ export class ConnectionWatch {
 				server: null,
 				reconnects: 0,
 				disconnects: 0,
+				expiries: 0,
 				lastError: null,
 				lastErrorAt: null,
 				lastChangeAt: null,
@@ -59,6 +62,8 @@ export class ConnectionWatch {
 							e.view.lastChangeAt = at;
 							break;
 						case "error":
+							if (s.error instanceof errors.UserAuthenticationExpiredError)
+								e.view.expiries += 1;
 							e.view.lastError = String(s.error?.message ?? s.error);
 							e.view.lastErrorAt = at;
 							break;

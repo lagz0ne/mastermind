@@ -46,6 +46,7 @@ describe("debug cli", () => {
 					state: "connected",
 					server: "nats:4222",
 					reconnects: 2,
+					expiries: 1,
 					lastError: null,
 				},
 			],
@@ -98,6 +99,7 @@ describe("debug cli", () => {
 		expect(text).toContain("main   duke");
 		expect(text).toContain("default queue -");
 		expect(text).toContain("work: boom");
+		expect(text).toMatch(/reconnects\s+expired/);
 	});
 });
 

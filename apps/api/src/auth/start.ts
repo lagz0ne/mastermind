@@ -37,6 +37,8 @@ export type AuthConfig = {
 	 */
 	operatorKey?: string;
 	log?: (line: string) => void;
+	/** User JWT lifetime of a service account (tests); default 24 h. */
+	serviceAccountTtlSeconds?: number;
 	/**
 	 * A connection closed that stop() did not close. The connections retry
 	 * forever (also after auth errors), so this should not happen; when it does,
@@ -117,6 +119,7 @@ export async function startAuth(cfg: AuthConfig): Promise<AuthService> {
 					r && r.revision > 0 ? queuesOf(r.doc, sa.account) : undefined,
 				);
 			},
+			ttlSeconds: cfg.serviceAccountTtlSeconds,
 			onError: (error) => log(`auth: callout error: ${error}`),
 		});
 		await callout.flush();
