@@ -65,6 +65,28 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      # The runner's default box image (apps/runner/box/Dockerfile): in the same public
+      # package, tagged box-<first 12 hex of the sha256 of the Dockerfile> (the runner names
+      # that tag: apps/runner/src/box/image.ts) and box-sha-<commit that built it>.
+      # Built only when the tag is missing. No gha cache: the base layer is ~1 GB.
+      - id: box
+        run: |
+          repo="ghcr.io/${GITHUB_REPOSITORY,,}"
+          tag="$repo:box-$(sha256sum apps/runner/box/Dockerfile | cut -c1-12)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha_tag=$repo:box-sha-$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          if docker buildx imagetools inspect "$tag" > /dev/null 2>&1; then
+            echo "$tag exists: no build"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.box.outputs.exists != 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: apps/runner/box
+          push: true
+          tags: |
+            ${{ steps.box.outputs.tag }}
+            ${{ steps.box.outputs.sha_tag }}
 
   # Dokploy runs the site. Its hooks and PUBLIC_URL are in the GitHub environment
   # (`bun deploy/dokploy.ts secrets` puts them there). The job is green only when
