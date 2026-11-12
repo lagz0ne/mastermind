@@ -8,9 +8,10 @@
  *                box, on this machine: the git access check and the
  *                devcontainer image (devcontainer.ts).
  */
+import { dirname, join } from "node:path";
 import { type Dispatch, workOutputOf } from "@mastermind/core";
 import type { CheckResult } from "../check.ts";
-import type { RunnerSettings } from "../config.ts";
+import { configPath, type RunnerSettings } from "../config.ts";
 import {
 	type AgentLauncher,
 	type AgentResult,
@@ -21,10 +22,16 @@ import type { Decision } from "../routing.ts";
 import { missingReason, resolveSecrets } from "../secrets/needs.ts";
 import { SecretStore, secretsPath } from "../secrets/store.ts";
 import { prepareBox } from "./devcontainer.ts";
-import { DockerDriver } from "./docker.ts";
+import { DockerDriver, dockerEndpoint } from "./docker.ts";
 import type { BoxDriver } from "./driver.ts";
 import type { BoxFiles } from "./files.ts";
 import { DEFAULT_BOX_IMAGE } from "./image.ts";
+import {
+	dockerExecStream,
+	linkDriver,
+	type PaseoLinkOptions,
+	sweepPaseoLinks,
+} from "./paseo-link.ts";
 import { type BoxRunOptions, runInBox, sweepBoxes, WORKSPACE } from "./run.ts";
 
 export type BoxCheckDeps = {
@@ -117,15 +124,74 @@ export type BoxModeInput = {
 	driver?: BoxDriver;
 	/** The item's files (inputs in, outputs out); null while not connected. */
 	files?: () => BoxFiles | null;
+	/**
+	 * Each box as a connected host of this machine's Paseo (mm-210.68).
+	 * Default: on with the Docker driver (its exec stream is the transport),
+	 * off with any other driver unless given. false (--no-paseo-link, or
+	 * MASTERMIND_PASEO_LINK=0): off.
+	 */
+	paseoLink?: false | Partial<Omit<PaseoLinkOptions, "runnerId">>;
 };
+
+/** Where the relay sockets live: next to the runner config, 0700. */
+export function paseoLinkDir(env: Record<string, string | undefined>): string {
+	return join(dirname(configPath(env)), "paseo-link");
+}
+
+/**
+ * The driver with Paseo links, when on and this machine's Paseo answers;
+ * the sweep removes hosts an earlier run of this runner left behind.
+ */
+async function withPaseoLink(
+	driver: BoxDriver,
+	i: BoxModeInput,
+	own: boolean,
+): Promise<BoxDriver> {
+	const want =
+		i.paseoLink === false || i.env.MASTERMIND_PASEO_LINK === "0"
+			? null
+			: (i.paseoLink ?? (own ? {} : null));
+	if (!want) return driver;
+	const dir = want.dir ?? paseoLinkDir(i.env);
+	const open =
+		want.open ?? (own ? dockerExecStream(dockerEndpoint(i.env)) : null);
+	if (!open) return driver;
+	let usable = true;
+	const gone = await sweepPaseoLinks({
+		dir,
+		runnerId: i.runnerId,
+		...(want.paseo ? { paseo: want.paseo } : {}),
+		log: (l) => {
+			usable = false;
+			i.log(l);
+		},
+	});
+	if (gone.length)
+		i.log(
+			`paseo link: removed ${gone.length} host(s) left from an earlier run`,
+		);
+	if (!usable) return driver;
+	i.log(
+		"paseo link: each box shows as a host 'mastermind:<item>' in this machine's Paseo (--no-paseo-link: off)",
+	);
+	return linkDriver(driver, {
+		...want,
+		dir,
+		open,
+		runnerId: i.runnerId,
+		log: i.log,
+		...(i.onStep ? { step: i.onStep } : {}),
+	});
+}
 
 /**
  * Box mode at runner start: the engine must answer (else a BoxError with the
  * fix), and boxes an earlier run of this runner left behind are deleted.
  */
 export async function startBoxMode(i: BoxModeInput) {
-	const driver = i.driver ?? new DockerDriver({ env: i.env, log: i.log });
-	const engine = await driver.ping();
+	const engine0 = i.driver ?? new DockerDriver({ env: i.env, log: i.log });
+	const engine = await engine0.ping();
+	const driver = await withPaseoLink(engine0, i, !i.driver);
 	const gone = await sweepBoxes(driver, i.runnerId);
 	if (gone.length)
 		i.log(
