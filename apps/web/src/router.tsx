@@ -5,6 +5,7 @@ import {
 	Link,
 	Outlet,
 	redirect,
+	useRouterState,
 } from "@tanstack/react-router";
 import { ActivityPage } from "./activity/activity-page.tsx";
 import { BeadSheet } from "./board/bead-sheet.tsx";
@@ -16,7 +17,7 @@ import { LoginPage } from "./login/login-page.tsx";
 import { PeoplePage } from "./people/people-page.tsx";
 import { RoutingPage } from "./routing/routing-page.tsx";
 import { AccountMenu } from "./session/account-menu.tsx";
-import { ensureSession } from "./session/session.ts";
+import { ensureSession, isPublicPath } from "./session/session.ts";
 import { NewWorkButton } from "./work/new-work-dialog.tsx";
 
 /** Header nav link: full header height (a usable touch target), bold when active. */
@@ -24,6 +25,9 @@ const navLink =
 	"flex items-center text-muted-foreground hover:text-foreground [&.active]:font-semibold [&.active]:text-foreground";
 
 function Layout() {
+	const pathname = useRouterState({ select: (s) => s.location.pathname });
+	// Logged-out pages (/login): the wordmark only.
+	const bare = isPublicPath(pathname);
 	return (
 		<TooltipProvider>
 			<div className="flex h-dvh flex-col">
@@ -31,27 +35,31 @@ function Layout() {
 					<Link to="/board" className="font-bold text-[13px] tracking-tight">
 						mastermind
 					</Link>
-					<nav className="flex h-full min-w-0 items-stretch gap-3 overflow-x-auto whitespace-nowrap text-xs [scrollbar-width:none]">
-						<Link to="/board" className={navLink}>
-							Board
-						</Link>
-						<Link to="/people" className={navLink}>
-							People
-						</Link>
-						<Link to="/activity" className={navLink}>
-							Activity
-						</Link>
-						<Link to="/routing" className={navLink}>
-							Routing
-						</Link>
-						<Link to="/environments" className={navLink}>
-							Environments
-						</Link>
-					</nav>
-					<div className="ml-auto flex shrink-0 items-center gap-3">
-						<NewWorkButton />
-						<AccountMenu />
-					</div>
+					{!bare && (
+						<>
+							<nav className="flex h-full min-w-0 items-stretch gap-3 overflow-x-auto whitespace-nowrap text-xs [scrollbar-width:none]">
+								<Link to="/board" className={navLink}>
+									Board
+								</Link>
+								<Link to="/people" className={navLink}>
+									People
+								</Link>
+								<Link to="/activity" className={navLink}>
+									Activity
+								</Link>
+								<Link to="/routing" className={navLink}>
+									Routing
+								</Link>
+								<Link to="/environments" className={navLink}>
+									Environments
+								</Link>
+							</nav>
+							<div className="ml-auto flex shrink-0 items-center gap-3">
+								<NewWorkButton />
+								<AccountMenu />
+							</div>
+						</>
+					)}
 				</header>
 				<main className="min-h-0 flex-1">
 					<Outlet />

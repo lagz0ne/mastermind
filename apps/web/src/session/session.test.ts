@@ -3,6 +3,7 @@ import {
 	ApiError,
 	ensureSession,
 	getMe,
+	isPublicPath,
 	loadMe,
 	logout,
 	send,
@@ -41,6 +42,15 @@ describe("loadMe", () => {
 					.fetcher,
 			),
 		).toEqual({ kind: "error", message: "auth unconfigured" });
+	});
+});
+
+describe("isPublicPath", () => {
+	test("only /login is public (its header shows the wordmark only)", () => {
+		expect(isPublicPath("/login")).toBe(true);
+		expect(isPublicPath("/login/")).toBe(true);
+		for (const p of ["/", "/board", "/board/mm-1", "/people", "/loginx"])
+			expect(isPublicPath(p)).toBe(false);
 	});
 });
 

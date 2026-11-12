@@ -72,6 +72,14 @@ export function useMe(): Me | null {
 }
 
 /**
+ * Pages a logged-out visitor sees (no session check). The header shows only
+ * the wordmark there: no nav, no New work, no account menu.
+ */
+export function isPublicPath(pathname: string): boolean {
+	return pathname === "/login" || pathname.startsWith("/login/");
+}
+
+/**
  * Router guard: on /login nothing; elsewhere the session is checked once and
  * kept. Returns "login" when the visitor must log in.
  */
@@ -79,7 +87,7 @@ export async function ensureSession(
 	pathname: string,
 	fetcher: Fetch = fetch,
 ): Promise<"ok" | "login"> {
-	if (pathname === "/login" || current) return "ok";
+	if (isPublicPath(pathname) || current) return "ok";
 	const r = await loadMe(fetcher);
 	if (r.kind === "anon") return "login";
 	if (r.kind === "ok") setMe(r.me);
