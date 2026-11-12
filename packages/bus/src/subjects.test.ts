@@ -118,4 +118,21 @@ describe("subjects", () => {
 			"mm.u.alice.r.laptop.doctor.reply.n1",
 		);
 	});
+
+	test("direct offers: one subject per runner, reply inside the account scope", () => {
+		expect(subjects.runnerOffer("alice", "laptop.local")).toBe(
+			"mm.u.alice.r.laptop_local.offer",
+		);
+		expect(subjects.runnerOfferScope("alice")).toBe("mm.u.alice.r.*.offer");
+		expect(subjects.runnerOfferReply("alice", "laptop", "n1")).toBe(
+			"mm.u.alice.r.laptop.offer.reply.n1",
+		);
+		expect(
+			subjects
+				.runnerOfferReply("alice", "laptop", "n1")
+				.startsWith("mm.u.alice."),
+		).toBe(true);
+		expect(parseSubject(subjects.runnerOffer("alice", "laptop"))).toBeNull();
+		expect(() => subjects.runnerOffer("a.b", "x")).toThrow(SubjectError);
+	});
 });

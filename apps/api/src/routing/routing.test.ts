@@ -347,6 +347,36 @@ describe("routing routes", () => {
 		expect(writes).toHaveLength(3);
 	});
 
+	test("send to: sets to:<address>, drops the queue label; null removes it; a queue move drops to:", async () => {
+		const { routes, beads } = setup();
+		await routes["/api/routing"].PUT(send("PUT", { ...DOC, revision: 0 }));
+		const sendTo = routes["/api/beads/:id/to"].POST;
+		const move = routes["/api/beads/:id/queue"].POST;
+		await move(send("POST", { queue: "web" }, { id: "mm-7" }));
+		const r = await sendTo(send("POST", { to: "bob/laptop" }, { id: "mm-7" }));
+		expect(r.status).toBe(200);
+		expect(beads.get("mm-7")?.labels).toEqual([
+			"area:api",
+			"x",
+			"to:bob/laptop",
+		]);
+		await sendTo(send("POST", { to: "bob" }, { id: "mm-7" }));
+		expect(beads.get("mm-7")?.labels).toEqual(["area:api", "x", "to:bob"]);
+		await move(send("POST", { queue: "backend" }, { id: "mm-7" }));
+		expect(beads.get("mm-7")?.labels).toEqual([
+			"area:api",
+			"x",
+			"queue:backend",
+		]);
+		await sendTo(send("POST", { to: "bob" }, { id: "mm-7" }));
+		await sendTo(send("POST", { to: null }, { id: "mm-7" }));
+		expect(beads.get("mm-7")?.labels).toEqual(["area:api", "x"]);
+		for (const bad of ["Bob", "bob/a.b", "", 7])
+			expect(
+				(await sendTo(send("POST", { to: bad }, { id: "mm-7" }))).status,
+			).toBe(400);
+	});
+
 	test("503 while the store is not ready", async () => {
 		const routes = routingRoutes({
 			store: () => null,
@@ -358,6 +388,76 @@ describe("routing routes", () => {
 
 	test("the document lives at one key", () => {
 		expect(ROUTING_KEY).toBe("routing");
+	});
+});
+
+describe("direct rules (to an address)", () => {
+	const doc = {
+		queues: DOC.queues,
+		rules: [
+			{ match: { labels: ["laptop"] }, to: "bob/laptop", environment: "env1" },
+			{ match: { labels: ["bob"] }, to: "bob", fallback: "web" },
+			{ match: {}, queue: "backend" },
+		],
+	};
+	test("validate keeps to and fallback; refuses bad ones", () => {
+		const v = validate(doc);
+		expect(v.ok).toBe(true);
+		if (v.ok) expect(v.doc.rules.slice(0, 2)).toEqual(doc.rules.slice(0, 2));
+		const bad = validate({
+			queues: DOC.queues,
+			rules: [
+				{ match: {}, to: "Bob" },
+				{ match: {}, to: "bob", queue: "web" },
+				{ match: {}, to: "bob", fallback: "ghost" },
+				{ match: {}, queue: "web", fallback: "web" },
+			],
+		});
+		expect(bad.ok).toBe(false);
+		if (!bad.ok)
+			expect(bad.errors).toEqual([
+				'rule 1: to must be <account> or <account>/<runner> (got "Bob")',
+				"rule 2: give a queue or a to address, not both",
+				'rule 3: fallback queue "ghost" does not exist',
+				"rule 4: fallback is only for a to address",
+			]);
+	});
+	test("explain names the address and what happens when nobody accepts", () => {
+		const v = validate(doc);
+		if (!v.ok) throw new Error("bad doc");
+		expect(explain(bead({ labels: ["laptop"] }), v.doc)).toEqual({
+			queue: null,
+			to: "bob/laptop",
+			ruleIndex: 0,
+			why: "rule 1 (labels laptop) is the first that matches: it is offered to bob/laptop only; if nobody there accepts, it waits",
+		});
+		expect(explain(bead({ labels: ["bob"] }), v.doc).why).toContain(
+			"queue web",
+		);
+		expect(explain(bead({ labels: ["to:carol"] }), v.doc)).toMatchObject({
+			queue: null,
+			to: "carol",
+			ruleIndex: null,
+		});
+	});
+	test("default environment of a direct bead: its rule, else the fallback queue's", () => {
+		const v = validate({
+			queues: [{ name: "web", members: [], environment: "webenv" }],
+			rules: [
+				{
+					match: { labels: ["laptop"] },
+					to: "bob/laptop",
+					environment: "env1",
+				},
+				{ match: {}, to: "bob", fallback: "web" },
+			],
+		});
+		if (!v.ok) throw new Error(v.errors.join("; "));
+		expect(
+			defaultEnvironment(v.doc, bead({ labels: ["laptop"] }), "to:bob/laptop"),
+		).toBe("env1");
+		expect(defaultEnvironment(v.doc, bead(), "to:bob")).toBe("webenv");
+		expect(defaultEnvironment(v.doc, bead(), "to:carol")).toBeNull();
 	});
 });
 

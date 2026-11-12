@@ -10,6 +10,13 @@
  *   mm.u.<account>.d.<bead>.complete    CompleteRequest  -> Ack
  *   mm.u.<account>.d.<bead>.release     ReleaseRequest   -> Ack
  *   mm.q.<queue>.ready                  ReadyNotice      (publish)
+ *   mm.u.<account>.r.<runner>.offer     DirectOffer      -> (reply subject)
+ *     the runner answers with a request:  OfferAnswer      -> OfferResult
+ *
+ * Two delivery modes. Broadcast: a bead on a queue (`queue:<name>`) goes to the
+ * first runner that asks `next`. Direct: a bead with `to:<address>` is OFFERED
+ * to that address (one runner `<account>/<runner>`, or each online runner of
+ * `<account>` in turn); the runner accepts or declines with a reason.
  */
 import type {
 	EnvironmentAgent,
@@ -53,6 +60,46 @@ export function envNameOf(bead: Pick<Bead, "labels">): string | null {
 		(l) => l.startsWith(ENV_LABEL_PREFIX) && l.length > ENV_LABEL_PREFIX.length,
 	);
 	return label ? label.slice(ENV_LABEL_PREFIX.length) : null;
+}
+
+/** A bead sent to one address (direct delivery) carries ONE label `to:<address>`. */
+export const TO_LABEL_PREFIX = "to:";
+
+/** Marks a direct bead that no runner of its address accepted (the reasons are in the notes). */
+export const NOT_ACCEPTED_LABEL = "triage:to";
+
+/** Where a direct bead goes: one runner, or any online runner of an account. */
+export type Address = { account: string; runner?: string };
+
+const ADDRESS_ACCOUNT = /^[a-z0-9][a-z0-9-]{0,31}$/;
+const ADDRESS_RUNNER = /^[^\s/.*>~]+$/;
+
+/** `<account>` or `<account>/<runner>`, or null when malformed. */
+export function parseAddress(text: string): Address | null {
+	const [account, runner, ...rest] = text.split("/");
+	if (rest.length || !account || !ADDRESS_ACCOUNT.test(account)) return null;
+	if (runner === undefined) return { account };
+	return ADDRESS_RUNNER.test(runner) ? { account, runner } : null;
+}
+
+export const isAddress = (v: unknown): v is string =>
+	typeof v === "string" && parseAddress(v) !== null;
+
+export function toLabel(address: string): string {
+	return `${TO_LABEL_PREFIX}${address}`;
+}
+
+/** The address of a direct bead, or null. */
+export function toOf(bead: Pick<Bead, "labels">): string | null {
+	const label = bead.labels.find(
+		(l) => l.startsWith(TO_LABEL_PREFIX) && l.length > TO_LABEL_PREFIX.length,
+	);
+	return label ? label.slice(TO_LABEL_PREFIX.length) : null;
+}
+
+/** The `queue` field of a direct dispatch: `to:<address>` (not a real queue). */
+export function directQueue(address: string): string {
+	return toLabel(address);
 }
 
 /** What the runner must prepare before it starts the agent. */
@@ -131,6 +178,28 @@ export type RunnerInfo = {
 	 */
 	environments?: string[];
 };
+
+/**
+ * Mastermind offers a direct bead to one runner. It is the dispatch without
+ * the claim: the runner decides (capacity, its own routing) before Mastermind
+ * claims. `queue` is `to:<address>`.
+ */
+export type DirectOffer = Omit<Dispatch, "actor" | "lease"> & {
+	/** The address the bead was sent to (an account, or this runner). */
+	address: string;
+};
+
+/** The runner's answer, sent as a request to the offer's reply subject. */
+export type OfferAnswer =
+	| { accept: true; runner: RunnerInfo }
+	| { accept: false; reason: string };
+
+/**
+ * Mastermind's reply to the answer. Accept: the dispatch (claimed for the
+ * runner), or null with the reason (somebody else took it; the offer timed
+ * out). Decline: null.
+ */
+export type OfferResult = { dispatch: Dispatch | null; reason?: string };
 
 /** Ask for the next bead on a queue. */
 export type NextRequest = { runner: RunnerInfo };

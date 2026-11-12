@@ -6,7 +6,7 @@
  * Pure: validation and explanation. No I/O.
  */
 import type { Bead } from "@mastermind/core";
-import { queueOf } from "@mastermind/core";
+import { isAddress, queueOf, TO_LABEL_PREFIX, toOf } from "@mastermind/core";
 import { matches, type RoutingRule, type RuleMatch } from "@mastermind/router";
 
 /** KV bucket and key of the routing document. */
@@ -114,12 +114,35 @@ export function validate(
 	for (const [i, r] of (rawRules ?? []).entries()) {
 		const at = `rule ${i + 1}`;
 		if (!isObject(r) || !isObject(r.match)) {
-			errors.push(`${at}: needs a match object and a queue`);
+			errors.push(`${at}: needs a match object and a queue or a to address`);
 			continue;
 		}
-		if (typeof r.queue !== "string" || !names.has(r.queue)) {
+		const direct = r.to !== undefined && r.to !== null && r.to !== "";
+		if (direct) {
+			if (r.queue !== undefined && r.queue !== null && r.queue !== "")
+				errors.push(`${at}: give a queue or a to address, not both`);
+			if (!isAddress(r.to))
+				errors.push(
+					`${at}: to must be <account> or <account>/<runner> (got ${JSON.stringify(r.to)})`,
+				);
+			const fb = r.fallback;
+			if (
+				fb !== undefined &&
+				fb !== null &&
+				fb !== "" &&
+				(typeof fb !== "string" || !names.has(fb))
+			)
+				errors.push(
+					`${at}: fallback queue ${JSON.stringify(fb)} does not exist`,
+				);
+		} else if (typeof r.queue !== "string" || !names.has(r.queue)) {
 			errors.push(`${at}: queue ${JSON.stringify(r.queue)} does not exist`);
-		}
+		} else if (
+			r.fallback !== undefined &&
+			r.fallback !== null &&
+			r.fallback !== ""
+		)
+			errors.push(`${at}: fallback is only for a to address`);
 		const m = r.match;
 		const match: RuleMatch = {};
 		for (const k of Object.keys(m))
@@ -154,11 +177,17 @@ export function validate(
 		const env = r.environment;
 		if (env !== undefined && env !== null && env !== "" && !isQueueName(env))
 			errors.push(`${at}: environment must be an environment name`);
-		rules.push({
-			match,
-			queue: String(r.queue),
-			...(isQueueName(env) ? { environment: env } : {}),
-		});
+		const environment = isQueueName(env) ? { environment: env } : {};
+		rules.push(
+			direct
+				? {
+						match,
+						to: String(r.to),
+						...(isQueueName(r.fallback) ? { fallback: r.fallback } : {}),
+						...environment,
+					}
+				: { match, queue: String(r.queue), ...environment },
+		);
 	}
 
 	const dq = input.defaultQueue;
@@ -185,6 +214,8 @@ export function parseStored(value: unknown): RoutingDoc {
 
 export type RouteExplanation = {
 	queue: string | null;
+	/** The address of a direct bead (no queue); null otherwise. */
+	to: string | null;
 	/** Index of the winning rule; null when a queue label decided or nothing matched. */
 	ruleIndex: number | null;
 	why: string;
@@ -222,39 +253,66 @@ export function explain(bead: RoutableBead, doc: RoutingDoc): RouteExplanation {
 	if (current)
 		return {
 			queue: current,
+			to: null,
 			ruleIndex: null,
 			why: `the bead has label queue:${current}; a queue label wins over the rules`,
+		};
+	const to = toOf(bead);
+	if (to)
+		return {
+			queue: null,
+			to,
+			ruleIndex: null,
+			why: `the bead has label ${TO_LABEL_PREFIX}${to}; it is offered to ${to} only`,
 		};
 	const i = doc.rules.findIndex((r) => matches(bead, r.match));
 	if (i < 0)
 		return doc.defaultQueue
 			? {
 					queue: doc.defaultQueue,
+					to: null,
 					ruleIndex: null,
 					why: `no rule matches: the default queue ${doc.defaultQueue} takes it`,
 				}
 			: {
 					queue: null,
+					to: null,
 					ruleIndex: null,
 					why: "no rule matches: the bead stays unrouted",
 				};
 	const rule = doc.rules[i] as RoutingRule;
-	return {
-		queue: rule.queue,
-		ruleIndex: i,
-		why: `rule ${i + 1} (${describe(rule.match)}) is the first that matches`,
-	};
+	const first = `rule ${i + 1} (${describe(rule.match)}) is the first that matches`;
+	if (rule.to !== undefined)
+		return {
+			queue: null,
+			to: rule.to,
+			ruleIndex: i,
+			why: `${first}: it is offered to ${rule.to} only${rule.fallback ? `; if nobody there accepts, queue ${rule.fallback}` : "; if nobody there accepts, it waits"}`,
+		};
+	return { queue: rule.queue, to: null, ruleIndex: i, why: first };
 }
 
 /**
  * The default environment of a bead on `queue`: the first matching rule that
  * routes to this queue and names one, else the queue's own. Null: none.
+ * A direct bead's `queue` is `to:<address>`: the first matching rule to that
+ * address, else its fallback queue's.
  */
 export function defaultEnvironment(
 	doc: RoutingDoc,
 	bead: RoutableBead,
 	queue: string,
 ): string | null {
+	if (queue.startsWith(TO_LABEL_PREFIX)) {
+		const address = queue.slice(TO_LABEL_PREFIX.length);
+		const direct = doc.rules.filter(
+			(r) => r.to === address && matches(bead, r.match),
+		);
+		const named = direct.find((r) => r.environment)?.environment;
+		if (named) return named;
+		const fb = direct.find((r) => r.fallback)?.fallback;
+		return fb ? (queueNamed(doc, fb)?.environment ?? null) : null;
+	}
 	const rule = doc.rules.find(
 		(r) => r.queue === queue && r.environment && matches(bead, r.match),
 	);

@@ -1,12 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import type { Bead } from "@mastermind/core";
 import {
+	fallbackOf,
+	offerOrder,
 	type RoutingRule,
 	type RunnerState,
 	requirementsOf,
 	route,
 	selectBead,
 	selectWaiter,
+	target,
 } from "./index.ts";
 
 function bead(over: Partial<Bead> = {}): Bead {
@@ -100,6 +103,46 @@ describe("route", () => {
 	];
 	test.each(cases)("%s", (_name, over, rs, want) => {
 		expect(route(bead(over), rs)).toBe(want);
+	});
+});
+
+describe("target: queue or direct address", () => {
+	const rules: RoutingRule[] = [
+		{ match: { labels: ["laptop"] }, to: "bob/laptop" },
+		{ match: { labels: ["bob"] }, to: "bob", fallback: "dev" },
+		{ match: {}, queue: "dev" },
+	];
+	test("a direct rule gives an address, and route() no queue", () => {
+		expect(target(bead({ labels: ["laptop"] }), rules)).toEqual({
+			to: "bob/laptop",
+		});
+		expect(route(bead({ labels: ["laptop"] }), rules)).toBeNull();
+		expect(target(bead({ labels: ["bob"] }), rules)).toEqual({ to: "bob" });
+		expect(target(bead(), rules)).toEqual({ queue: "dev" });
+	});
+	test("labels win over rules: queue label first, then to: label", () => {
+		expect(target(bead({ labels: ["laptop", "to:carol"] }), rules)).toEqual({
+			to: "carol",
+		});
+		expect(target(bead({ labels: ["to:carol", "queue:ops"] }), rules)).toEqual({
+			queue: "ops",
+		});
+	});
+	test("fallbackOf: only a matching rule to the same address", () => {
+		expect(fallbackOf(bead({ labels: ["bob"] }), "bob", rules)).toBe("dev");
+		expect(fallbackOf(bead({ labels: ["bob"] }), "bob/laptop", rules)).toBe(
+			null,
+		);
+		expect(fallbackOf(bead(), "bob", rules)).toBeNull();
+	});
+	test("offerOrder: never served first, then least recently, then id", () => {
+		const order = offerOrder([
+			{ runner: "c", lastServedAt: "2026-11-10T02:00:00Z" },
+			{ runner: "b" },
+			{ runner: "a", lastServedAt: "2026-11-10T01:00:00Z" },
+			{ runner: "a0" },
+		]).map((r) => r.runner);
+		expect(order).toEqual(["a0", "b", "a", "c"]);
 	});
 });
 

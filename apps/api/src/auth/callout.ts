@@ -69,6 +69,7 @@ export function serviceAccountGrant(
 					`_INBOX.${sa.account}.>`,
 					...ready,
 					subjects.runnerDoctorScope(sa.account),
+					subjects.runnerOfferScope(sa.account),
 				],
 			},
 		},

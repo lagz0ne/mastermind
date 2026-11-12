@@ -7,6 +7,9 @@
  *   mm.u.<account>.r.<runner>.doctor request: run the runner's doctor (operator);
  *                                    the reply goes to ...doctor.reply.<nonce>, a
  *                                    subject the runner may publish to
+ *   mm.u.<account>.r.<runner>.offer  request: a direct bead offered to one runner;
+ *                                    the offer's reply subject is ...offer.reply.<nonce>
+ *                                    and the runner ANSWERS with a request to it
  *   mm.q.<queue>.ready               publish: a queue has work
  *   mm.events.bead.<bead>            publish: one bead changed (beads journal)
  *
@@ -90,6 +93,15 @@ export const subjects = {
 	/** The doctor requests of every runner of an account (the runner's subscribe permission). */
 	runnerDoctorScope: (account: string) =>
 		`mm.u.${token("account", account)}.r.*.doctor`,
+	/** Request to a runner: take this direct bead? (mm-210.32) */
+	runnerOffer: (account: string, runner: string) =>
+		`mm.u.${token("account", account)}.r.${runnerToken(runner)}.offer`,
+	/** Where a runner answers one offer (inside its publish scope). */
+	runnerOfferReply: (account: string, runner: string, nonce: string) =>
+		`mm.u.${token("account", account)}.r.${runnerToken(runner)}.offer.reply.${token("nonce", nonce)}`,
+	/** The offers to every runner of an account (the runner's subscribe permission). */
+	runnerOfferScope: (account: string) =>
+		`mm.u.${token("account", account)}.r.*.offer`,
 	ready: (queue: string) => `mm.q.${token("queue", queue)}.ready`,
 	beadEvent: (bead: string) => `mm.events.bead.${beadToken(bead)}`,
 	/** Everything an account's service accounts may publish to (for the auth callout). */

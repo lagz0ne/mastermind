@@ -6,7 +6,7 @@
  * 2. A runner adapter asks for work on a queue; {@link selectBead} picks the bead.
  * 3. When a bead becomes ready while runners wait, {@link selectWaiter} picks the runner.
  */
-import { type Bead, type Priority, queueOf } from "@mastermind/core";
+import { type Bead, type Priority, queueOf, toOf } from "@mastermind/core";
 
 /** All conditions that are set must hold. An empty match matches every bead. */
 export type RuleMatch = {
@@ -20,12 +20,27 @@ export type RuleMatch = {
 	idPrefix?: string;
 };
 
+/**
+ * A rule sends a bead either to a queue (broadcast: the first runner that
+ * asks takes it) or to one address (direct: `<account>` or
+ * `<account>/<runner>` is offered the bead and accepts or declines).
+ */
 export type RoutingRule = {
 	match: RuleMatch;
-	queue: string;
 	/** Default environment for the beads this rule routes (no env: label). */
 	environment?: string;
-};
+} & (
+	| { queue: string; to?: undefined; fallback?: undefined }
+	| {
+			to: string;
+			queue?: undefined;
+			/** When no runner of the address accepts: put the bead on this queue. */
+			fallback?: string;
+	  }
+);
+
+/** Where a bead goes: a queue, or one address. */
+export type Target = { queue: string } | { to: string };
 
 /** A runner that pulls work, as Mastermind sees it at decision time. */
 export type RunnerState = {
@@ -53,16 +68,56 @@ export function matches(bead: RoutableBead, match: RuleMatch): boolean {
 }
 
 /**
- * The queue for a bead. A bead that has a queue label keeps it. Else the first
- * matching rule wins. Null means not routed: the bead stays in triage.
+ * Where a bead goes. A bead that has a queue label keeps it, then one that
+ * has a `to:` label keeps that. Else the first matching rule wins. Null means
+ * not routed: the bead stays in triage.
  */
+export function target(
+	bead: RoutableBead,
+	rules: readonly RoutingRule[],
+): Target | null {
+	const queue = queueOf(bead);
+	if (queue) return { queue };
+	const to = toOf(bead);
+	if (to) return { to };
+	const rule = rules.find((r) => matches(bead, r.match));
+	if (!rule) return null;
+	return rule.to !== undefined ? { to: rule.to } : { queue: rule.queue };
+}
+
+/** The queue of {@link target}; null for a direct bead or no match. */
 export function route(
 	bead: RoutableBead,
 	rules: readonly RoutingRule[],
 ): string | null {
-	const current = queueOf(bead);
-	if (current) return current;
-	return rules.find((r) => matches(bead, r.match))?.queue ?? null;
+	const t = target(bead, rules);
+	return t && "queue" in t ? t.queue : null;
+}
+
+/**
+ * The fallback queue of a direct bead: the first matching rule that sends to
+ * `address` and names one. Null: the bead waits.
+ */
+export function fallbackOf(
+	bead: RoutableBead,
+	address: string,
+	rules: readonly RoutingRule[],
+): string | null {
+	return (
+		rules.find((r) => r.to === address && r.fallback && matches(bead, r.match))
+			?.fallback ?? null
+	);
+}
+
+/** Order for offering a bead to the runners of one account: served least recently first, then id. */
+export function offerOrder<
+	R extends Pick<RunnerState, "runner" | "lastServedAt">,
+>(runners: readonly R[]): R[] {
+	return [...runners].sort(
+		(a, b) =>
+			servedAt(a) - servedAt(b) ||
+			(a.runner < b.runner ? -1 : a.runner > b.runner ? 1 : 0),
+	);
 }
 
 /** A label `req:<capability>` means a runner must have that capability. */
@@ -118,7 +173,7 @@ export function selectBead<B extends SelectableBead>(
 
 const NEVER = Number.NEGATIVE_INFINITY;
 
-function servedAt(r: RunnerState): number {
+function servedAt(r: Pick<RunnerState, "lastServedAt">): number {
 	return r.lastServedAt ? Date.parse(r.lastServedAt) : NEVER;
 }
 

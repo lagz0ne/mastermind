@@ -5,14 +5,20 @@
  *   typed bus error `not_a_member`.
  * - {@link reroute}: after the rules or queues change, put every open bead that
  *   has no queue on the queue its first matching rule names (else the default
- *   queue).
+ *   queue), or label it `to:<address>` when that rule is direct.
  *
  * Before anybody saves routing (KV revision 0), queues are open: every account
  * may take work from every queue. The first save closes them to their members.
  */
 import { BusError } from "@mastermind/bus";
-import { type Bead, queueLabel, queueOf } from "@mastermind/core";
-import { route } from "@mastermind/router";
+import {
+	type Bead,
+	queueLabel,
+	queueOf,
+	toLabel,
+	toOf,
+} from "@mastermind/core";
+import { target } from "@mastermind/router";
 import { effectiveRules, queueNamed, type RoutingState } from "./model.ts";
 
 export async function admit(
@@ -62,13 +68,13 @@ export async function reroute(
 	const moved: string[] = [];
 	const rules = effectiveRules(state.doc);
 	for (const bead of await work.unrouted()) {
-		if (bead.status !== "open" || queueOf(bead)) continue;
-		const target = route(bead, rules);
-		if (!target) continue;
+		if (bead.status !== "open" || queueOf(bead) || toOf(bead)) continue;
+		const t = target(bead, rules);
+		if (!t) continue;
 		try {
 			await work.setLabels(bead.id, actor, [
 				...bead.labels,
-				queueLabel(target),
+				"queue" in t ? queueLabel(t.queue) : toLabel(t.to),
 			]);
 			moved.push(bead.id);
 		} catch (error) {

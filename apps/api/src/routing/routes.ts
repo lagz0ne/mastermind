@@ -10,14 +10,22 @@
  *   POST /api/beads/:id/queue    {queue: string | null} -> {bead}
  *                                manual override: sets the label queue:<name>
  *                                (it wins over the rules); null removes it and
- *                                the rules decide again
+ *                                the rules decide again; it removes a to: label
+ *   POST /api/beads/:id/to       {to: "<account>" | "<account>/<runner>" | null} -> {bead}
+ *                                send to one address (direct delivery): sets the
+ *                                label to:<address> and removes the queue label;
+ *                                null removes it and the rules decide again
  */
 
 import {
 	type Bead,
+	isAddress,
+	NOT_ACCEPTED_LABEL,
 	type Priority,
 	QUEUE_LABEL_PREFIX,
 	queueLabel,
+	TO_LABEL_PREFIX,
+	toLabel,
 } from "@mastermind/core";
 import { NotFound } from "@mastermind/work";
 import type { RequireAccount } from "../auth/session.ts";
@@ -172,9 +180,38 @@ export function routingRoutes(opts: RoutingRoutesOptions) {
 				const id = req.params?.id ?? "";
 				const bead = await beads.get(id);
 				const labels = bead.labels.filter(
-					(l) => !l.startsWith(QUEUE_LABEL_PREFIX),
+					(l) =>
+						!l.startsWith(QUEUE_LABEL_PREFIX) &&
+						(queue === null ||
+							(!l.startsWith(TO_LABEL_PREFIX) && l !== NOT_ACCEPTED_LABEL)),
 				);
 				if (queue !== null) labels.push(queueLabel(queue));
+				const updated = await beads.setLabels(id, account, labels);
+				return json({ bead: updated });
+			}),
+		},
+		"/api/beads/:id/to": {
+			POST: guarded(async (req, account) => {
+				const beads = opts.beads;
+				if (!beads) return fail(503, "beads unconfigured: set NATS");
+				const b = await body(req);
+				if (!b || !("to" in b))
+					return fail(400, "to required (an address or null)");
+				const to = b.to;
+				if (to !== null && !isAddress(to))
+					return fail(
+						400,
+						"to must be <account> or <account>/<runner> (lower case account id)",
+					);
+				const id = req.params?.id ?? "";
+				const bead = await beads.get(id);
+				const labels = bead.labels.filter(
+					(l) =>
+						!l.startsWith(TO_LABEL_PREFIX) &&
+						l !== NOT_ACCEPTED_LABEL &&
+						(to === null || !l.startsWith(QUEUE_LABEL_PREFIX)),
+				);
+				if (to !== null) labels.push(toLabel(to));
 				const updated = await beads.setLabels(id, account, labels);
 				return json({ bead: updated });
 			}),
