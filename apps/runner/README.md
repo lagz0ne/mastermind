@@ -203,7 +203,7 @@ The environment's `output` says how code leaves the box. After the agent says `d
 | output | What the runner does |
 |---|---|
 | `none` | Nothing. The patch stays on the runner (`results/<execution>.patch`). |
-| `branch` | In the box: commit what the agent left (message: the item title) and take the new commits out as a git bundle. On this machine: `git push --force origin <commit>:refs/heads/mm/<item>`. |
+| `branch` | Code by mount (default, below): one commit of the work tree, pushed from the runner's clean clone. With `MM_BOX_CODE=clone`: in the box, commit what the agent left (message: the item title) and take the new commits out as a git bundle. On this machine: `git push --force origin <commit>:refs/heads/mm/<item>`. |
 | `pr` | As `branch`, then on GitHub: open a pull request into `output.base` (default: the ref; a commit ref: the repo's default branch), or find the open one of an earlier try. Other git hosts: push only, and the ticket says so. |
 
 - No change against the checked-out commit: `no changes: nothing pushed`.
@@ -225,6 +225,26 @@ before the agent phase), the git credential stays out of the agent's reach:
 
 An agent that needs a GitHub token for its own work (for example `gh`) gets it under another
 secret name, and that token is readable by the agent.
+
+### Code by mount (default)
+
+Prior art: GitHub Actions container jobs (`actions/checkout` runs on the runner host, and the
+job container mounts the workspace). `MM_BOX_CODE` chooses the way:
+
+| `MM_BOX_CODE` | How the code gets in and out |
+|---|---|
+| `mount` (default) | The runner keeps one clean clone per repo in `<config dir>/code/repos` (bare, shallow) and fetches the ref with the credential, on this machine. Each task gets a fresh work copy in `<config dir>/code/work/<execution>`, which is bind-mounted at `/workspace` (`:Z` on SELinux). The box gets no git credential and does no clone. After the agent, the runner reads the work tree against the base with a temporary index of the clean clone. The copy's `.git` (config, hooks, refs, filters) is never used. It makes one commit on the base (`commit-tree`, no hooks) and pushes `mm/<item>` from the clean clone. |
+| `clone` | The older way: clone in the box, take the commits out as a bundle (table above). This is also used when `DOCKER_HOST` is `tcp://` or `ssh://`, because a remote engine cannot mount this machine's directories. |
+
+- Owner of the copy: before the box steps, root in the box gives `/workspace` to the box
+  user. After the agent, it is given back to the owner the box saw first. This works with
+  rootful Docker and with rootless Podman.
+- Delete: the copy is deleted with the box on every exit path. A box that was killed before it
+  gave the copy back leaves files of the box user. The runner then empties the copy as root in
+  a short box (no network, image of the task). At start, the runner deletes the copies that an
+  earlier run left.
+- With `mount`, the agent's own commits are not kept: the pushed branch has one commit with
+  the item title as its message.
 - The line (`pull request opened: <url> (...)`) is added to the completion summary: the ticket
   shows it. A failed push or pull request fails the task with the reason. Closing the item
   merges nothing.

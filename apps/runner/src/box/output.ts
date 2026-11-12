@@ -307,8 +307,6 @@ export async function deliverOutput(
 	// 3. On this machine: a fresh repo with only the credential; the base from
 	// the git host, the commits from the bundle (checked), push mm/<item>.
 	const branch = outputBranch(i.itemId);
-	const tokenName = gitTokenName(i.secrets);
-	const token = tokenName ? i.secrets[tokenName] : undefined;
 	const host = i.host ?? hostRun;
 	const dir = await mkdtemp(join(tmpdir(), "mm-push-"));
 	let commits: number;
@@ -384,7 +382,7 @@ export async function deliverOutput(
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}
-	const what = `branch ${branch} (${commits} commit${commits === 1 ? "" : "s"}, ${files} file${files === 1 ? "" : "s"})`;
+	const what = pushedWhat(branch, commits, files);
 	const res: OutputResult = {
 		kind,
 		branch,
@@ -393,8 +391,44 @@ export async function deliverOutput(
 		line: `pushed ${what}`,
 	};
 	if (kind === "branch") return res;
+	return pullRequest(i, res, what);
+}
 
-	// 4. The pull request (GitHub only).
+/** `branch mm/x (2 commits, 3 files)`: for the ticket line. */
+export function pushedWhat(
+	branch: string,
+	commits: number,
+	files: number,
+): string {
+	return `branch ${branch} (${commits} commit${commits === 1 ? "" : "s"}, ${files} file${files === 1 ? "" : "s"})`;
+}
+
+/**
+ * After the push of `res.branch`: on GitHub, open the pull request against
+ * the base, or find the open one of an earlier try (the push updated it).
+ * Other hosts or no token: `res` with a line that says why there is none.
+ */
+export async function pullRequest(
+	i: Pick<
+		OutputInput,
+		| "repo"
+		| "ref"
+		| "itemId"
+		| "title"
+		| "output"
+		| "secrets"
+		| "fetch"
+		| "githubApi"
+	>,
+	res: OutputResult,
+	what: string,
+): Promise<OutputResult> {
+	const branch = res.branch ?? outputBranch(i.itemId);
+	const fail = (what: string, detail: string): never => {
+		throw new OutputError(redact(`${what}: ${detail}`, i.secrets));
+	};
+	const tokenName = gitTokenName(i.secrets);
+	const token = tokenName ? i.secrets[tokenName] : undefined;
 	const gh = githubRepo(i.repo);
 	if (!gh) {
 		res.line = `pushed ${what}; no pull request: ${hostOf(i.repo)} is not GitHub, open it by hand`;

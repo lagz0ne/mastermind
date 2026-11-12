@@ -480,6 +480,9 @@ export class DockerDriver implements BoxDriver {
 		if (networkMode) host.NetworkMode = networkMode;
 		if (more.capDropAll) host.CapDrop = ["ALL"];
 		if (spec.runtime) host.Runtime = spec.runtime;
+		// Z: relabel for this box on SELinux hosts (ignored elsewhere).
+		if (spec.mounts?.length)
+			host.Binds = spec.mounts.map((m) => `${m.source}:${m.target}:Z`);
 		const res = await this.#fetch(
 			"POST",
 			`/containers/create?name=${encodeURIComponent(spec.name)}`,
@@ -741,6 +744,49 @@ export class DockerDriver implements BoxDriver {
 		const net = info.Config?.Labels?.[NETWORK_LABEL];
 		if (net && (await this.list({ [NETWORK_LABEL]: net })).length === 0)
 			await this.#deleteNetwork(net);
+	}
+
+	/**
+	 * Empty `source` as root in a short box (no network, all caps dropped but
+	 * the ones rm needs over files of other users).
+	 */
+	async wipe(source: string, image: string): Promise<void> {
+		const res = await this.#fetch(
+			"POST",
+			`/containers/create?name=${encodeURIComponent(`mm-wipe-${crypto.randomUUID().slice(0, 8)}`)}`,
+			{
+				body: {
+					Image: image,
+					Entrypoint: ["/bin/sh", "-c"],
+					Cmd: [
+						'chmod -R u+rwX /w 2>/dev/null; rm -rf /w/* /w/.[!.]* /w/..?*; test -z "$(ls -A /w)"',
+					],
+					User: "0:0",
+					HostConfig: {
+						Binds: [`${source}:/w:Z`],
+						NetworkMode: "none",
+						SecurityOpt: ["no-new-privileges"],
+						CapDrop: ["ALL"],
+						CapAdd: ["CHOWN", "DAC_OVERRIDE", "FOWNER"],
+					},
+				},
+			},
+		);
+		const { Id } = (await res.json()) as { Id: string };
+		try {
+			await this.#fetch("POST", `/containers/${Id}/start`);
+			const w = (await (
+				await this.#fetch("POST", `/containers/${Id}/wait`, {
+					timeoutMs: 120_000,
+				})
+			).json()) as { StatusCode?: number };
+			if (w.StatusCode !== 0)
+				throw new BoxError(
+					`wipe ${source}: exited ${w.StatusCode}: ${(await this.logsOf(Id, 5).catch(() => "")).trim()}`,
+				);
+		} finally {
+			await this.#delete(Id).catch(() => {});
+		}
 	}
 
 	/** @internal for DockerBox */

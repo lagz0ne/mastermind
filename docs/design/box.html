@@ -233,6 +233,9 @@ th { font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; color:
 </table>
 <p>Not in v1: Docker Compose, feature entrypoints and privileged features (docker-in-docker), Alpine images, network phases (open for setup, allow list for the agent).</p>
 
+<h2 id="eight"><span class="n">8</span> Code by mount (mm-210.83, 2026-11-12)</h2>
+<p>Your rule: the outer side clones and pushes; the box works on a mounted copy. Prior art: GitHub Actions container jobs (<code>actions/checkout</code> runs on the runner host, the job container mounts the workspace). The runner keeps one clean clone per repo on its machine and fetches the ref with the environment&rsquo;s credential. Each task gets a fresh work copy, mounted at <code>/workspace</code>: the box gets no git credential and does no clone. After the agent, the runner reads the work tree as data, against the base, with a temporary index of the clean clone. The copy&rsquo;s <code>.git</code> (config, hooks, refs) is never used. It makes one commit on the base and pushes <code>mm/&lt;item&gt;</code> from the clean clone. The work copy is deleted with the box on every exit path. Rootless Podman and Docker are handled by giving the copy to the box user before the agent and back after it. <code>MM_BOX_CODE=clone</code> keeps the older way (clone in the box, bundle out). Measured on vite with rootless Podman: the code is in the box about 2 s sooner, and reading the changes takes about 2 s longer. The total is the same. The gain is the credential, not speed.</p>
+
 </main>
 </body>
 </html>

@@ -47,6 +47,7 @@ import {
 	sweepBoxes,
 	WORKSPACE,
 } from "./run.ts";
+import { CodeStore, codeMode } from "./workspace.ts";
 
 export type BoxCheckDeps = {
 	/** Stored secret values; default: the runner's secret store. */
@@ -299,6 +300,23 @@ export async function startBoxMode(i: BoxModeInput) {
 	const defaultImage =
 		i.image || i.env.MASTERMIND_BOX_IMAGE || DEFAULT_BOX_IMAGE;
 	i.log(`box mode: ${driver.name} (${engine}), default image ${defaultImage}`);
+	// Code by mount (mm-210.83): clean clones and work copies next to results.
+	const how = codeMode(i.env);
+	const code =
+		how.mode === "mount"
+			? new CodeStore(join(dirname(i.outDir), "code"), { log: i.log })
+			: undefined;
+	if (code) {
+		const wipe = driver.wipe
+			? (dir: string) => driver.wipe?.(dir, defaultImage) ?? Promise.resolve()
+			: undefined;
+		const left = await code.sweep(wipe);
+		if (left.length)
+			i.log(`box: deleted ${left.length} work copies left from an earlier run`);
+	}
+	i.log(
+		`box code: ${how.mode === "mount" ? `the runner clones and pushes; a work copy is mounted at ${WORKSPACE} (${code?.root})` : "cloned in the box"}: ${how.why}`,
+	);
 	const dockerPath = boxDockerPath(i.env, engine);
 	const loadStore = () => new SecretStore(secretsPath()).load();
 	return {
@@ -310,6 +328,7 @@ export async function startBoxMode(i: BoxModeInput) {
 			defaultImage,
 			outDir: i.outDir,
 			log: i.log,
+			...(code ? { code } : {}),
 			...(i.onStep ? { onStep: i.onStep } : {}),
 			...(i.files ? { files: i.files } : {}),
 			...(control

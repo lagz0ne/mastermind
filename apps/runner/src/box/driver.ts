@@ -51,7 +51,15 @@ export type BoxSpec = {
 	 * `none`: no route, the box gets nothing.
 	 */
 	model?: ModelAuth;
+	/**
+	 * Host directories bind-mounted into the box (mm-210.83: the work copy of
+	 * the code at /workspace). Read-write; on SELinux relabelled for this box.
+	 */
+	mounts?: BoxMount[];
 };
+
+/** One host directory in the box. `source` is an absolute path on the engine's host. */
+export type BoxMount = { source: string; target: string };
 
 /** The engine runtime of each environment runtime (mm-210.63). */
 export const ENGINE_RUNTIME = { gvisor: "runsc" } as const;
@@ -127,6 +135,12 @@ export interface BoxDriver {
 	list(labels: Record<string, string>): Promise<BoxInfo[]>;
 	/** Delete a box by id; no error when it is already gone. */
 	remove(id: string): Promise<void>;
+	/**
+	 * Empty the host directory `source` as root in a short box of `image`
+	 * (mm-210.83: a work copy that still holds files of the box user, after a
+	 * box that was killed before it gave them back). Absent: the driver cannot.
+	 */
+	wipe?(source: string, image: string): Promise<void>;
 }
 
 export class BoxError extends Error {

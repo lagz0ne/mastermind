@@ -3,9 +3,12 @@
  *
  *   prepare (devcontainer.ts, on this machine: git access check; the repo's or
  *   the environment's devcontainer.json built by the devcontainer CLI)
- *   -> ensure image (cached by recipe hash) -> create box (limits, network, labels)
- *   -> clone repo at ref into /workspace (the git credential only in the env
- *   of that one command) -> secrets as env and files (never the git credential)
+ *   -> code by mount (default, workspace.ts, mm-210.83): this machine fetches
+ *   the repo into its clean clone and makes a work copy for /workspace
+ *   -> ensure image (cached by recipe hash) -> create box (limits, network,
+ *   labels, the work copy mounted) -> with MM_BOX_CODE=clone instead: clone
+ *   repo at ref into /workspace (the git credential only in the env of that
+ *   one command) -> secrets as env and files (never the git credential)
  *   -> devcontainer lifecycle commands (onCreate, updateContent, postCreate,
  *   postStart) -> setup, then check (fail: the reason and the output tail)
  *   -> network phase agent: an allow list drops the registries and the repo
@@ -63,6 +66,7 @@ import {
 } from "./output.ts";
 import { networkPhases, splitModelSecrets } from "./proxy.ts";
 import { untar } from "./tar.ts";
+import type { CodeStore, Snapshot, WorkCopy } from "./workspace.ts";
 
 export const WORKSPACE = "/workspace";
 export const SECRETS_DIR = "/run/mastermind/secrets";
@@ -137,6 +141,12 @@ export type BoxRunOptions = {
 	githubApi?: string;
 	/** Git on this machine, for the push after the agent; default: spawn. */
 	hostRun?: HostRun;
+	/**
+	 * Code by mount (mm-210.83, workspace.ts): the runner fetches the repo
+	 * into its clean clone and mounts a work copy at /workspace; the box gets
+	 * no git credential and does no clone. Absent: clone in the box.
+	 */
+	code?: CodeStore;
 	/** Clock (epoch ms) for the GitHub App token's expiry; default Date.now. */
 	now?: () => number;
 	/** The item's files (inputs in, outputs out); null or absent: none. */
@@ -196,8 +206,9 @@ const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 /** The `paseo run` command line inside the box. No secret values in it. */
 export function paseoRun(task: BoxTask): string[] {
 	const a = task.agent;
-	const provider = a.provider ?? task.env.agent?.provider ?? task.env.provider;
-	const mode = a.mode ?? task.env.agent?.mode ?? "bypassPermissions";
+	// The runner's own decision only: the server sends no agent settings (mm-210.84).
+	const provider = a.provider;
+	const mode = a.mode ?? "bypassPermissions";
 	const labels = {
 		...task.labels,
 		[BOX_LABEL.execution]: task.executionId,
@@ -257,6 +268,10 @@ export async function runInBox(
 		: undefined;
 	const all = AbortSignal.any([signal, stop.signal]);
 	let box: Box | undefined;
+	let image: string | undefined;
+	let copy: WorkCopy | undefined;
+	/** In-box owner of the mounted work copy before it went to the box user. */
+	let owner: string | undefined;
 	const kill = () => {
 		box?.destroy().catch(() => {});
 	};
@@ -318,7 +333,7 @@ export async function runInBox(
 		// The model credential stays out of the box too (mm-210.70): the
 		// driver's proxy box adds it; the box gets a placeholder.
 		const { model, box: secrets } = splitModelSecrets(split.box);
-		const image = prep
+		image = prep
 			? prep.image
 			: await driver.ensureImage({
 					image: env.image || opts.defaultImage,
@@ -326,6 +341,31 @@ export async function runInBox(
 					...(env.recipeHash ? { hash: env.recipeHash } : {}),
 				});
 		if (all.aborted) throw stopped();
+
+		// Code by mount: the clean clone and the work copy on this machine.
+		if (opts.code && env.repo) {
+			const t1 = Date.now();
+			try {
+				copy = await opts.code.checkout({
+					repo: env.repo,
+					ref: env.ref,
+					executionId: task.executionId,
+					secrets: gitSecrets,
+					signal: all,
+				});
+			} catch (error) {
+				if (all.aborted) throw stopped();
+				throw new BoxStepError(
+					redact(
+						error instanceof Error ? error.message : String(error),
+						gitSecrets,
+					),
+				);
+			}
+			step(
+				`work copy of ${env.repo} at ${env.ref || "HEAD"} (${copy.base.slice(0, 12)}) on this machine in ${((Date.now() - t1) / 1000).toFixed(1)} s; mounted at ${WORKSPACE}, no git credential in the box`,
+			);
+		}
 
 		// Secrets: env vars of the box (the agent host and its agents inherit them)
 		// and files in SECRETS_DIR. Values never go into argv or logs.
@@ -352,6 +392,7 @@ export async function runInBox(
 			env: { ...BOX_ENV, ...prep?.env, ...opts.boxEnv, ...secretEnv },
 			...(opts.cmd ? { cmd: opts.cmd } : {}),
 			...(model ? { model } : {}),
+			...(copy ? { mounts: [{ source: copy.dir, target: WORKSPACE }] } : {}),
 		});
 		if (all.aborted) throw stopped();
 		const b = box;
@@ -394,20 +435,38 @@ export async function runInBox(
 		// The workspace and the secret files belong to that user.
 		const uid =
 			(await must("id", ["id", "-u"], { workdir: "/" })).stdout.trim() || "0";
-		// CLONE_CRED_DIR: the deploy key for the clone only (removed after it).
-		const private_ = env.repo
-			? `${SECRETS_DIR} ${CLONE_CRED_DIR}`
-			: SECRETS_DIR;
-		const dirs = `${WORKSPACE} ${private_}`;
-		await must(
-			"prepare",
-			[
-				"sh",
-				"-c",
-				`mkdir -p ${dirs} && chown ${uid} ${dirs} && chmod 700 ${private_}`,
-			],
-			{ root: true },
-		);
+		if (copy) {
+			// The mounted work copy: to the box user now, back after the agent
+			// (rootless Podman and Docker map users differently; the owner as
+			// the box sees it is the one to give it back to).
+			const gid =
+				(await must("id", ["id", "-g"], { workdir: "/" })).stdout.trim() || uid;
+			const r = await must(
+				"prepare (mounted work copy)",
+				[
+					"sh",
+					"-c",
+					`o="$(stat -c %u:%g ${WORKSPACE})" && mkdir -p ${SECRETS_DIR} && chown ${uid} ${SECRETS_DIR} && chmod 700 ${SECRETS_DIR} && chown -R ${uid}:${gid} ${WORKSPACE} && echo "$o"`,
+				],
+				{ root: true },
+			);
+			owner = r.stdout.trim().split("\n").pop() || "0:0";
+		} else {
+			// CLONE_CRED_DIR: the deploy key for the clone only (removed after it).
+			const private_ = env.repo
+				? `${SECRETS_DIR} ${CLONE_CRED_DIR}`
+				: SECRETS_DIR;
+			const dirs = `${WORKSPACE} ${private_}`;
+			await must(
+				"prepare",
+				[
+					"sh",
+					"-c",
+					`mkdir -p ${dirs} && chown ${uid} ${dirs} && chmod 700 ${private_}`,
+				],
+				{ root: true },
+			);
+		}
 		const files = Object.entries(secrets).map(([name, data]) => ({
 			name,
 			data,
@@ -422,7 +481,10 @@ export async function runInBox(
 		// credential is in the env of this one command (and a deploy key in
 		// CLONE_CRED_DIR until it ends): nothing of it stays in the box.
 		let base: string | null = null;
-		if (env.repo) {
+		if (copy) {
+			base = copy.base;
+			step(`checked out ${env.repo} at ${env.ref} (${base.slice(0, 12)})`);
+		} else if (env.repo) {
 			const cred = cloneCredential(gitSecrets);
 			try {
 				if (cred.key)
@@ -551,12 +613,18 @@ export async function runInBox(
 		const r =
 			(await opts.runAgent?.(b, { ...task, prompt }, all)) ?? (await run(cmd));
 		if (all.aborted) throw stopped();
+		let snap: Snapshot | undefined;
 		const sendOut = async (patch: boolean) => {
 			if (!io) return;
 			try {
 				const sent = await filesOut(b, io, task.beadId, opts.boxFiles, {
 					log: `${r.stdout}${r.stderr}`,
-					patch: patch && base ? PATCH : null,
+					patch:
+						!patch || !base
+							? null
+							: copy
+								? { text: snap?.patch ?? "" }
+								: { path: PATCH },
 				});
 				if (sent.length) step(`files out: ${sent.join(", ")}`);
 			} catch (error) {
@@ -573,7 +641,35 @@ export async function runInBox(
 		const result: BoxRunResult = parseResult(r.stdout);
 
 		// Take the work out as a patch against the checked-out commit.
-		if (base) {
+		if (copy && opts.code) {
+			// The work copy back to its owner, then read it here as data.
+			await must(
+				"give the work copy back",
+				["sh", "-c", `chown -R ${owner} ${WORKSPACE}`],
+				{ root: true },
+			);
+			owner = undefined;
+			try {
+				snap = await opts.code.snapshot(copy, {
+					exclude: ["/.mastermind/"],
+					signal: all,
+				});
+			} catch (error) {
+				if (all.aborted) throw stopped();
+				throw new BoxStepError(
+					`read the changes: ${error instanceof Error ? error.message : error}`,
+				);
+			}
+			if (snap.patch && opts.outDir) {
+				await mkdir(opts.outDir, { recursive: true });
+				const path = join(opts.outDir, `${task.executionId}.patch`);
+				await writeFile(path, snap.patch, { mode: 0o600 });
+				result.patch = path;
+				step(
+					`changes read on this machine: ${snap.files} file${snap.files === 1 ? "" : "s"}, patch ${snap.patch.length} bytes`,
+				);
+			}
+		} else if (base) {
 			const p = await run([
 				"sh",
 				"-c",
@@ -606,25 +702,36 @@ export async function runInBox(
 					}).git;
 					step("GitHub App token minted again for the push");
 				}
-				const out = await deliverOutput({
-					exec: (cmd) => run(cmd),
-					takeOut: async (path) => {
-						const [file] = untar(await b.copyOut(path));
-						if (!file) throw new Error(`${path} is not in the box`);
-						return file.data;
-					},
-					...(opts.hostRun ? { host: opts.hostRun } : {}),
-					signal: all,
-					itemId: task.beadId,
-					title: task.title,
-					output: env.output,
-					repo: env.repo,
-					ref: env.ref,
-					baseSha: base,
-					secrets: gitSecrets,
-					...(opts.fetch ? { fetch: opts.fetch } : {}),
-					...(opts.githubApi ? { githubApi: opts.githubApi } : {}),
-				});
+				const out =
+					copy && snap && opts.code
+						? await opts.code.deliver(copy, snap, {
+								signal: all,
+								itemId: task.beadId,
+								title: task.title,
+								output: env.output,
+								secrets: gitSecrets,
+								...(opts.fetch ? { fetch: opts.fetch } : {}),
+								...(opts.githubApi ? { githubApi: opts.githubApi } : {}),
+							})
+						: await deliverOutput({
+								exec: (cmd) => run(cmd),
+								takeOut: async (path) => {
+									const [file] = untar(await b.copyOut(path));
+									if (!file) throw new Error(`${path} is not in the box`);
+									return file.data;
+								},
+								...(opts.hostRun ? { host: opts.hostRun } : {}),
+								signal: all,
+								itemId: task.beadId,
+								title: task.title,
+								output: env.output,
+								repo: env.repo,
+								ref: env.ref,
+								baseSha: base,
+								secrets: gitSecrets,
+								...(opts.fetch ? { fetch: opts.fetch } : {}),
+								...(opts.githubApi ? { githubApi: opts.githubApi } : {}),
+							});
 				if (out) {
 					result.output = out;
 					step(out.line);
@@ -647,11 +754,34 @@ export async function runInBox(
 	} finally {
 		clearTimeout(timer);
 		all.removeEventListener("abort", kill);
+		// A work copy not given back (a failed or stopped task): give it back
+		// while the box still runs, so this machine can delete it.
+		if (box && copy && owner && !all.aborted)
+			await box
+				.exec(["sh", "-c", `chown -R ${owner} ${WORKSPACE}`], {
+					user: "root",
+					workdir: "/",
+				})
+				.catch(() => {});
 		if (box) {
 			await box.destroy().catch((error) => {
 				log(`${task.beadId}: box: delete ${box?.name} failed: ${error}`);
 			});
 			step(`box ${box.name} deleted`);
+		}
+		if (copy && opts.code) {
+			const img = image;
+			const wipe =
+				driver.wipe && img
+					? (dir: string) => driver.wipe?.(dir, img) ?? Promise.resolve()
+					: undefined;
+			await opts.code.remove(copy, wipe).then(
+				() => step("work copy deleted"),
+				(error) => {
+					log(`${task.beadId}: box: work copy ${copy?.dir} stays: ${error}`);
+					step(`work copy could not be deleted: ${error}`);
+				},
+			);
 		}
 	}
 }
@@ -733,7 +863,8 @@ async function filesOut(
 	io: BoxFiles,
 	beadId: string,
 	hooks: BoxFileHooks | undefined,
-	o: { log: string; patch: string | null },
+	/** The patch: a file in the box, or text from this machine (code by mount). */
+	o: { log: string; patch: { path: string } | { text: string } | null },
 ): Promise<string[]> {
 	const sent: { name: string; size: number }[] = [];
 	const send = async (name: string, path: string) => {
@@ -746,7 +877,14 @@ async function filesOut(
 		await io.write(beadId, name, f.data, { size: f.size });
 		sent.push({ name, size: f.size });
 	};
-	if (o.patch) await send("changes.patch", o.patch);
+	if (o.patch && "path" in o.patch) await send("changes.patch", o.patch.path);
+	else if (o.patch?.text) {
+		const bytes = new TextEncoder().encode(o.patch.text);
+		await io.write(beadId, "changes.patch", new Blob([bytes]).stream(), {
+			size: bytes.length,
+		});
+		sent.push({ name: "changes.patch", size: bytes.length });
+	}
 	const hooked = await hooks?.list(b, OUTPUTS_DIR).catch(() => undefined);
 	const listed = hooked
 		? { stdout: hooked.join("\n") }
