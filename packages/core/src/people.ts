@@ -4,6 +4,8 @@
  * `runners` event of `GET /api/people/events`, shared by the api and the web UI.
  */
 
+import type { RunnerReadiness } from "./dispatch.ts";
+
 /** An account (a human). */
 export type AccountView = {
 	id: string;
@@ -39,6 +41,11 @@ export type RunnerView = {
 	/** Ids of the beads its agents hold now. */
 	running: string[];
 	version: string | null;
+	/**
+	 * Worker readiness from the runner's last status (mm-210.59); null: it
+	 * reports none (not connected, or older than mm-210.59).
+	 */
+	readiness?: RunnerReadiness | null;
 };
 
 export type AccountsReply = { accounts: AccountView[] };

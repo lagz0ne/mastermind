@@ -24,6 +24,11 @@
  * - debug(): the waiters per queue and a ring of recent decisions (offers and
  *   declines with the reason), for GET /api/debug/state. In memory, this
  *   replica only.
+ * - readiness gate (mm-210.59): with `readiness`, a runner gets work (next,
+ *   wake-up, offer) only while its last status is `ready`, fresh
+ *   ({@link READINESS_FRESH_MS}) and lists the item's environment; items
+ *   with no environment need `ready` only. A runner that is not ready waits
+ *   on `next` until it is (or `waitMs`), then gets `{notReady: reasons}`.
  */
 
 import { BusError } from "@mastermind/bus";
@@ -48,14 +53,17 @@ import {
 	type NextReply,
 	type NextRequest,
 	NOT_ACCEPTED_LABEL,
+	notReadyReasons,
 	type OfferResult,
 	parseAddress,
 	queueLabel,
 	queueOf,
+	READINESS_FRESH_MS,
 	type ReadyNotice,
 	type ReleaseRequest,
 	type ReportRequest,
 	type RunnerInfo,
+	type RunnerReadiness,
 	TO_LABEL_PREFIX,
 	toLabel,
 	toOf,
@@ -171,9 +179,25 @@ export type DispatcherOptions = {
 	runnersOf?: (account: string) => string[];
 	/** Offer a waiting direct bead again after this. Default {@link DIRECT_RETRY_MS}. */
 	retryMs?: number;
+	/**
+	 * The readiness gate (mm-210.59): a runner's last status and when it came
+	 * (ms, this server's clock); null: none. Absent: no gate.
+	 */
+	readiness?: (account: string, runner: string) => RunnerStatusSeen | null;
 	now?: () => Date;
 	onError?: (error: unknown) => void;
 };
+
+/** A runner's last status as the dispatcher sees it. */
+export type RunnerStatusSeen = {
+	status: { readiness?: RunnerReadiness };
+	receivedAt: number;
+};
+
+/** How often a `next` of a runner that is not ready looks again. */
+export const NOT_READY_POLL_MS = 1_000;
+
+export { READINESS_FRESH_MS };
 
 export type EnvResolution =
 	| { ok: true; env: DispatchEnv }
@@ -342,6 +366,17 @@ export class Dispatcher {
 		const runner = checkRunner(account, req);
 		const actor = `${account}/${runner.id}`;
 		this.#see({ kind: "next", runner, queue });
+		const notReady = await this.#untilReady(actor);
+		if (notReady.length) {
+			this.#decide(
+				"decline",
+				queue,
+				"*",
+				actor,
+				`runner not ready: ${notReady.join("; ")}`,
+			);
+			return { dispatch: null, notReady };
+		}
 		const state = this.#state(runner, actor, queue);
 		let wait: Promise<NextReply> | null = null;
 		const reply = await this.#lock(queue, async () => {
@@ -635,8 +670,9 @@ export class Dispatcher {
 			};
 			for (const runner of runners) {
 				const actor = `${to.account}/${runner}`;
-				if (!this.#eligible(actor, undefined, bead, queue)) {
-					lines.push(`${actor}: backs off after a release`);
+				const no = this.#ineligible(actor, undefined, bead, queue);
+				if (no) {
+					lines.push(`${actor}: ${no}`);
 					continue;
 				}
 				let ex: OfferExchange;
@@ -824,37 +860,72 @@ export class Dispatcher {
 		};
 	}
 
-	/** May `actor` take `bead` (bound environments, back-off)? Records why not. */
+	/** May `actor` take `bead` (bound environments, back-off, readiness)? Records why not. */
 	#eligible(
 		actor: string,
 		environments: string[] | undefined,
 		bead: Bead,
 		queue: string,
 	): boolean {
-		if (!this.#bound(environments, bead, queue)) {
-			this.#decide(
-				"decline",
-				queue,
-				bead.id,
-				actor,
+		return this.#ineligible(actor, environments, bead, queue) === null;
+	}
+
+	/** Why `actor` may not take `bead`, recorded as a decision; null: it may. */
+	#ineligible(
+		actor: string,
+		environments: string[] | undefined,
+		bead: Bead,
+		queue: string,
+	): string | null {
+		const no = (reason: string) => {
+			this.#decide("decline", queue, bead.id, actor, reason);
+			return reason;
+		};
+		if (!this.#bound(environments, bead, queue))
+			return no(
 				`environment not bound by the runner (bound: ${environments?.join(", ") || "none"})`,
 			);
-			return false;
-		}
 		const c = this.#cool.get(`${actor} ${bead.id}`);
-		if (c && this.#now().getTime() < c.until) {
-			this.#decide(
-				"decline",
-				queue,
-				bead.id,
-				actor,
+		if (c && this.#now().getTime() < c.until)
+			return no(
 				Number.isFinite(c.until)
 					? `back-off after release ${c.n} until ${new Date(c.until).toISOString()}`
 					: `back-off after release ${c.n}: never again for this runner`,
 			);
-			return false;
+		const notReady = this.#notReady(actor, this.#envName(bead, queue));
+		if (notReady.length) return no(`not ready: ${notReady.join("; ")}`);
+		return null;
+	}
+
+	/** Why the runner `actor` is not ready (for `env`; null: runner-wide). Empty: it is. */
+	#notReady(actor: string, env: string | null): string[] {
+		const gate = this.#opts.readiness;
+		if (!gate) return [];
+		const i = actor.indexOf("/");
+		const seen = gate(actor.slice(0, i), actor.slice(i + 1));
+		return notReadyReasons(
+			seen?.status ?? null,
+			seen?.receivedAt ?? null,
+			this.#now().getTime(),
+			env,
+		);
+	}
+
+	/** Wait (up to `waitMs`) until the runner is ready; the reasons if it is not. */
+	async #untilReady(actor: string): Promise<string[]> {
+		let reasons = this.#notReady(actor, null);
+		const end = Date.now() + this.#waitMs;
+		while (reasons.length && !this.#stopped && Date.now() < end) {
+			await Bun.sleep(Math.min(NOT_READY_POLL_MS, end - Date.now()));
+			reasons = this.#notReady(actor, null);
 		}
-		return true;
+		return reasons;
+	}
+
+	/** The environment name of a bead (resolved when it can be), or null. */
+	#envName(bead: Bead, queue: string): string | null {
+		const r = this.#opts.resolveEnv?.(bead, queue);
+		return (r ? (r.ok ? r.env.name : undefined) : envNameOf(bead)) ?? null;
 	}
 
 	/** Add a decision; the same one again moves to the end with count + 1. */

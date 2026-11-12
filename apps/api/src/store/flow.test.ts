@@ -127,6 +127,20 @@ describe.skipIf(!natsAvailable())("flow on the NATS work store", () => {
 			(await work.beads.get(id)).labels.includes("queue:flow"),
 		);
 
+		// The runner says it is ready (readiness gate, mm-210.59).
+		client.publish(
+			subjects.runnerStatus("alice", runner.runner.id),
+			JSON.stringify({
+				runner: runner.runner.id,
+				readiness: {
+					state: "ready",
+					readyEnvironments: [],
+					failedChecks: [],
+					checkedAt: new Date().toISOString(),
+				},
+			}),
+		);
+		await client.flush();
 		const { dispatch } = await request<NextRequest, NextReply>(
 			client,
 			subjects.next("alice", "flow"),

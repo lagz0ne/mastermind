@@ -15,6 +15,7 @@ import {
 	outdated,
 	type People,
 	RUNNER_BIN,
+	readinessOf,
 	revoke,
 	runnerCommand,
 	statsOf,
@@ -274,6 +275,7 @@ function RunnerRow({
 	const [error, setError] = useState<string | null>(null);
 	const sa = r.serviceAccount;
 	const off = !r.online;
+	const ready = readinessOf(r);
 	const doRevoke = () => {
 		if (!sa) return;
 		if (!window.confirm(`Revoke ${sa.name}? Its runner disconnects at once.`))
@@ -286,7 +288,7 @@ function RunnerRow({
 	};
 	return (
 		<div className="contents" data-doop-id="runner-row">
-			<span className={cn(CELL, "pl-5 font-medium")}>
+			<span className={cn(CELL, "flex-wrap pl-5 font-medium")}>
 				<i
 					aria-hidden
 					className={cn(
@@ -310,9 +312,30 @@ function RunnerRow({
 						old version
 					</span>
 				)}
+				{!off &&
+					ready.lines.map((l) => (
+						<span
+							key={l.text}
+							data-doop-id="runner-why"
+							className={cn(
+								"basis-full pl-3.5 font-normal text-[11px] leading-[15px]",
+								l.bad ? "text-signal" : "text-muted-foreground",
+							)}
+						>
+							{l.text}
+						</span>
+					))}
 			</span>
-			<span className={cn(CELL, off && "text-signal")}>
-				{r.runner ? (off ? "offline" : "online") : "enrolled"}
+			<span
+				data-doop-id="runner-readiness"
+				className={cn(CELL, ready.bad && "text-signal")}
+				title={
+					r.readiness?.checkedAt
+						? `checked ${ago(r.readiness.checkedAt, now)}`
+						: undefined
+				}
+			>
+				{ready.state}
 			</span>
 			<span className={cn(CELL, "flex-wrap")}>
 				{r.queues.map((q) => (
@@ -522,7 +545,7 @@ export function PeoplePage() {
 			)}
 			<div className="overflow-x-auto px-4 pb-6">
 				<div
-					className="grid min-w-[900px] grid-cols-[minmax(200px,1.2fr)_72px_minmax(140px,1fr)_110px_minmax(140px,1fr)_96px_80px] text-[13px]"
+					className="grid min-w-[900px] grid-cols-[minmax(200px,1.2fr)_96px_minmax(140px,1fr)_110px_minmax(140px,1fr)_96px_80px] text-[13px]"
 					data-doop-id="people-table"
 				>
 					{[

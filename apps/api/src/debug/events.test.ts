@@ -36,6 +36,7 @@ function runner(online: boolean) {
 		lastSeenAt: "t",
 		online,
 		diagnostics: null,
+		statusAt: null,
 	} as never;
 }
 

@@ -37,15 +37,25 @@ import {
 	ROUTING_KEY,
 	type RoutingState,
 } from "../routing/model.ts";
-import { Dispatcher, type DispatcherOptions } from "./dispatcher.ts";
+import {
+	Dispatcher,
+	type DispatcherOptions,
+	type RunnerStatusSeen,
+} from "./dispatcher.ts";
 import { natsOffer, OFFER_TIMEOUT_MS, Presence } from "./offer.ts";
 
 export { CONFIG_BUCKET, ROUTING_KEY };
 
 export type DispatchServiceOptions = Omit<
 	DispatcherOptions,
-	"notify" | "rules" | "resolveEnv" | "offer" | "runnersOf"
+	"notify" | "rules" | "resolveEnv" | "offer" | "runnersOf" | "readiness"
 > & {
+	/**
+	 * Worker readiness gate (mm-210.59): work goes only to runners whose last
+	 * status (mm.u.*.r.*.status) is ready, fresh and lists the environment.
+	 * Default: on, unless the env var MM_READINESS_GATE is `off`.
+	 */
+	readinessGate?: boolean;
 	/** How long a runner has to answer a direct offer. Default 5 s. */
 	offerTimeoutMs?: number;
 	/** Sweep dead leases this often. Default 30 s; 0 turns it off. */
@@ -129,8 +139,12 @@ export async function startDispatch(
 		kvRules = true,
 		kvEnvironments = true,
 		offerTimeoutMs = OFFER_TIMEOUT_MS,
+		readinessGate = process.env.MM_READINESS_GATE !== "off",
 		...rest
 	} = options;
+	// The last status of each runner, for the readiness gate.
+	const statuses = new Map<string, RunnerStatusSeen>();
+	const clock = () => (rest.now?.() ?? new Date()).getTime();
 	// Online runners for account addresses: their status and `next` requests.
 	const presence = new Presence();
 	const onError = rest.onError;
@@ -154,6 +168,12 @@ export async function startDispatch(
 			rest.observe?.(seen);
 		},
 		offer: natsOffer(nc, offerTimeoutMs),
+		...(readinessGate
+			? {
+					readiness: (account: string, runner: string) =>
+						statuses.get(`${account}/${runner}`) ?? null,
+				}
+			: {}),
 		runnersOf: (account) => presence.online(account),
 		...(routing
 			? {
@@ -220,8 +240,13 @@ export async function startDispatch(
 				s?.kind === "runnerStatus" &&
 				typeof d?.runner === "string" &&
 				d.runner
-			)
+			) {
 				presence.seen(s.account, d.runner);
+				statuses.set(`${s.account}/${d.runner}`, {
+					status: d,
+					receivedAt: clock(),
+				});
+			}
 		}),
 		subscribe(nc, patterns.ready, (_notice, msg) => {
 			const s = parseSubject(msg.subject);

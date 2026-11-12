@@ -64,6 +64,19 @@ describe("debug cli", () => {
 					running: [],
 					serviceAccount: "s1",
 					diagnostics: {
+						readiness: {
+							state: "ready",
+							readyEnvironments: ["web"],
+							failedChecks: [
+								{
+									check: "secrets",
+									environment: "api",
+									problem: "missing secrets: GITHUB_TOKEN",
+									fix: "mastermind-runner secrets set GITHUB_TOKEN",
+								},
+							],
+							checkedAt: "2026-11-11T09:58:00Z",
+						},
 						secrets: {
 							needed: ["GITHUB_TOKEN", "X"],
 							missing: ["GITHUB_TOKEN"],
@@ -94,6 +107,10 @@ describe("debug cli", () => {
 		expect(text).toContain("unlimited");
 		expect(text).toContain("missing secrets");
 		expect(text).toContain("GITHUB_TOKEN");
+		expect(text).toContain("ready (web)");
+		expect(text).toContain(
+			"duke/laptop not ready for api: missing secrets: GITHUB_TOKEN (fix: mastermind-runner secrets set GITHUB_TOKEN)",
+		);
 		expect(text).toContain("ERROR: timed out after 5000ms");
 		expect(text).toContain("unrouted (open, no queue): mm-1");
 		expect(text).toContain("main   duke");

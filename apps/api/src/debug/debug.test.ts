@@ -284,6 +284,15 @@ describe("debug item", () => {
 			running: [],
 			lastSeenAt: now.toISOString(),
 			online: true,
+			diagnostics: {
+				readiness: {
+					state: "ready",
+					readyEnvironments: [],
+					failedChecks: [],
+					checkedAt: now.toISOString(),
+				},
+			},
+			statusAt: now.toISOString(),
 			...over,
 		}) as never;
 	const routing = {
@@ -293,6 +302,17 @@ describe("debug item", () => {
 			rules: [{ match: { type: "bug" }, queue: "main" }],
 		},
 	};
+
+	test("a runner that is not ready (readiness gate) is a blocker, with why", () => {
+		const d = decide(
+			bead("x", { type: "bug" }),
+			routing,
+			[runner({ diagnostics: null, statusAt: null })],
+			now,
+		);
+		expect(d.runners[0]?.notReady[0]).toContain("no status");
+		expect(d.blockers[0]).toContain("not ready");
+	});
 
 	test("routed by rule, an online member runner can take it: no blockers", () => {
 		const d = decide(bead("x", { type: "bug" }), routing, [runner()], now);

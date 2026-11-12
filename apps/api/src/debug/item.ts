@@ -3,7 +3,13 @@
  * dispatched (the routing decision and the runners that could take it).
  */
 import type { Bead, BeadComment, BeadEvent } from "@mastermind/core";
-import { columnOf, leaseState, queueOf } from "@mastermind/core";
+import {
+	columnOf,
+	envNameOf,
+	leaseState,
+	notReadyReasons,
+	queueOf,
+} from "@mastermind/core";
 import { matches, type RoutingRule, requirementsOf } from "@mastermind/router";
 import type { RunnerEntry } from "../people/registry.ts";
 import { effectiveRules, type RoutingDoc } from "../routing/model.ts";
@@ -38,6 +44,8 @@ export type RoutingDecision = {
 		member: boolean | null;
 		missing: string[];
 		free: boolean | null;
+		/** Why the readiness gate refuses it this item (mm-210.59); empty: it does not. */
+		notReady: string[];
 	}[];
 	/** Plain reasons the item is not offered now; empty when it should be. */
 	blockers: string[];
@@ -80,7 +88,14 @@ export function decide(
 	const onQueue = queue ? runners.filter((r) => r.queues.includes(queue)) : [];
 	const view = onQueue.map((r) => {
 		const missing = requires.filter((c) => !r.capabilities.includes(c));
+		const notReady = notReadyReasons(
+			r.diagnostics,
+			r.statusAt ? Date.parse(r.statusAt) : null,
+			now.getTime(),
+			envNameOf(bead),
+		);
 		return {
+			notReady,
 			runner: `${r.account}/${r.runner}`,
 			online: r.online,
 			member: open ? null : q ? q.members.includes(r.account) : false,
@@ -96,12 +111,16 @@ export function decide(
 	if (queue && column === "ready") {
 		const able = view.filter(
 			(r) =>
-				r.online && r.member !== false && !r.missing.length && r.free !== false,
+				r.online &&
+				r.member !== false &&
+				!r.missing.length &&
+				r.free !== false &&
+				!r.notReady.length,
 		);
 		if (!onQueue.length) blockers.push(`no runner takes queue ${queue}`);
 		else if (!able.length)
 			blockers.push(
-				`no online runner on ${queue} can take it now (offline, not a member, missing capability or full)`,
+				`no online runner on ${queue} can take it now (offline, not a member, missing capability, full or not ready)`,
 			);
 	}
 	return {

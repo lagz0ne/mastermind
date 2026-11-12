@@ -194,6 +194,42 @@ export function runnerCommand(
 	].join(" && ");
 }
 
+/**
+ * The state cell and the lines under a runner's name (mm-210.59): offline,
+ * enrolled (never connected), or its readiness and the failed checks. A
+ * connected runner that reports no readiness gets no work: say so.
+ */
+export function readinessOf(r: RunnerView): {
+	state: string;
+	/** Not `ready` (or not connected): shown as a problem. */
+	bad: boolean;
+	lines: { text: string; bad: boolean }[];
+} {
+	if (!r.runner) return { state: "enrolled", bad: false, lines: [] };
+	if (!r.online) return { state: "offline", bad: true, lines: [] };
+	const x = r.readiness;
+	if (!x)
+		return {
+			state: "not ready",
+			bad: true,
+			lines: [
+				{
+					text: "it does not report readiness — fix: install it again, then mastermind-runner onboard",
+					bad: true,
+				},
+			],
+		};
+	return {
+		state: x.state,
+		bad: x.state !== "ready",
+		lines: x.failedChecks.map((c) => ({
+			text: `${c.environment ? `${c.environment}: ` : ""}${c.problem}${c.fix ? ` — fix: ${c.fix}` : ""}`,
+			// A failed environment check of a ready runner: only that environment waits.
+			bad: !c.environment || x.state !== "ready",
+		})),
+	};
+}
+
 /** The runner reports a commit other than the server's: reinstall it. */
 export function outdated(r: RunnerView, serverVersion?: string): boolean {
 	return Boolean(r.runner && serverVersion && r.version !== serverVersion);

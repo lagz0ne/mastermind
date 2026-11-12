@@ -4,6 +4,7 @@ import {
 	ago,
 	groupByAccount,
 	outdated,
+	readinessOf,
 	runnerCommand,
 	statsOf,
 } from "./people.ts";
@@ -123,4 +124,60 @@ test("outdated: a connected runner on another commit than the server", () => {
 	expect(outdated(runner("a", "r"), "abc")).toBe(true);
 	expect(outdated(runner("a", null), "abc")).toBe(false);
 	expect(outdated(runner("a", "r", { version: "old" }), undefined)).toBe(false);
+});
+
+describe("readinessOf (mm-210.59)", () => {
+	test("enrolled, offline, no readiness reported", () => {
+		expect(readinessOf(runner("a", null)).state).toBe("enrolled");
+		expect(readinessOf(runner("a", "r", { online: false })).state).toBe(
+			"offline",
+		);
+		const old = readinessOf(runner("a", "r", { online: true }));
+		expect(old.state).toBe("not ready");
+		expect(old.lines[0]?.text).toContain("mastermind-runner onboard");
+	});
+
+	test("ready with one environment waiting; degraded with the reason", () => {
+		const ready = readinessOf(
+			runner("a", "r", {
+				online: true,
+				readiness: {
+					state: "ready",
+					readyEnvironments: ["web"],
+					failedChecks: [
+						{
+							check: "secrets",
+							environment: "api",
+							problem: "missing secrets: API_KEY",
+							fix: "mastermind-runner secrets set API_KEY",
+						},
+					],
+					checkedAt: null,
+				},
+			}),
+		);
+		expect(ready).toEqual({
+			state: "ready",
+			bad: false,
+			lines: [
+				{
+					text: "api: missing secrets: API_KEY — fix: mastermind-runner secrets set API_KEY",
+					bad: false,
+				},
+			],
+		});
+		const degraded = readinessOf(
+			runner("a", "r", {
+				online: true,
+				readiness: {
+					state: "degraded",
+					readyEnvironments: [],
+					failedChecks: [{ check: "engine", problem: "no Docker" }],
+					checkedAt: null,
+				},
+			}),
+		);
+		expect(degraded.bad).toBe(true);
+		expect(degraded.lines).toEqual([{ text: "no Docker", bad: true }]);
+	});
 });

@@ -238,6 +238,7 @@ export function formatState(s: Any): string {
 				"queues",
 				"cap",
 				"running",
+				"readiness",
 				"missing secrets",
 				"service account",
 			],
@@ -249,6 +250,7 @@ export function formatState(s: Any): string {
 				list(r.queues),
 				r.capacity == null ? "-" : String(r.capacity),
 				list(r.running),
+				readinessCell(r.diagnostics?.readiness),
 				// Names only (mm-210.51); "-": the runner does not report secrets.
 				r.diagnostics?.secrets
 					? r.diagnostics.secrets.missing?.length
@@ -259,6 +261,12 @@ export function formatState(s: Any): string {
 			]),
 		),
 	);
+	if (!isErr(s.runners))
+		for (const r of s.runners as Any[])
+			for (const c of r.diagnostics?.readiness?.failedChecks ?? [])
+				out.push(
+					`  ${r.account}/${r.runner} not ready${c.environment ? ` for ${c.environment}` : ""}: ${c.problem}${c.fix ? ` (fix: ${c.fix})` : ""}`,
+				);
 	if (!isErr(s.runners))
 		for (const r of s.runners as Any[])
 			if (r.diagnostics?.lastDoctor)
@@ -398,6 +406,14 @@ function doctorSummary(who: string, r: Any, now: Date): string[] {
 	return out;
 }
 
+/** Worker readiness (mm-210.59) in one cell: state and ready environments. */
+export function readinessCell(r: Any): string {
+	if (!r) return "-";
+	return r.state === "ready"
+		? `ready (${list(r.readyEnvironments)})`
+		: String(r.state).toUpperCase();
+}
+
 /** One item and why it is or is not dispatched, as text for a human. */
 export function formatItem(x: Any): string {
 	const b = x.item ?? {};
@@ -411,13 +427,14 @@ export function formatItem(x: Any): string {
 		"== routing",
 		`  queue ${r.queue ?? "-"} (by ${r.by}${r.ruleIndex != null ? ` rule ${r.ruleIndex}` : ""})  members ${list(r.members)}  requires ${list(r.requires)}`,
 		table(
-			["runner", "online", "member", "missing", "free"],
+			["runner", "online", "member", "missing", "free", "ready"],
 			((r.runners ?? []) as Any[]).map((w) => [
 				w.runner,
 				w.online ? "yes" : "NO",
 				w.member == null ? "open" : w.member ? "yes" : "NO",
 				list(w.missing),
 				w.free == null ? "?" : w.free ? "yes" : "NO",
+				w.notReady?.length ? `NO: ${w.notReady.join("; ")}` : "yes",
 			]),
 		),
 		(r.blockers ?? []).length

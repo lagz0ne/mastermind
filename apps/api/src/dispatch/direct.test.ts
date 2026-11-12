@@ -190,7 +190,7 @@ describe("direct delivery", () => {
 		await s.d.direct("mm-1");
 		expect(s.offers).toHaveLength(1);
 		expect(s.notes("mm-1").at(-1)).toContain(
-			"bob/laptop: backs off after a release",
+			"bob/laptop: back-off after release 1",
 		);
 		// After the back-off it is offered again; then the lease dies.
 		s.advance(61_000);

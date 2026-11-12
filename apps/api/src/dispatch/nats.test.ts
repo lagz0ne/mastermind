@@ -86,6 +86,7 @@ describe.skipIf(!bin)("dispatcher over NATS", () => {
 					now,
 					waitMs: 2_000,
 					sweepMs: 0,
+					readinessGate: false,
 					onError: (e) => errors.push(e),
 				}),
 			);
@@ -418,5 +419,65 @@ describe.skipIf(!bin)("dispatcher over NATS", () => {
 	test("probe is up while connected", async () => {
 		expect(await services[0]?.probe()).toBe("up");
 		expect(errors).toEqual([]);
+	});
+});
+
+describe.skipIf(!bin)("readiness gate over NATS (mm-210.59)", () => {
+	let server: NatsServer;
+	let mm: NatsConnection;
+	let runner: NatsConnection;
+	let service: DispatchService;
+	const work = fakeWork();
+
+	beforeAll(async () => {
+		server = await startNats(bin as string);
+		mm = await connect({ servers: server.url, name: "mm" });
+		runner = await connect({ servers: server.url, name: "runner" });
+		service = await startDispatch(mm, {
+			work,
+			waitMs: 300,
+			sweepMs: 0,
+			kvRules: false,
+			kvEnvironments: false,
+			readinessGate: true,
+		});
+	}, 20_000);
+
+	afterAll(async () => {
+		await service?.stop();
+		await Promise.all([mm, runner].map((nc) => nc?.drain()));
+		server?.stop();
+	});
+
+	test("no status: notReady; a ready status on the status subject: work", async () => {
+		work.add({ id: "mm-r1" }, "build");
+		const before = await request<NextRequest, NextReply>(
+			runner,
+			subjects.next("alice", "build"),
+			next("alice", "laptop"),
+			{ timeout: 5_000 },
+		);
+		expect(before.dispatch).toBeNull();
+		expect(before.notReady?.[0]).toContain("no status");
+		runner.publish(
+			subjects.runnerStatus("alice", "laptop"),
+			JSON.stringify({
+				runner: "laptop",
+				readiness: {
+					state: "ready",
+					readyEnvironments: [],
+					failedChecks: [],
+					checkedAt: new Date().toISOString(),
+				},
+			}),
+		);
+		await runner.flush();
+		const after = await request<NextRequest, NextReply>(
+			runner,
+			subjects.next("alice", "build"),
+			next("alice", "laptop"),
+			{ timeout: 5_000 },
+		);
+		expect(after.dispatch?.bead.id).toBe("mm-r1");
 	});
 });

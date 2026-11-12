@@ -33,6 +33,8 @@ export type RunnerEntry = {
 	online: boolean;
 	/** The last status the runner published about itself; null before one. */
 	diagnostics: RunnerDiagnostics | null;
+	/** When this server got that status (ISO); null before one. */
+	statusAt: string | null;
 };
 
 export type RegistryOptions = {
@@ -52,6 +54,7 @@ type Entry = {
 	running: Set<string>;
 	lastSeen: number;
 	diagnostics: RunnerDiagnostics | null;
+	statusAt: number | null;
 };
 
 /** `<account>/<runner>` → [account, runner]; null for other actors. */
@@ -107,8 +110,10 @@ export class RunnerRegistry {
 			!d.runner
 		)
 			return;
-		const e = this.#entry(account, d.runner, this.#now().getTime());
+		const now = this.#now().getTime();
+		const e = this.#entry(account, d.runner, now);
 		e.diagnostics = d;
+		e.statusAt = now;
 		this.#changed();
 	}
 
@@ -161,6 +166,8 @@ export class RunnerRegistry {
 				lastSeenAt: new Date(e.lastSeen).toISOString(),
 				online: now - e.lastSeen <= this.#onlineMs,
 				diagnostics: e.diagnostics,
+				statusAt:
+					e.statusAt === null ? null : new Date(e.statusAt).toISOString(),
 			});
 		}
 		return out.sort(
@@ -187,6 +194,7 @@ export class RunnerRegistry {
 				running: new Set(),
 				lastSeen: now,
 				diagnostics: null,
+				statusAt: null,
 			};
 			this.#entries.set(key, e);
 		}

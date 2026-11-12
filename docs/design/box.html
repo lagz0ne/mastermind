@@ -199,6 +199,21 @@ th { font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; color:
 	<tr><td>5</td><td>Doctor: a box test (make, check, delete) in <code>doctor --deep</code></td><td><span class="tag wait">after step 2</span></td></tr>
 </table>
 
+<h2 id="six"><span class="n">6</span> Worker readiness (mm-210.59, 2026-11-12)</h2>
+<p>Your rule: a worker gets jobs only after its checks pass. The client owns onboarding; Mastermind checks it again.</p>
+<div class="life" style="grid-template-columns: repeat(4, minmax(0,1fr));">
+	<div class="st"><b>onboarding</b><span><code>onboard</code> has not finished. Connected, reports, takes no work.</span></div>
+	<div class="st"><b>checking</b><span>First checks run after start: Paseo, providers, workdir, box engine, secrets.</span></div>
+	<div class="st box"><b>ready</b><span>Gets work, only for the environments whose own checks pass (every needed secret present).</span></div>
+	<div class="st"><b>degraded</b><span>A re-check failed (engine gone, Paseo down). No work. Ready again when the checks pass.</span></div>
+</div>
+<table>
+	<tr><th>Who</th><th>Enforces</th></tr>
+	<tr><td>Runner</td><td><code>mastermind-runner onboard &lt;token&gt;</code>: local checks (no credential) &rarr; enroll &rarr; missing secrets (hidden prompt) &rarr; <code>doctor --deep</code> &rarr; READY. Stops at the first FAIL with the fix. Then it asks <code>next</code> and accepts offers only in <b>ready</b>, for ready environments only. Re-check on start and every 5 min.</td></tr>
+	<tr><td>Dispatcher</td><td>Gives work only to a runner whose last status is <b>ready</b>, less than 2 min old, and lists the item&rsquo;s environment. Else <code>next</code> answers <code>{notReady: [reasons]}</code>. A runner that lies stops getting work when its status goes stale.</td></tr>
+	<tr><td>/people, debug</td><td>The state and each failed check with its fix. <b>Add runner</b> shows one line: install, then <code>onboard ... --start</code>.</td></tr>
+</table>
+
 </main>
 </body>
 </html>

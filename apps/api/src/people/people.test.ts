@@ -69,6 +69,7 @@ describe("registry", () => {
 				lastSeenAt: "2026-11-10T08:00:00.000Z",
 				online: true,
 				diagnostics: null,
+				statusAt: null,
 			},
 		]);
 		expect(changes).toBe(1);

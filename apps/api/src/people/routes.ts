@@ -70,6 +70,7 @@ export function joinRunners(
 			capacity: e.capacity,
 			running: e.running,
 			version: e.version,
+			readiness: e.diagnostics?.readiness ?? null,
 		});
 	}
 	for (const sa of sas ?? []) {
