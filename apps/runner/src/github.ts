@@ -25,6 +25,12 @@ export const GITHUB_APP_ID = "GITHUB_APP_ID";
 export const GITHUB_APP_PRIVATE_KEY = "GITHUB_APP_PRIVATE_KEY";
 /** Optional: for the install link. */
 export const GITHUB_APP_SLUG = "GITHUB_APP_SLUG";
+/**
+ * App settings that are public (the id and slug are in the App's URL and
+ * page): kept with the secrets, but never redacted from a line (mm-210.87:
+ * 'commits by ***[bot]'). The private key stays secret.
+ */
+export const GITHUB_APP_PUBLIC = [GITHUB_APP_ID, GITHUB_APP_SLUG];
 export const GITHUB_APP_SECRETS = [
 	GITHUB_APP_ID,
 	GITHUB_APP_PRIVATE_KEY,

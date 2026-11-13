@@ -33,6 +33,7 @@ import {
 	type MastermindClient,
 } from "./client.ts";
 import type { RunnerSettings } from "./config.ts";
+import { GITHUB_APP_PUBLIC } from "./github.ts";
 import type { AgentLauncher, AgentResult } from "./launcher.ts";
 import { gateReason } from "./readiness.ts";
 import {
@@ -498,10 +499,12 @@ export class Runner {
 			if (lost(exec)) return;
 			if (!check.ok) {
 				this.#log(`${id}: refused: ${check.reason}`);
-				await this.#safe(d, "release", check.reason, true);
+				await this.#safe(d, "release", check.reason, { startFailed: true });
 				return;
 			}
-			exec.secrets = Object.values(check.env);
+			exec.secrets = Object.entries(check.env)
+				.filter(([k]) => !GITHUB_APP_PUBLIC.includes(k))
+				.map(([, v]) => v);
 			target = this.#targetSlots(decision.target);
 			if (target) {
 				await target.acquire(exec.abort.signal);
@@ -555,16 +558,14 @@ export class Runner {
 					d,
 					"complete",
 					result.summary || "done",
-					false,
+					{},
 					result.output,
 				);
 			else
-				await this.#safe(
-					d,
-					"release",
-					result.summary || "agent failed",
+				await this.#safe(d, "release", result.summary || "agent failed", {
 					startFailed,
-				);
+					...(result.hold ? { hold: true } : {}),
+				});
 		} finally {
 			target?.release();
 			exec.abort.abort();
@@ -623,15 +624,13 @@ export class Runner {
 		d: Dispatch,
 		verb: "report" | "complete" | "release",
 		text: string,
-		startFailed = false,
+		flags: { startFailed?: boolean; hold?: boolean } = {},
 		output?: WorkOutput,
 	): Promise<void> {
 		for (let attempt = 1; attempt <= 3; attempt++) {
 			try {
 				if (verb === "release")
-					await this.#o.client.release(d.bead.id, d.actor, text, {
-						startFailed,
-					});
+					await this.#o.client.release(d.bead.id, d.actor, text, flags);
 				else if (verb === "complete")
 					await this.#o.client.complete(d.bead.id, d.actor, text, output);
 				else await this.#o.client.report(d.bead.id, d.actor, text);

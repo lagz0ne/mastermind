@@ -161,6 +161,7 @@ describe("Runner", () => {
 					"checked out https://x:tok@github.com/o/r at main (abc)",
 				);
 				runner?.progress(spec.beadId, "setup printed s3cr3t-value");
+				runner?.progress(spec.beadId, "commits by mm-app[bot] (app 4242)");
 				runner?.progress("mm-other", "not this bead");
 				runner?.progress(spec.beadId, "box mm-box-1 deleted");
 				return { status: "done", summary: "used s3cr3t-value" };
@@ -173,7 +174,12 @@ describe("Runner", () => {
 			check: async () => ({
 				ok: true,
 				cwd: "/work",
-				env: { TOKEN: "s3cr3t-value" },
+				// The app id and slug are public: not redacted (mm-210.87).
+				env: {
+					TOKEN: "s3cr3t-value",
+					GITHUB_APP_ID: "4242",
+					GITHUB_APP_SLUG: "mm-app",
+				},
 			}),
 			idleMs: 10,
 			heartbeatMs: 20,
@@ -187,6 +193,7 @@ describe("Runner", () => {
 			"box mm-box-1 ready in 1.2 s",
 			"checked out https://***@github.com/o/r at main (abc)",
 			"setup printed ***",
+			"commits by mm-app[bot] (app 4242)",
 			"box mm-box-1 deleted",
 		]);
 		expect(mm.verbs("complete")[0]?.text).toBe("used ***");
