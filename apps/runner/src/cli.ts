@@ -27,7 +27,9 @@
  * --providers a,b, --workdir <dir>, --repo <url>=<dir> (repeat), --id <id>,
  * --provider <p>, --model <m>, --mode <m>, --assistant-provider <p>,
  * --allow-setup, --allow-remote-probe (the operator may run doctor --deep remotely), --paseo-host <host>, --routing <file>,
- * --auto-update (start: update and restart when idle; update.ts).
+ * --no-auto-update | --auto-update | --pin <version> (start, saved: the supervisor
+ * updates the runner when the server is at another version; on by default;
+ * supervisor.ts).
  * start: every task runs in a throwaway box (Docker API: DOCKER_HOST or the default socket;
  * --box-image <ref> or MASTERMIND_BOX_IMAGE for environments without an image);
  * --no-box runs agents on this machine instead, at the owner's risk.
@@ -35,8 +37,8 @@
  * Environment: MASTERMIND_URL, MASTERMIND_NATS_URL, MASTERMIND_RUNNER_CONFIG,
  * MASTERMIND_RUNNER_ROUTING, MASTERMIND_RUNNER_SECRETS.
  */
-import { stat } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { rm, stat } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { publish, subjects } from "@mastermind/bus";
 import {
@@ -157,8 +159,19 @@ import { lookupSecret } from "./secrets/needs.ts";
 import { type SecretsState, secretsState } from "./secrets/state.ts";
 import { SecretStore, secretsPath } from "./secrets/store.ts";
 import {
+	type AutoUpdateMode,
+	autoUpdateLine,
+	drainWorker,
+	type SupervisorState,
+	supervise,
+} from "./supervisor.ts";
+import {
+	cannotUpdate,
+	installStaged,
+	rollbackInstall,
 	selfUpdate,
 	serverVersion,
+	stageUpdate,
 	UpdateError,
 	updateLine,
 	versionWatch,
@@ -171,7 +184,7 @@ import {
 export const VERSION = process.env.MASTERMIND_RUNNER_VERSION || "dev";
 
 /** Exit codes. */
-/** restart: `start --auto-update` updated the binary; the caller starts it again. */
+/** restart: the worker drained for an update; the supervisor starts the new one. */
 /** usage is also: `start` while this runner already runs here (mm-210.79). */
 /** superseded: a newer process of this runner started (here or elsewhere). */
 export const EXIT = {
@@ -200,6 +213,8 @@ const OPTIONS = {
 	"allow-setup": { type: "boolean" },
 	"allow-remote-probe": { type: "boolean" },
 	"auto-update": { type: "boolean" },
+	"no-auto-update": { type: "boolean" },
+	pin: { type: "string" },
 	check: { type: "boolean" },
 	"paseo-host": { type: "string" },
 	"no-box": { type: "boolean" },
@@ -287,8 +302,13 @@ settings: --queue <q>... --capacity <n|unlimited> --capability <c>... --provider
   --workdir <dir> --repo <url>=<dir>... --id <id> --provider <p> --model <m>
   --mode <m> --assistant-provider <p> --allow-setup --allow-remote-probe --paseo-host <host>
   --routing <file> (default: routing.json next to the config)
-  --auto-update (start: when the server is at another version, take no new work,
-    wait until no task runs, update and restart; off by default)
+  start runs a supervisor and one worker process; the supervisor restarts a
+  crashed worker (1 s, 5 s, 30 s, then every 5 min) and updates the runner:
+  when the server is at another version the worker takes no new work, its
+  running tasks finish, then the new version runs (a new version that crashes
+  3 times in 10 min is rolled back). Auto-update is ON by default:
+  --no-auto-update turns it off, --pin <version> updates only to that
+  version, --auto-update turns it on again (saved in the config)
 env: MASTERMIND_URL, MASTERMIND_NATS_URL, MASTERMIND_RUNNER_CONFIG,
   MASTERMIND_RUNNER_ROUTING, MASTERMIND_RUNNER_SECRETS`;
 
@@ -325,7 +345,15 @@ export function applyFlags(
 		s.assistant = { ...s.assistant, provider: f["assistant-provider"] };
 	if (f["allow-setup"]) s.allowSetup = true;
 	if (f["allow-remote-probe"]) s.allowRemoteProbe = true;
-	if (f["auto-update"]) s.autoUpdate = true;
+	if (f["auto-update"]) {
+		s.autoUpdate = true;
+		delete s.pin;
+	}
+	if (f.pin) {
+		s.autoUpdate = true;
+		s.pin = f.pin;
+	}
+	if (f["no-auto-update"]) s.autoUpdate = false;
 	if (s.workdir && !isAbsolute(s.workdir))
 		throw new UsageError("workdir must be absolute");
 	return s;
@@ -495,6 +523,25 @@ async function requireConfig(path: string): Promise<RunnerConfig> {
 	return cfg;
 }
 
+/**
+ * The worker's arguments for `<cmd> ... --start` (onboard): `start` with the
+ * same flags, without the command's positional (an enrol token).
+ */
+export function workerArgv(
+	argv: string[],
+	cmd: string,
+	positional?: string,
+): string[] {
+	const out = [...argv];
+	const i = out.indexOf(cmd);
+	if (i >= 0) out.splice(i, 1);
+	if (positional !== undefined) {
+		const j = out.indexOf(positional);
+		if (j >= 0) out.splice(j, 1);
+	}
+	return ["start", ...out.filter((a) => a !== "--start")];
+}
+
 export async function main(argv: string[], io: Io): Promise<number> {
 	let parsed: ReturnType<
 		typeof parseArgs<{ options: typeof OPTIONS; allowPositionals: true }>
@@ -523,12 +570,18 @@ export async function main(argv: string[], io: Io): Promise<number> {
 	try {
 		switch (cmd) {
 			case "onboard":
-				return await cmdOnboard(path, rest[0], f, io);
+				return await cmdOnboard(
+					path,
+					rest[0],
+					f,
+					io,
+					workerArgv(argv, cmd, rest[0]),
+				);
 			case "enroll":
 			case "enrol":
 				return await cmdEnroll(path, rest[0], f, io);
 			case "start":
-				return await cmdStart(path, f, io);
+				return await cmdStart(path, f, io, argv);
 			case "check":
 				return await cmdCheck(path, f, io);
 			case "route":
@@ -682,6 +735,10 @@ async function cmdStatus(path: string, f: Flags, io: Io): Promise<number> {
 	);
 	const update = (d as { update?: string }).update;
 	if (update) io.out(`warning: ${update}`);
+	io.out(
+		(d as { autoUpdate?: string }).autoUpdate ??
+			`auto-update: ${configModeLine(cfg.runner)}`,
+	);
 	const sec = (d as { secrets?: SecretsState["diagnostics"] }).secrets;
 	if (sec)
 		io.out(
@@ -866,6 +923,7 @@ async function cmdOnboard(
 	token: string | undefined,
 	f: Flags,
 	io: Io,
+	startArgv: string[],
 ): Promise<number> {
 	let cfg = await loadConfig(path).catch(() => null);
 	if (cfg?.state === "revoked") cfg = null;
@@ -1104,7 +1162,7 @@ async function cmdOnboard(
 	if (!ok) return EXIT.error;
 	const other = await runningOther(lockPath(path));
 	if (other) say(stillRunsLine(other, "this onboarding"));
-	if (f.start) return cmdStart(path, f, io);
+	if (f.start) return cmdStart(path, f, io, startArgv);
 	say("start it: mastermind-runner start");
 	return EXIT.ok;
 }
@@ -1290,12 +1348,39 @@ async function cmdRoute(
 	return r.ok ? EXIT.ok : EXIT.error;
 }
 
+/** The supervisor's PID, set in a worker's environment (supervisor.ts). */
+const SUPERVISOR_ENV = "MASTERMIND_RUNNER_SUPERVISOR";
+/** The supervisor's state for the worker (JSON SupervisorState). */
+const AUTO_UPDATE_ENV = "MASTERMIND_RUNNER_AUTO_UPDATE";
+
+/** The auto-update mode of these settings for this executable. */
+export function autoUpdateMode(
+	s: RunnerSettings,
+	version: string,
+	exe: string,
+	url: string,
+): AutoUpdateMode {
+	if (s.autoUpdate === false) return { kind: "off", why: "--no-auto-update" };
+	const cannot = cannotUpdate(version, exe, url);
+	if (cannot) return { kind: "off", why: cannot.split(":")[0] ?? cannot };
+	if (s.pin) return { kind: "pin", version: s.pin };
+	return { kind: "on" };
+}
+
 /**
- * One process per config (lock.ts) with its own session id (mm-210.79): a
- * second start refuses with the PID; Mastermind tells an older process that
- * a newer one replaced it.
+ * `start` is the supervisor (supervisor.ts): one process per config
+ * (lock.ts), it starts one worker and restarts and updates it. The worker
+ * (the same command with MASTERMIND_RUNNER_SUPERVISOR set to its parent)
+ * runs the runner with its own session id (mm-210.79): a second start
+ * refuses with the PID; Mastermind tells an older process that a newer one
+ * replaced it.
  */
-async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
+async function cmdStart(
+	path: string,
+	f: Flags,
+	io: Io,
+	argv: string[],
+): Promise<number> {
 	const cfg = await requireConfig(path);
 	const settings = applyFlags(cfg.runner, f, io.cwd);
 	if (!settings.queues.length) throw new UsageError("no queues (--queue)");
@@ -1303,6 +1388,18 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 		session: crypto.randomUUID(),
 		startedAt: new Date().toISOString(),
 	};
+	const parent = io.env[SUPERVISOR_ENV];
+	if (parent) {
+		// The worker: the supervisor holds the lock.
+		if (Number(parent) !== process.ppid)
+			throw new UsageError(
+				`${SUPERVISOR_ENV}=${parent} is not this process's parent: run mastermind-runner start`,
+			);
+		return await runStart(path, f, io, cfg, settings, session, {
+			supervisor: Number(parent),
+			autoUpdate: workerAutoUpdateLine(io.env[AUTO_UPDATE_ENV]),
+		});
+	}
 	let lock: Awaited<ReturnType<typeof acquireLock>>;
 	try {
 		lock = await acquireLock(lockPath(path), {
@@ -1317,9 +1414,107 @@ async function cmdStart(path: string, f: Flags, io: Io): Promise<number> {
 		return EXIT.usage;
 	}
 	try {
-		return await runStart(path, f, io, cfg, settings, session);
+		// The auto-update choice is kept without --save (mm-210.88).
+		if (
+			(f["auto-update"] || f["no-auto-update"] || f.pin) &&
+			(cfg.runner.autoUpdate !== settings.autoUpdate ||
+				cfg.runner.pin !== settings.pin)
+		) {
+			const runner = { ...cfg.runner, autoUpdate: settings.autoUpdate };
+			if (settings.pin) runner.pin = settings.pin;
+			else delete runner.pin;
+			await saveConfig(path, { ...cfg, runner });
+		}
+		return await superviseStart(io, cfg, settings, argv);
 	} finally {
 		await lock.release().catch(() => {});
+	}
+}
+
+/** The saved auto-update choice, for `status` when no worker said its line. */
+function configModeLine(r: RunnerSettings): string {
+	if (r.autoUpdate === false) return "off (--no-auto-update)";
+	return r.pin ? `pinned to ${r.pin}` : "on";
+}
+
+/** The supervisor's state line for this worker; null: none or unreadable. */
+function workerAutoUpdateLine(v: string | undefined): string | null {
+	if (!v) return null;
+	try {
+		return autoUpdateLine(JSON.parse(v) as SupervisorState);
+	} catch {
+		return null;
+	}
+}
+
+async function superviseStart(
+	io: Io,
+	cfg: RunnerConfig,
+	settings: RunnerSettings,
+	argv: string[],
+): Promise<number> {
+	const url = io.env.MASTERMIND_URL ?? cfg.mastermindUrl;
+	const exe = io.exe ?? process.execPath;
+	// Run from source: bun <cli.ts> <args>; installed: <exe> <args>.
+	const command =
+		basename(exe) === "bun"
+			? [exe, Bun.argv[1] ?? "", ...argv]
+			: [exe, ...argv];
+	const mode = autoUpdateMode(settings, VERSION, exe, url);
+	const stagePath = join(dirname(exe), `.${basename(exe)}.next`);
+	const log = (line: string) => io.err(`${stamp()} ${line}`);
+	const stopping = new AbortController();
+	const onSignal = () => stopping.abort();
+	process.once("SIGINT", onSignal);
+	process.once("SIGTERM", onSignal);
+	// The worker's drain signal must not end the supervisor.
+	const ignore = () => {};
+	process.on("SIGUSR2", ignore);
+	try {
+		return await supervise({
+			version: VERSION,
+			mode,
+			signal: stopping.signal,
+			log,
+			spawn: (state) => {
+				const p = Bun.spawn(command, {
+					env: {
+						...io.env,
+						[SUPERVISOR_ENV]: String(process.pid),
+						[AUTO_UPDATE_ENV]: JSON.stringify(state),
+					},
+					cwd: io.cwd,
+					stdin: "ignore",
+					stdout: "inherit",
+					stderr: "inherit",
+				});
+				return {
+					pid: p.pid,
+					exited: p.exited,
+					kill: (sig) => {
+						try {
+							p.kill(sig);
+						} catch {}
+					},
+				};
+			},
+			serverVersion: () => serverVersion(url, io.fetch),
+			stage: () =>
+				stageUpdate({
+					url,
+					exe,
+					path: stagePath,
+					...(io.fetch ? { fetch: io.fetch } : {}),
+					...(io.runVersion ? { runVersion: io.runVersion } : {}),
+				}),
+			install: () => installStaged({ version: "", path: stagePath }, exe, true),
+			discard: () => rm(stagePath, { force: true }),
+			rollback: () => rollbackInstall(exe),
+		});
+	} finally {
+		process.off("SIGINT", onSignal);
+		process.off("SIGTERM", onSignal);
+		process.off("SIGUSR2", ignore);
 	}
 }
 
@@ -1332,12 +1527,14 @@ async function runStart(
 	cfg: RunnerConfig,
 	settings: RunnerSettings,
 	session: Session,
+	worker: { supervisor: number; autoUpdate: string | null },
 ): Promise<number> {
 	const { routing, source } = await routingFor(path, settings, f, io);
 	if (f.save) await saveConfig(path, { ...cfg, runner: settings });
 	const natsUrl = io.env.MASTERMIND_NATS_URL ?? cfg.natsUrl;
 	const diag = new Diagnostics(settings, VERSION);
 	diag.session = session;
+	diag.autoUpdate = worker.autoUpdate;
 	const log = (line: string) => {
 		io.err(`${stamp()} ${line}`);
 		diag.log(line);
@@ -1385,7 +1582,7 @@ async function runStart(
 	// Readiness: the runner asks for work only when it is ready (readiness.ts).
 	let secrets: SecretsState | undefined;
 	let access: AccessMap | undefined;
-	/** Set while --auto-update drains before it restarts (update.ts). */
+	/** Set while the worker drains for an update (supervisor.ts). */
 	let updating: string | null = null;
 	let restart = false;
 	/** Mastermind's `superseded` line: a newer process of this runner runs. */
@@ -1505,6 +1702,36 @@ async function runStart(
 	});
 	process.once("SIGINT", onSignal);
 	process.once("SIGTERM", onSignal);
+	// The supervisor has a new version (SIGUSR2): take no new work, let the
+	// running tasks finish (heartbeats go on), then end with EXIT.restart.
+	let draining = false;
+	const onDrain = () => {
+		if (draining || stopping.signal.aborted) return;
+		draining = true;
+		void drainWorker({
+			running: () => runner?.inFlight().length ?? 0,
+			hold: () => {
+				updating =
+					"updating: no new work until the running tasks finish (supervisor)";
+				reevaluate();
+			},
+			done: () => {
+				restart = true;
+				stopping.abort();
+			},
+			log,
+			signal: stopping.signal,
+		});
+	};
+	process.on("SIGUSR2", onDrain);
+	// The supervisor is gone (killed): this worker stops too, so a new start
+	// never meets a second worker.
+	const parentWatch = setInterval(() => {
+		if (process.ppid !== worker.supervisor) {
+			log("supervisor gone: this worker stops");
+			stopping.abort();
+		}
+	}, 5_000);
 	let finalState: "stopping" | "revoked" = "stopping";
 	try {
 		let nc: Awaited<ReturnType<typeof connectRunner>>;
@@ -1673,12 +1900,12 @@ async function runStart(
 			}
 			reevaluate();
 		};
-		// The server's version: at start and every re-check; with
-		// --auto-update, update and restart when no task runs (mm-210.77).
+		// The server's version: at start and every re-check, for the notice;
+		// the supervisor updates (supervisor.ts, mm-210.88).
 		const watch = versionWatch({
 			version: VERSION,
 			serverVersion: () => serverVersion(mastermindUrl, io.fetch),
-			autoUpdate: settings.autoUpdate === true,
+			autoUpdate: false,
 			idle: () => (runner?.inFlight().length ?? 0) === 0,
 			waitIdle: async (signal) => {
 				while (!signal?.aborted && (runner?.inFlight().length ?? 0) > 0)
@@ -1756,6 +1983,8 @@ async function runStart(
 		await reporter.stop();
 		process.off("SIGINT", onSignal);
 		process.off("SIGTERM", onSignal);
+		process.off("SIGUSR2", onDrain);
+		clearInterval(parentWatch);
 	}
 }
 
@@ -1766,15 +1995,5 @@ if (import.meta.main) {
 		err: (l) => console.error(l),
 		cwd: process.cwd(),
 	});
-	if (code === EXIT.restart) {
-		// --auto-update replaced this executable: run it in this process.
-		const exe = process.execPath;
-		console.error(`${stamp()} restarting: ${exe}`);
-		if (!process.execve) {
-			console.error("cannot restart here: start mastermind-runner again");
-			process.exit(EXIT.ok);
-		}
-		process.execve(exe, [exe, ...Bun.argv.slice(2)], process.env);
-	}
 	process.exit(code);
 }

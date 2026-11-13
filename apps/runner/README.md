@@ -40,7 +40,7 @@ The same line is in `mastermind-runner status`, `doctor` (step a, a warning), on
 
 ```bash
 mastermind-runner update --check   # only report
-mastermind-runner update           # replace this executable, then restart the runner
+mastermind-runner update           # replace this executable now (auto-update does it by itself)
 ```
 
 `update` uses the same files as `install.sh`: `<url>/download/mastermind-runner?os=&arch=` and
@@ -49,13 +49,35 @@ its `.sha256`. It writes the new binary next to the executable, checks the sha25
 binary). On any failure nothing is replaced. A runner run from source (`dev`) is not updated.
 Prior art: `bun upgrade`, `rustup self update`.
 
-**`start --auto-update`** (or `--auto-update --save`): when the server is at another version,
-the runner takes no new work (readiness `degraded`, check `update`), waits until no task runs,
-updates, and starts the new binary in the same process (same arguments). If the update fails,
-it keeps running and takes work again. This is how the GitHub Actions self-hosted runner
-updates. **It is off by default** because the runner runs on the user's own machine: a new
-binary should come in only when the owner allows it, and an update stops taking work for a
-while. Turn it on for a machine that only runs the runner.
+## Supervisor and worker; auto-update (on by default)
+
+`start` runs two processes (mm-210.88), as the GitHub Actions self-hosted runner does
+(Runner.Listener stays and updates itself by default; Runner.Worker runs the job):
+
+| Process | Does |
+|---|---|
+| supervisor (`start`) | holds `runner.pid`, starts ONE worker, restarts it, updates it |
+| worker (same command, `MASTERMIND_RUNNER_SUPERVISOR=<supervisor PID>`) | the runner: NATS, work, boxes, status |
+
+- **Update.** Every 5 minutes the supervisor reads `<url>/api/health`. Another version: it
+  downloads the runner next to the executable (`.mastermind-runner.next`, sha256 and
+  `--version` checked), then sends the worker SIGUSR2. The worker takes no new work (readiness
+  `degraded`, check `update`), lets its running tasks finish (heartbeats go on; no task is
+  stopped, however long it runs) and exits 75. Then the new binary is renamed over the old one
+  (the old one is kept as `.mastermind-runner.previous`) and a new worker starts with a new
+  session. Never two workers at once. A failed download: the worker keeps running.
+- **Rollback.** The new version's worker crashes 3 times within 10 minutes: the kept binary
+  comes back, the log says `update to <v> rolled back to <old>: <why>`, and that version is not
+  tried again (until the server moves on).
+- **Crash restart.** A worker exit other than 0, 2, 3 (revoked), 4 (superseded): start again
+  after 1 s, 5 s, 30 s, then every 5 minutes (a worker that ran 10 minutes resets it). Exit 0,
+  2, 3 and 4 end the supervisor with the same code.
+- **Stop.** SIGTERM or SIGINT to the supervisor (`mastermind-runner stop`, Ctrl-C) goes to the
+  worker: it gives its work back, then both end. A worker whose supervisor is gone stops too.
+- **Mode.** On by default. `start --no-auto-update` turns it off, `--pin <version>` updates only
+  to that version, `--auto-update` turns it on again; the choice is saved in `runner.json`. A
+  runner run from source (`dev`) or under `bun` does not update. `status` and `debug state`
+  show the line: `auto-update on, last update 49060db -> 9661a46 at <time>`.
 
 ## One process per runner
 

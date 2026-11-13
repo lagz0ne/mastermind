@@ -47,10 +47,13 @@ export type RunnerSettings = {
 	 */
 	allowRemoteProbe?: boolean;
 	/**
-	 * `start`: when the server is at another version, take no new work, wait
-	 * until no task runs, update and restart (update.ts). Off by default.
+	 * `start` (the supervisor, supervisor.ts): when the server is at another
+	 * version, the worker takes no new work, its running tasks finish, then the
+	 * new binary runs. ON unless false (`--no-auto-update`, mm-210.88).
 	 */
 	autoUpdate?: boolean;
+	/** Auto-update only to this version (`--pin <version>`); held otherwise. */
+	pin?: string;
 };
 
 export type RunnerConfig = {

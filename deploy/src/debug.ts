@@ -272,6 +272,9 @@ export function formatState(s: Any): string {
 			// The runner's own wording (mm-210.77).
 			const notice = runnerVersionNotice(r.version, s.version);
 			if (notice) out.push(`  ${r.account}/${r.runner}: ${notice}`);
+			// The supervisor's auto-update mode and last update (mm-210.88).
+			if (r.diagnostics?.autoUpdate)
+				out.push(`  ${r.account}/${r.runner}: ${r.diagnostics.autoUpdate}`);
 			// Two processes of one runner (mm-210.79).
 			if (r.duplicateSession)
 				out.push(`  ${r.account}/${r.runner}: ${r.duplicateSession}`);

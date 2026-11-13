@@ -146,8 +146,10 @@ mastermind-runner doctor --deep    # test the whole path again
 
 After Mastermind is deployed again, the runner says
 `runner <old> is older than the server <new>: run mastermind-runner update` (within 5 minutes).
-Run `mastermind-runner update`, then start the runner again. With `start --auto-update` the
-runner does this by itself when no task runs (off by default: your machine, your choice).
+The runner updates itself (auto-update is on by default): it takes no new work, its running
+tasks finish, then the new version runs. A new version that crashes 3 times in 10 minutes is
+rolled back. To choose yourself: `mastermind-runner start --no-auto-update` (saved), then
+`mastermind-runner update` and start again; `--pin <version>` holds one version.
 
 ## When something fails
 
