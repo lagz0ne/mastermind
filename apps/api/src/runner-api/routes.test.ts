@@ -24,6 +24,9 @@ const doc = {
 		env({ name: "docs" }),
 		env({ name: "scratch", repo: "" }),
 		env({ name: "strong", runtime: "gvisor" }),
+		env({ name: "pushes", output: { kind: "pr", base: "main" } }),
+		env({ name: "keeps", output: { kind: "none" } }),
+		env({ name: "norepo", repo: "", output: { kind: "branch" } }),
 	],
 };
 
@@ -76,6 +79,21 @@ describe("GET /api/runner/environments", () => {
 					repo: "https://github.com/x/web.git",
 					ref: "main",
 				},
+				// Output pr or branch with a repo: the runner needs a git credential.
+				{
+					name: "pushes",
+					secrets: [],
+					repo: "https://github.com/x/web.git",
+					ref: "main",
+					output: "pr",
+				},
+				{
+					name: "keeps",
+					secrets: [],
+					repo: "https://github.com/x/web.git",
+					ref: "main",
+				},
+				{ name: "norepo", secrets: [] },
 			],
 		});
 		expect(JSON.stringify(body)).not.toContain("bun install");

@@ -15,8 +15,9 @@ import type { SecretSource } from "./store.ts";
 
 /**
  * One environment as the runner sees it: its name and secret names, the box
- * runtime it asks for (`gvisor`; readiness checks the engine has it), and its
- * repo and ref (readiness checks git access: access.ts).
+ * runtime it asks for (`gvisor`; readiness checks the engine has it), its
+ * repo and ref (readiness checks git access: access.ts), and its output when
+ * it pushes (readiness needs a git credential: mm-210.87).
  */
 export type EnvSecrets = {
 	name: string;
@@ -24,6 +25,7 @@ export type EnvSecrets = {
 	runtime?: string;
 	repo?: string;
 	ref?: string;
+	output?: "pr" | "branch";
 };
 
 /** The environments' secret names, as fetched (and cached) at `at`. */
@@ -57,6 +59,9 @@ function parseEnvironments(v: unknown): EnvSecrets[] {
 				: {}),
 			...(typeof e.repo === "string" && e.repo
 				? { repo: e.repo, ref: typeof e.ref === "string" ? e.ref : "" }
+				: {}),
+			...(e.output === "pr" || e.output === "branch"
+				? { output: e.output }
 				: {}),
 		}));
 }

@@ -3,6 +3,7 @@ import {
 	type AccessInput,
 	accessStep,
 	checkEnvironmentsAccess,
+	NO_GIT_CREDENTIAL_FIX,
 } from "../src/access.ts";
 import type { AccessResult } from "../src/box/devcontainer.ts";
 import { fetchNeeds } from "../src/secrets/needs.ts";
@@ -193,6 +194,60 @@ describe("checkEnvironmentsAccess", () => {
 		]);
 		expect(out.scratch?.ok).toBe(true);
 	});
+	test("output pr or branch without any git credential: not ready, no ls-remote; with one it is checked (mm-210.87)", async () => {
+		const scratch = {
+			name: "scratch",
+			secrets: ["CLAUDE_CODE_OAUTH_TOKEN"],
+			repo: "https://github.com/acme/scratch",
+			ref: "main",
+			output: "pr" as const,
+		};
+		const reads = {
+			name: "reads",
+			secrets: [],
+			repo: "https://github.com/acme/public",
+			ref: "main",
+		};
+		const checked: string[] = [];
+		const run = (store: Record<string, string>) =>
+			checkEnvironmentsAccess(
+				input({
+					needs: { at: needs.at, environments: [scratch, reads] },
+					store,
+					mint: async (s) => s,
+					check: async (repo) => {
+						checked.push(repo);
+						return { ok: true };
+					},
+				}),
+			);
+		const none = await run({ CLAUDE_CODE_OAUTH_TOKEN: "oauth" });
+		expect(none.scratch).toEqual({
+			ok: false,
+			repo: scratch.repo,
+			ref: "main",
+			problem:
+				"output pr pushes a branch to https://github.com/acme/scratch: this runner has no git credential (GitHub App, GIT_TOKEN, GITHUB_TOKEN, GH_TOKEN or GIT_SSH_KEY)",
+			fix: NO_GIT_CREDENTIAL_FIX,
+		});
+		// Output none (no output field): a public repo needs no credential.
+		expect(none.reads?.ok).toBe(true);
+		expect(checked).toEqual([reads.repo]);
+		for (const store of <Record<string, string>[]>[
+			{ GITHUB_APP_ID: "1", GITHUB_APP_PRIVATE_KEY: "pem" },
+			{ GH_TOKEN: "t" },
+			{ GIT_SSH_KEY: "k" },
+		]) {
+			const out = await run({ CLAUDE_CODE_OAUTH_TOKEN: "oauth", ...store });
+			expect(out.scratch?.ok).toBe(true);
+		}
+		// The app id alone is no credential.
+		const half = await run({
+			CLAUDE_CODE_OAUTH_TOKEN: "o",
+			GITHUB_APP_ID: "1",
+		});
+		expect(half.scratch?.ok).toBe(false);
+	});
 	test("unknown environments: nothing to check", async () => {
 		expect(await checkEnvironmentsAccess(input({ needs: null }))).toEqual({});
 	});
@@ -227,6 +282,8 @@ test("fetchNeeds keeps repo and ref of an environment that has a repo", async ()
 		environments: [
 			{ name: "web", secrets: [], repo: "https://g/x/web", ref: "main" },
 			{ name: "plain", secrets: [] },
+			{ name: "pr", secrets: [], repo: "https://g/x/pr", output: "pr" },
+			{ name: "odd", secrets: [], output: "tarball" },
 		],
 	};
 	const n = await fetchNeeds("https://mm", "c", {
@@ -235,5 +292,7 @@ test("fetchNeeds keeps repo and ref of an environment that has a repo", async ()
 	expect(n.environments).toEqual([
 		{ name: "web", secrets: [], repo: "https://g/x/web", ref: "main" },
 		{ name: "plain", secrets: [] },
+		{ name: "pr", secrets: [], repo: "https://g/x/pr", ref: "", output: "pr" },
+		{ name: "odd", secrets: [] },
 	]);
 });

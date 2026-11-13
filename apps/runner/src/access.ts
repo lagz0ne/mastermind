@@ -10,7 +10,13 @@
  * this process; the reasons are redacted by checkAccess.
  */
 import { type AccessResult, checkAccess } from "./box/devcontainer.ts";
-import { appToken, GIT_CREDENTIAL_SECRETS } from "./box/output.ts";
+import {
+	appToken,
+	GIT_CREDENTIAL_SECRETS,
+	GIT_SSH_KEY_SECRET,
+	gitTokenName,
+} from "./box/output.ts";
+import { GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY } from "./github.ts";
 import { fail, pass, type StepResult } from "./onboard.ts";
 import type { Routing } from "./routing.ts";
 import type { Needs } from "./secrets/needs.ts";
@@ -73,6 +79,19 @@ export function candidateEnvironments(
 	return known.filter((n) => bound.includes(n));
 }
 
+/** A git credential to push with: a GitHub App, a token or a deploy key. */
+export function hasGitCredential(secrets: Record<string, string>): boolean {
+	return (
+		!!gitTokenName(secrets) ||
+		!!secrets[GIT_SSH_KEY_SECRET] ||
+		!!(secrets[GITHUB_APP_ID] && secrets[GITHUB_APP_PRIVATE_KEY])
+	);
+}
+
+/** The fix when an environment pushes and this runner has no git credential. */
+export const NO_GIT_CREDENTIAL_FIX =
+	"mastermind-runner onboard (it makes a GitHub App; install it on the repo), or mastermind-runner secrets set GIT_TOKEN";
+
 /** The one line that fixes a failed access check. */
 export function accessFix(
 	r: Extract<AccessResult, { ok: false }>,
@@ -94,7 +113,8 @@ export function accessFix(
 /**
  * Check git access of every environment this runner may be offered that has
  * a repo and all its secrets (missing secrets are the secrets check's
- * problem). The checks run in parallel.
+ * problem). The checks run in parallel. An environment whose output pushes
+ * (pr, branch) also needs a git credential on this runner (mm-210.87).
  */
 export async function checkEnvironmentsAccess(
 	i: AccessInput,
@@ -122,6 +142,18 @@ export async function checkEnvironmentsAccess(
 					GIT_CREDENTIAL_SECRETS,
 				);
 				if (missing.length) return;
+				// Output pr or branch pushes mm/<item>: a public repo reads
+				// without a credential, the push does not (mm-210.87).
+				if (e.output && !hasGitCredential(values)) {
+					out[e.name] = {
+						ok: false,
+						repo,
+						ref,
+						problem: `output ${e.output} pushes a branch to ${repo}: this runner has no git credential (GitHub App, GIT_TOKEN, GITHUB_TOKEN, GH_TOKEN or GIT_SSH_KEY)`,
+						fix: NO_GIT_CREDENTIAL_FIX,
+					};
+					return;
+				}
 				let r: AccessResult;
 				const ms = i.timeoutMs ?? ACCESS_TIMEOUT_MS;
 				const signal = AbortSignal.timeout(ms);

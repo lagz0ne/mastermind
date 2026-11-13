@@ -2,7 +2,7 @@
  * Routes for runner adapters, with the service account credential
  * (`Authorization: Bearer <credential>`), not a browser session.
  *
- *   GET /api/runner/environments -> {environments: [{name, secrets, runtime?, repo?, ref?}]}
+ *   GET /api/runner/environments -> {environments: [{name, secrets, runtime?, repo?, ref?, output?}]}
  *       401 when the credential is invalid or revoked
  *       503 while auth or the environments store is not ready
  *
@@ -33,7 +33,8 @@ const json = (body: unknown, status = 200) =>
 /**
  * Name and secret names of each environment, its box runtime when it asks
  * for one (readiness: an engine without it is not ready for it), and its repo
- * and ref when it has a repo (readiness: git access check).
+ * and ref when it has a repo (readiness: git access check), and its output
+ * when it pushes (pr, branch: readiness needs a git credential, mm-210.87).
  */
 export function environmentSecrets(environments: Environment[]): {
 	name: string;
@@ -41,12 +42,16 @@ export function environmentSecrets(environments: Environment[]): {
 	runtime?: BoxRuntime;
 	repo?: string;
 	ref?: string;
+	output?: "pr" | "branch";
 }[] {
 	return environments.map((e) => ({
 		name: e.name,
 		secrets: [...new Set(e.secrets ?? [])],
 		...(e.runtime ? { runtime: e.runtime } : {}),
 		...(e.repo ? { repo: e.repo, ref: e.ref ?? "" } : {}),
+		...(e.repo && (e.output?.kind === "pr" || e.output?.kind === "branch")
+			? { output: e.output.kind }
+			: {}),
 	}));
 }
 
