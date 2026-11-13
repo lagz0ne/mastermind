@@ -31,6 +31,8 @@ import {
 } from "./devcontainer.ts";
 import type { ExecResult } from "./driver.ts";
 import {
+	identityEnv,
+	MASTERMIND_IDENTITY,
 	OutputError,
 	type OutputInput,
 	type OutputResult,
@@ -333,6 +335,7 @@ export class CodeStore {
 			| "title"
 			| "output"
 			| "secrets"
+			| "author"
 			| "fetch"
 			| "githubApi"
 			| "signal"
@@ -349,12 +352,7 @@ export class CodeStore {
 			};
 		const branch = outputBranch(i.itemId);
 		const signal = i.signal;
-		const author = {
-			GIT_AUTHOR_NAME: "Mastermind",
-			GIT_AUTHOR_EMAIL: "mastermind@users.noreply.github.com",
-			GIT_COMMITTER_NAME: "Mastermind",
-			GIT_COMMITTER_EMAIL: "mastermind@users.noreply.github.com",
-		};
+		const author = identityEnv(i.author ?? MASTERMIND_IDENTITY);
 		const commit = (
 			await this.#git(
 				"commit-tree",

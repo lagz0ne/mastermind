@@ -330,6 +330,58 @@ export async function checkApp(
 	return { slug: String(((await res.json()) as { slug?: string }).slug ?? "") };
 }
 
+/** Who a commit is by: `user.name` and `user.email`. */
+export type GitIdentity = { name: string; email: string };
+
+const botIds = new Map<string, GitIdentity>();
+
+/**
+ * The commit identity of the App's bot user (mm-210.87), as GitHub Actions
+ * commits as `github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>`:
+ * `<slug>[bot] <id+<slug>[bot]@users.noreply.github.com>`. The id links the
+ * commit to the bot on GitHub. Slug: `slug` (GITHUB_APP_SLUG), else GET /app.
+ * The id: GET /users/<slug>[bot] (with `token`), kept per slug; without it the
+ * email has no id. Null: the slug is unknown (the caller keeps its identity).
+ */
+export async function appBotIdentity(o: {
+	appId: string | number;
+	pem: string;
+	slug?: string;
+	token?: string;
+	fetch?: Fetch;
+}): Promise<GitIdentity | null> {
+	const f = o.fetch ?? fetch;
+	let slug = o.slug;
+	if (!slug)
+		try {
+			slug = (await checkApp(o.appId, o.pem, f)).slug;
+		} catch {
+			return null;
+		}
+	if (!slug) return null;
+	const login = `${slug}[bot]`;
+	const known = botIds.get(login);
+	if (known) return known;
+	try {
+		const res = await f(`${API}/users/${encodeURIComponent(login)}`, {
+			headers: {
+				...ghHeaders(),
+				...(o.token ? { authorization: `Bearer ${o.token}` } : {}),
+			},
+		});
+		const id = res.ok ? ((await res.json()) as { id?: unknown }).id : null;
+		if (typeof id === "number") {
+			const who = {
+				name: login,
+				email: `${id}+${login}@users.noreply.github.com`,
+			};
+			botIds.set(login, who);
+			return who;
+		}
+	} catch {}
+	return { name: login, email: `${login}@users.noreply.github.com` };
+}
+
 /** GET /app/installations with the JWT: where the app is installed (account logins). */
 export async function appInstallations(
 	appId: string | number,

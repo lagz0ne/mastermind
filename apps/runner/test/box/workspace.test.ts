@@ -350,20 +350,41 @@ describe("CodeStore push to a private git host (mm-210.87)", () => {
 			});
 			writeFileSync(join(copy.dir, "README"), "hello agent\n");
 			const snap = await store.snapshot(copy);
-			const deliver = (secrets: Record<string, string>) =>
+			await expect(
 				store.deliver(copy, snap, {
 					itemId: "mm-87",
 					title: "mm-87: push",
 					output: { kind: "branch" },
-					secrets,
-				});
-			await expect(deliver({})).rejects.toThrow(/could not read Username/);
-			const out = await deliver({ GIT_TOKEN: token });
+					secrets: {},
+				}),
+			).rejects.toThrow(/could not read Username/);
+			const out = await store.deliver(copy, snap, {
+				itemId: "mm-87",
+				title: "mm-87: push",
+				output: { kind: "branch" },
+				secrets: { GIT_TOKEN: token },
+				author: {
+					name: "mm-a[bot]",
+					email: "1+mm-a[bot]@users.noreply.github.com",
+				},
+			});
 			expect(out?.line).toBe("pushed branch mm/mm-87 (1 commit, 1 file)");
 			const tip = git(root, "--git-dir", host.bare, "rev-parse", "mm/mm-87");
 			expect(git(root, "--git-dir", host.bare, "show", `${tip}:README`)).toBe(
 				"hello agent",
 			);
+			// By the App's bot (mm-210.87 b), author and committer.
+			expect(
+				git(
+					root,
+					"--git-dir",
+					host.bare,
+					"log",
+					"-1",
+					"--format=%an <%ae> %cn",
+					tip,
+				),
+			).toBe("mm-a[bot] <1+mm-a[bot]@users.noreply.github.com> mm-a[bot]");
 			expect(host.auths).toContain(`Basic ${btoa(`x-access-token:${token}`)}`);
 			await store.remove(copy);
 		} finally {

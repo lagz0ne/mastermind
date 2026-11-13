@@ -36,6 +36,13 @@ import {
 } from "@mastermind/core";
 import type { AgentSettings } from "../config.ts";
 import {
+	appBotIdentity,
+	GITHUB_APP_ID,
+	GITHUB_APP_PRIVATE_KEY,
+	GITHUB_APP_SLUG,
+	type GitIdentity,
+} from "../github.ts";
+import {
 	type AgentResult,
 	LaunchError,
 	parseResult,
@@ -60,6 +67,8 @@ import {
 	CLONE_CRED_DIR,
 	cloneCredential,
 	deliverOutput,
+	identityEnv,
+	MASTERMIND_IDENTITY,
 	type OutputResult,
 	redact,
 	splitGitSecrets,
@@ -199,6 +208,9 @@ export class BoxStepError extends LaunchError {
 export const BOX_ENV: Record<string, string> = {
 	...QUIET_PASEO_ENV,
 	PASEO_LISTEN: "127.0.0.1:6767",
+	// Commits in the box are never by a person (mm-210.87); a GitHub App
+	// runner sets its bot instead.
+	...identityEnv(MASTERMIND_IDENTITY),
 };
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -312,6 +324,23 @@ export async function runInBox(
 			step(
 				`GitHub App token for ${app.repo} (contents, pull requests write) until ${new Date(app.expiresAt).toISOString().slice(11, 16)} UTC`,
 			);
+		// Commits as the App's bot, never as a person (mm-210.87).
+		const author: GitIdentity | null = app
+			? await appBotIdentity({
+					appId: task.secrets[GITHUB_APP_ID] ?? "",
+					pem: task.secrets[GITHUB_APP_PRIVATE_KEY] ?? "",
+					...(task.secrets[GITHUB_APP_SLUG]
+						? { slug: task.secrets[GITHUB_APP_SLUG] }
+						: {}),
+					...(app.secrets.GIT_TOKEN ? { token: app.secrets.GIT_TOKEN } : {}),
+					fetch: ((u: string, init: RequestInit = {}) =>
+						(opts.fetch ?? fetch)(u, {
+							...init,
+							signal: AbortSignal.any([all, AbortSignal.timeout(30_000)]),
+						})) as typeof fetch,
+				})
+			: null;
+		if (author) step(`commits by ${author.name} <${author.email}>`);
 		let prep: PreparedBox | null = null;
 		if (opts.prepare)
 			try {
@@ -389,7 +418,13 @@ export async function runInBox(
 			},
 			network: phases ? { allow: phases.setup } : (env.network ?? "open"),
 			...(runtime ? { runtime } : {}),
-			env: { ...BOX_ENV, ...prep?.env, ...opts.boxEnv, ...secretEnv },
+			env: {
+				...BOX_ENV,
+				...(author ? identityEnv(author) : {}),
+				...prep?.env,
+				...opts.boxEnv,
+				...secretEnv,
+			},
 			...(opts.cmd ? { cmd: opts.cmd } : {}),
 			...(model ? { model } : {}),
 			...(copy ? { mounts: [{ source: copy.dir, target: WORKSPACE }] } : {}),
@@ -710,6 +745,7 @@ export async function runInBox(
 								title: task.title,
 								output: env.output,
 								secrets: gitSecrets,
+								...(author ? { author } : {}),
 								...(opts.fetch ? { fetch: opts.fetch } : {}),
 								...(opts.githubApi ? { githubApi: opts.githubApi } : {}),
 							})
@@ -729,6 +765,7 @@ export async function runInBox(
 								ref: env.ref,
 								baseSha: base,
 								secrets: gitSecrets,
+								...(author ? { author } : {}),
 								...(opts.fetch ? { fetch: opts.fetch } : {}),
 								...(opts.githubApi ? { githubApi: opts.githubApi } : {}),
 							});

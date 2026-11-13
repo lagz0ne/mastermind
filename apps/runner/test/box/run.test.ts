@@ -6,7 +6,7 @@ import { join } from "node:path";
 import type { EnvironmentNetwork } from "@mastermind/core";
 import type { HostRun } from "../../src/box/devcontainer.ts";
 import { BOX_LABEL, type ExecResult } from "../../src/box/driver.ts";
-import { CLONE_CRED_DIR } from "../../src/box/output.ts";
+import { CLONE_CRED_DIR, identityEnv } from "../../src/box/output.ts";
 import {
 	BOX_ENV,
 	BoxStepError,
@@ -578,6 +578,8 @@ describe("runInBox: GitHub App token per task (mm-210.69)", () => {
 				return o.installed === false
 					? Response.json({ message: "Not Found" }, { status: 404 })
 					: Response.json({ id: 77 });
+			if (url.endsWith("/users/mm-runner%5Bbot%5D"))
+				return Response.json({ login: "mm-runner[bot]", id: 999 });
 			if (url.endsWith("/app/installations/77/access_tokens"))
 				return Response.json(
 					{
@@ -615,6 +617,12 @@ describe("runInBox: GitHub App token per task (mm-210.69)", () => {
 
 	test("one token for the one repo; access check, clone, push and PR API use it; the app key never reaches the box or a log", async () => {
 		const d = prDriver();
+		const rest = d.handler;
+		// The agent left a change uncommitted: the runner commits it in the box.
+		d.handler = (cmd, o) =>
+			cmd.join(" ") === "git diff --cached --quiet"
+				? { code: 1, stdout: "", stderr: "" }
+				: rest?.(cmd, o);
 		const gh = fakeGitHub();
 		const host = fakeHost();
 		const steps: string[] = [];
@@ -656,8 +664,21 @@ describe("runInBox: GitHub App token per task (mm-210.69)", () => {
 		const pr = gh.calls.filter((c) => c.url.includes("/pulls"));
 		expect(pr.map((c) => c.auth)).toEqual(["Bearer ghs_1", "Bearer ghs_1"]);
 		expect(res.output?.prUrl).toBe("https://github.com/acme/web/pull/3");
+		// commits by the App's bot, never by a person (mm-210.87): the box's
+		// git identity and the commit of what the agent left
+		const bot = {
+			name: "mm-runner[bot]",
+			email: "999+mm-runner[bot]@users.noreply.github.com",
+		};
+		expect(gh.calls.find((c) => c.url.includes("/users/"))?.auth).toBe(
+			"Bearer ghs_1",
+		);
+		const commit = d.execs.find((e) => e.cmd.includes("commit"));
+		expect(commit?.cmd).toContain(`user.name=${bot.name}`);
+		expect(commit?.cmd).toContain(`user.email=${bot.email}`);
+		expect(steps).toContain(`commits by ${bot.name} <${bot.email}>`);
 		// never in the box (env, files, argv) nor in a log or ticket line
-		expect(d.created[0]?.env).toEqual(BOX_ENV);
+		expect(d.created[0]?.env).toEqual({ ...BOX_ENV, ...identityEnv(bot) });
 		expect(d.copiedIn[0]?.names).toEqual(["deploy.key"]);
 		const everything = JSON.stringify([
 			d.created,

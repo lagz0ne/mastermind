@@ -7,6 +7,7 @@ import { describe, expect, test } from "bun:test";
 import { createVerify, generateKeyPairSync } from "node:crypto";
 import {
 	APP_PERMISSIONS,
+	appBotIdentity,
 	appJwt,
 	appManifest,
 	exchangeCode,
@@ -180,5 +181,52 @@ describe("installation token", () => {
 				fetch: gh.f,
 			}),
 		).rejects.toThrow(/not installed on acme\/web/);
+	});
+});
+
+describe("appBotIdentity (mm-210.87)", () => {
+	test("the bot user with its id, as github-actions[bot]; kept per slug", async () => {
+		const gh = fakeGitHub({
+			"GET /users/mm-a%5Bbot%5D": () =>
+				Response.json({ login: "mm-a[bot]", id: 4242 }),
+		});
+		const o = {
+			appId: 42,
+			pem: privateKey,
+			slug: "mm-a",
+			token: "ghs_x",
+			fetch: gh.f,
+		};
+		const who = {
+			name: "mm-a[bot]",
+			email: "4242+mm-a[bot]@users.noreply.github.com",
+		};
+		expect(await appBotIdentity(o)).toEqual(who);
+		expect(gh.calls[0]?.headers.get("authorization")).toBe("Bearer ghs_x");
+		expect(await appBotIdentity(o)).toEqual(who);
+		expect(gh.calls).toHaveLength(1);
+	});
+
+	test("no slug secret: GET /app gives it; no user id: the bot name without it", async () => {
+		const gh = fakeGitHub({
+			"GET /app": () => Response.json({ slug: "mm-b" }),
+		});
+		expect(
+			await appBotIdentity({ appId: 42, pem: privateKey, fetch: gh.f }),
+		).toEqual({
+			name: "mm-b[bot]",
+			email: "mm-b[bot]@users.noreply.github.com",
+		});
+		expect(gh.calls.map((c) => new URL(c.url).pathname)).toEqual([
+			"/app",
+			"/users/mm-b%5Bbot%5D",
+		]);
+	});
+
+	test("the slug is unknown (GET /app refused): null, the caller keeps its identity", async () => {
+		const gh = fakeGitHub({});
+		expect(
+			await appBotIdentity({ appId: 42, pem: privateKey, fetch: gh.f }),
+		).toBeNull();
 	});
 });

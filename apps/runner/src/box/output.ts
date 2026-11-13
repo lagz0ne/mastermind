@@ -24,6 +24,7 @@ import type { EnvironmentOutput } from "@mastermind/core";
 import {
 	GITHUB_APP_ID,
 	GITHUB_APP_PRIVATE_KEY,
+	type GitIdentity,
 	installationToken,
 } from "../github.ts";
 import { gitEnv, type HostRun, hostRun } from "./devcontainer.ts";
@@ -47,6 +48,25 @@ export const GIT_CREDENTIAL_SECRETS = [
 ];
 /** Where the deploy key is for the clone only; deleted before anything else runs. */
 export const CLONE_CRED_DIR = "/run/mastermind/clone-credential";
+/**
+ * Who the commits are by when the runner has no GitHub App: never a person
+ * (the agent once took a human's name from the repo's history: mm-210.87).
+ */
+export const MASTERMIND_IDENTITY: GitIdentity = {
+	name: "Mastermind",
+	email: "mastermind@users.noreply.github.com",
+};
+
+/** Git's author and committer env for `id` (wins over any git config). */
+export function identityEnv(id: GitIdentity): Record<string, string> {
+	return {
+		GIT_AUTHOR_NAME: id.name,
+		GIT_AUTHOR_EMAIL: id.email,
+		GIT_COMMITTER_NAME: id.name,
+		GIT_COMMITTER_EMAIL: id.email,
+	};
+}
+
 /** The bundle of the new commits, in the box. */
 const BUNDLE = "/tmp/mastermind-out.bundle";
 
@@ -81,6 +101,8 @@ export type OutputInput = {
 	baseSha: string;
 	/** The git credential secrets ({@link splitGitSecrets}), by name. */
 	secrets: Record<string, string>;
+	/** Who the commit is by; default {@link MASTERMIND_IDENTITY}. */
+	author?: GitIdentity;
 	fetch?: typeof fetch;
 	/** GitHub REST API base; default https://api.github.com. */
 	githubApi?: string;
@@ -256,13 +278,14 @@ export async function deliverOutput(
 	// 1. Commit what the agent left uncommitted.
 	await must("git add", ["git", "add", "-A"]);
 	const staged = await i.exec(["git", "diff", "--cached", "--quiet"]);
+	const author = i.author ?? MASTERMIND_IDENTITY;
 	if (staged.code === 1)
 		await must("git commit", [
 			"git",
 			"-c",
-			"user.name=Mastermind",
+			`user.name=${author.name}`,
 			"-c",
-			"user.email=mastermind@users.noreply.github.com",
+			`user.email=${author.email}`,
 			"commit",
 			"-q",
 			"--no-verify",
