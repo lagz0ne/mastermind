@@ -165,10 +165,15 @@ export async function lookupSecret(
 	return value ? { value, from: `env:${name}` } : null;
 }
 
-/** The values of `names` (for the agent only), and the names that have none. */
+/**
+ * The values of `names` (for the agent only), and the names that have none.
+ * `optional`: names added when the runner has a value, never missing (the
+ * runner's own git credential, e.g. the GitHub App of onboard: mm-210.87).
+ */
 export async function resolveSecrets(
 	names: string[],
 	l: Lookup,
+	optional: readonly string[] = [],
 ): Promise<{ values: Record<string, string>; missing: string[] }> {
 	const values: Record<string, string> = {};
 	const missing: string[] = [];
@@ -176,6 +181,11 @@ export async function resolveSecrets(
 		const hit = await lookupSecret(name, l);
 		if (hit) values[name] = hit.value;
 		else missing.push(name);
+	}
+	for (const name of optional) {
+		if (names.includes(name)) continue;
+		const hit = await lookupSecret(name, l);
+		if (hit) values[name] = hit.value;
 	}
 	return { values, missing };
 }

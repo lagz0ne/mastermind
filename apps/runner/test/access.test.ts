@@ -154,6 +154,45 @@ describe("checkEnvironmentsAccess", () => {
 		});
 	});
 
+	test("the runner's own GitHub App secrets go to the mint even when the environment does not list them (mm-210.87)", async () => {
+		const minted: Record<string, string>[] = [];
+		const out = await checkEnvironmentsAccess(
+			input({
+				needs: {
+					at: needs.at,
+					environments: [
+						{
+							name: "scratch",
+							secrets: ["CLAUDE_CODE_OAUTH_TOKEN"],
+							repo: "https://github.com/acme/scratch",
+							ref: "main",
+						},
+					],
+				},
+				store: {
+					CLAUDE_CODE_OAUTH_TOKEN: "oauth",
+					GITHUB_APP_ID: "123",
+					GITHUB_APP_PRIVATE_KEY: "pem",
+				},
+				mint: async (secrets) => {
+					minted.push(secrets);
+					return { GIT_TOKEN: "ghs_1" };
+				},
+				check: async (_r, _ref, secrets) =>
+					secrets.GIT_TOKEN === "ghs_1"
+						? { ok: true }
+						: { ok: false, kind: "no-access", reason: "no token" },
+			}),
+		);
+		expect(minted).toEqual([
+			{
+				CLAUDE_CODE_OAUTH_TOKEN: "oauth",
+				GITHUB_APP_ID: "123",
+				GITHUB_APP_PRIVATE_KEY: "pem",
+			},
+		]);
+		expect(out.scratch?.ok).toBe(true);
+	});
 	test("unknown environments: nothing to check", async () => {
 		expect(await checkEnvironmentsAccess(input({ needs: null }))).toEqual({});
 	});

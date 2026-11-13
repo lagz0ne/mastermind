@@ -41,6 +41,47 @@ describe("boxCheck", () => {
 			env: { A: "from-store", B: "from-env", C: "x" },
 		});
 	});
+	test("an environment with a repo also gets the runner's own git credential, never missing (mm-210.87)", async () => {
+		const store = {
+			CLAUDE_CODE_OAUTH_TOKEN: "oauth",
+			GITHUB_APP_ID: "123",
+			GITHUB_APP_PRIVATE_KEY: "pem",
+			GITHUB_APP_SLUG: "mm-runner",
+			OTHER: "not for this task",
+		};
+		const check = boxCheck({ loadSecrets: async () => store, env: {} });
+		const withRepo = {
+			env: {
+				repo: "https://github.com/acme/scratch",
+				ref: "main",
+				requires: [],
+				secrets: ["CLAUDE_CODE_OAUTH_TOKEN"],
+			},
+		};
+		expect(await check(withRepo, settings, {})).toEqual({
+			ok: true,
+			cwd: "/workspace",
+			env: {
+				CLAUDE_CODE_OAUTH_TOKEN: "oauth",
+				GITHUB_APP_ID: "123",
+				GITHUB_APP_PRIVATE_KEY: "pem",
+				GITHUB_APP_SLUG: "mm-runner",
+			},
+		});
+		// No repo: no git credential. No credential at all: not a missing secret.
+		const r = await check(env(["CLAUDE_CODE_OAUTH_TOKEN"]), settings, {});
+		expect(r).toMatchObject({
+			ok: true,
+			env: { CLAUDE_CODE_OAUTH_TOKEN: "oauth" },
+		});
+		if (r.ok)
+			expect(Object.keys(r.env ?? {})).toEqual(["CLAUDE_CODE_OAUTH_TOKEN"]);
+		const bare = boxCheck({
+			loadSecrets: async () => ({ CLAUDE_CODE_OAUTH_TOKEN: "oauth" }),
+			env: {},
+		});
+		expect(await bare(withRepo, settings, {})).toMatchObject({ ok: true });
+	});
 	test("a missing secret declines with its name and the fix", async () => {
 		const check = boxCheck({ loadSecrets: async () => ({}), env: {} });
 		const r = await check(env(["CLAUDE_CODE_OAUTH_TOKEN"]), settings, {});

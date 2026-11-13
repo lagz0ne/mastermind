@@ -26,6 +26,7 @@ import { DockerDriver, dockerEndpoint } from "./docker.ts";
 import type { Box, BoxDriver } from "./driver.ts";
 import type { BoxFiles } from "./files.ts";
 import { DEFAULT_BOX_IMAGE } from "./image.ts";
+import { GIT_CREDENTIAL_SECRETS } from "./output.ts";
 import {
 	listFilesOverPaseo,
 	readFileOverPaseo,
@@ -73,11 +74,19 @@ export function boxCheck(deps: BoxCheckDeps = {}) {
 				reason: error instanceof Error ? error.message : String(error),
 			};
 		}
-		const { values, missing } = await resolveSecrets(d.env.secrets ?? [], {
-			store,
-			env: deps.env ?? process.env,
-			binding: decision.binding?.env,
-		});
+		// With a repo: the runner's own git credential too, when it has one
+		// (the GitHub App of onboard, GIT_TOKEN, ...), even if the environment
+		// does not list it: the clone, the push and the pull request need it
+		// (mm-210.87). It stays on this machine (run.ts splitGitSecrets).
+		const { values, missing } = await resolveSecrets(
+			d.env.secrets ?? [],
+			{
+				store,
+				env: deps.env ?? process.env,
+				binding: decision.binding?.env,
+			},
+			d.env.repo ? GIT_CREDENTIAL_SECRETS : [],
+		);
 		if (missing.length) return { ok: false, reason: missingReason(missing) };
 		return { ok: true, cwd: WORKSPACE, env: values };
 	};

@@ -278,6 +278,100 @@ describe("CodeStore with real git", () => {
 	});
 });
 
+/**
+ * A private git host over smart HTTP (git http-backend as CGI): every request
+ * needs Basic auth x-access-token:<token>, as github.com with an app token.
+ */
+function privateGitHost(token: string) {
+	const project = mkdtempSync(join(root, "http-"));
+	git(project, "clone", "-q", "--bare", remote, "repo.git");
+	const auths: string[] = [];
+	const server = Bun.serve({
+		port: 0,
+		hostname: "127.0.0.1",
+		async fetch(req) {
+			const url = new URL(req.url);
+			const auth = req.headers.get("authorization") ?? "";
+			auths.push(auth);
+			if (auth !== `Basic ${btoa(`x-access-token:${token}`)}`)
+				return new Response("auth", {
+					status: 401,
+					headers: { "WWW-Authenticate": 'Basic realm="git"' },
+				});
+			const p = Bun.spawn(["git", "http-backend"], {
+				env: {
+					...GIT_ENV,
+					GIT_PROJECT_ROOT: project,
+					GIT_HTTP_EXPORT_ALL: "1",
+					REQUEST_METHOD: req.method,
+					PATH_INFO: url.pathname,
+					QUERY_STRING: url.search.slice(1),
+					CONTENT_TYPE: req.headers.get("content-type") ?? "",
+					HTTP_CONTENT_ENCODING: req.headers.get("content-encoding") ?? "",
+					REMOTE_USER: "x-access-token",
+					REMOTE_ADDR: "127.0.0.1",
+				},
+				stdin: new Uint8Array(await req.arrayBuffer()),
+				stdout: "pipe",
+			});
+			const out = Buffer.from(await new Response(p.stdout).arrayBuffer());
+			const end = out.indexOf("\r\n\r\n");
+			const headers = new Headers();
+			let status = 200;
+			for (const line of out.subarray(0, end).toString().split("\r\n")) {
+				const [k, ...v] = line.split(": ");
+				if (!k) continue;
+				if (k.toLowerCase() === "status") status = Number.parseInt(v[0] ?? "");
+				else headers.append(k, v.join(": "));
+			}
+			return new Response(out.subarray(end + 4), { status, headers });
+		},
+	});
+	return {
+		url: `http://127.0.0.1:${server.port}/repo.git`,
+		bare: join(project, "repo.git"),
+		auths,
+		stop: () => server.stop(true),
+	};
+}
+
+describe("CodeStore push to a private git host (mm-210.87)", () => {
+	const store = new CodeStore(join(root, "code-http"));
+
+	test("no credential: the push fails as in production; with GIT_TOKEN (the app token) it lands", async () => {
+		const token = "ghs_fake-install-token";
+		const host = privateGitHost(token);
+		try {
+			const copy = await store.checkout({
+				repo: host.url,
+				ref: "main",
+				executionId: exec(),
+				secrets: { GIT_TOKEN: token },
+			});
+			writeFileSync(join(copy.dir, "README"), "hello agent\n");
+			const snap = await store.snapshot(copy);
+			const deliver = (secrets: Record<string, string>) =>
+				store.deliver(copy, snap, {
+					itemId: "mm-87",
+					title: "mm-87: push",
+					output: { kind: "branch" },
+					secrets,
+				});
+			await expect(deliver({})).rejects.toThrow(/could not read Username/);
+			const out = await deliver({ GIT_TOKEN: token });
+			expect(out?.line).toBe("pushed branch mm/mm-87 (1 commit, 1 file)");
+			const tip = git(root, "--git-dir", host.bare, "rev-parse", "mm/mm-87");
+			expect(git(root, "--git-dir", host.bare, "show", `${tip}:README`)).toBe(
+				"hello agent",
+			);
+			expect(host.auths).toContain(`Basic ${btoa(`x-access-token:${token}`)}`);
+			await store.remove(copy);
+		} finally {
+			host.stop();
+		}
+	});
+});
+
 describe("runInBox with code by mount (fake driver)", () => {
 	const store = new CodeStore(join(root, "code-run"));
 	function task(over: Partial<BoxTask["env"]> = {}): BoxTask {

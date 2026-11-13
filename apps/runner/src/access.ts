@@ -10,7 +10,7 @@
  * this process; the reasons are redacted by checkAccess.
  */
 import { type AccessResult, checkAccess } from "./box/devcontainer.ts";
-import { appToken } from "./box/output.ts";
+import { appToken, GIT_CREDENTIAL_SECRETS } from "./box/output.ts";
 import { fail, pass, type StepResult } from "./onboard.ts";
 import type { Routing } from "./routing.ts";
 import type { Needs } from "./secrets/needs.ts";
@@ -111,11 +111,16 @@ export async function checkEnvironmentsAccess(
 			.map(async (e) => {
 				const repo = e.repo as string;
 				const ref = e.ref ?? "";
-				const { values, missing } = await resolveSecrets(e.secrets, {
-					store: i.store,
-					env: i.env,
-					binding: i.routing.environments[e.name]?.env,
-				});
+				// The runner's own git credential too (mm-210.87), as for a task.
+				const { values, missing } = await resolveSecrets(
+					e.secrets,
+					{
+						store: i.store,
+						env: i.env,
+						binding: i.routing.environments[e.name]?.env,
+					},
+					GIT_CREDENTIAL_SECRETS,
+				);
 				if (missing.length) return;
 				let r: AccessResult;
 				const ms = i.timeoutMs ?? ACCESS_TIMEOUT_MS;
