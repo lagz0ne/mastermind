@@ -246,6 +246,30 @@ describe("Runner", () => {
 		expect(mm.verbs("complete")).toHaveLength(0);
 	});
 
+	test("done but not delivered: release asks Mastermind to hold the item (mm-2oj)", async () => {
+		const mm = new FakeMastermind();
+		mm.push(dispatch("mm-2"));
+		make(
+			mm,
+			new FakeLauncher({
+				status: "failed",
+				summary: "output failed after 3 tries: push refused.",
+				hold: true,
+			}),
+		);
+		await until(() => mm.verbs("release").length === 1);
+		expect(mm.verbs("release")[0]?.hold).toBe(true);
+		expect(mm.verbs("release")[0]?.startFailed).toBeUndefined();
+	});
+
+	test("an agent failure does not ask for a hold", async () => {
+		const mm = new FakeMastermind();
+		mm.push(dispatch("mm-2"));
+		make(mm, new FakeLauncher({ status: "failed", summary: "tests are red" }));
+		await until(() => mm.verbs("release").length === 1);
+		expect(mm.verbs("release")[0]?.hold).toBeUndefined();
+	});
+
 	test("a failed check releases without starting an agent", async () => {
 		const mm = new FakeMastermind();
 		const agents = new FakeLauncher({ status: "done", summary: "x" });

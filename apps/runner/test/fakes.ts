@@ -44,6 +44,7 @@ export type Call = {
 	actor: string;
 	text?: string;
 	startFailed?: boolean;
+	hold?: boolean;
 	output?: WorkOutput;
 };
 
@@ -109,7 +110,7 @@ export class FakeMastermind implements MastermindClient {
 		bead: string,
 		actor: string,
 		text: string,
-		o?: { startFailed?: boolean },
+		o?: { startFailed?: boolean; hold?: boolean },
 	) {
 		this.calls.push({
 			verb: "release",
@@ -117,6 +118,7 @@ export class FakeMastermind implements MastermindClient {
 			actor,
 			text,
 			...(o?.startFailed ? { startFailed: true } : {}),
+			...(o?.hold ? { hold: true } : {}),
 		});
 	}
 	onReady(queue: string, l: (n: ReadyNotice) => void) {
