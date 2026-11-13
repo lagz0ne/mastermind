@@ -74,10 +74,11 @@ export async function recordProbe(
 	r: DoctorReport,
 	model: { name: string; value: string } | null,
 	modelSecrets: readonly string[],
+	clock: () => Date = () => new Date(),
 ): Promise<GateState | null> {
 	const o = probeOutcome(r, model, modelSecrets);
 	if (!o) return null;
-	const now = new Date().toISOString();
+	const now = clock().toISOString();
 	if ("refused" in o) {
 		const s = { refused: o.refused, at: now };
 		await writeGate(configPath, s);

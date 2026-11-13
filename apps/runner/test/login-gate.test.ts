@@ -81,14 +81,26 @@ describe("box probe outcome", () => {
 describe("login-gate.json", () => {
 	test("a failed probe writes the refusal (0600, no value); a later passing probe clears it; an older one does not", async () => {
 		const path = config();
+		// A fixed clock: each write gets the next minute (no real time in the test).
+		let minute = 0;
+		const clock = () => new Date(Date.UTC(2026, 10, 12, 17, minute++, 0));
 		expect(await readGate(path)).toBeNull();
 		const set = await recordProbe(
 			path,
 			report({ status: "fail", problem: LOGIN }),
 			model,
 			SECRETS,
+			clock,
 		);
-		expect(set?.refused?.secret).toBe("CLAUDE_CODE_OAUTH_TOKEN");
+		expect(set).toEqual({
+			refused: {
+				secret: "CLAUDE_CODE_OAUTH_TOKEN",
+				hash: secretHash(model.value),
+				at: "2026-11-12T16:19:00.000Z",
+				problem: "Failed to authenticate",
+			},
+			at: "2026-11-12T17:00:00.000Z",
+		});
 		expect(await readGate(path)).toEqual(set);
 		expect(statSync(gatePath(path)).mode & 0o777).toBe(0o600);
 		expect(await Bun.file(gatePath(path)).text()).not.toContain(model.value);
@@ -99,18 +111,20 @@ describe("login-gate.json", () => {
 				report({ status: "pass" }, { at: "2026-11-12T16:00:00.000Z" }),
 				model,
 				SECRETS,
+				clock,
 			),
 		).toBeNull();
-		expect((await readGate(path))?.refused).not.toBeNull();
+		expect(await readGate(path)).toEqual(set);
 		const cleared = await recordProbe(
 			path,
 			report({ status: "pass" }, { at: "2026-11-12T16:30:00.000Z" }),
 			model,
 			SECRETS,
+			clock,
 		);
-		expect(cleared?.refused).toBeNull();
-		expect((await readGate(path))?.refused).toBeNull();
-		expect((cleared?.at ?? "") > (set?.at ?? "")).toBe(true);
+		// The rejected older pass took 17:01 from the clock.
+		expect(cleared).toEqual({ refused: null, at: "2026-11-12T17:02:00.000Z" });
+		expect(await readGate(path)).toEqual(cleared);
 	});
 
 	test("a pass with no refusal writes nothing", async () => {
