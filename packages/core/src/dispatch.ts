@@ -277,11 +277,16 @@ export type CompleteRequest = {
 /**
  * Give the bead back without finishing it. `startFailed`: the agent did not
  * start (check refused, paseo run failed); the dispatcher counts these.
+ * `hold`: the agent's work is done but could not be delivered (the push or the
+ * pull request failed for good; the reason says where the work is kept). The
+ * dispatcher holds the bead for a human at once ({@link NEEDS_HUMAN_LABEL})
+ * and does not run an agent on it again. An older dispatcher ignores it.
  */
 export type ReleaseRequest = {
 	actor: string;
 	reason: string;
 	startFailed?: boolean;
+	hold?: boolean;
 };
 
 /** Reply of the verbs that return no data. */

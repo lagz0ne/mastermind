@@ -581,6 +581,9 @@ export class Dispatcher {
 		await this.#work
 			.comment(beadId, actor, `released: ${reason}`)
 			.catch((e) => this.#opts.onError?.(e));
+		// Done but not delivered: label before the release, so no runner claims it.
+		const hold = req.hold === true;
+		if (hold) await this.#holdForHuman(bead, reason);
 		await this.#work
 			.release(beadId, actor)
 			.catch((e) => Promise.reject(busError(e)));
@@ -598,10 +601,33 @@ export class Dispatcher {
 			}
 		}
 		// failed:start already says why; one hold-back label is enough.
-		await this.#attempt(bead, `released by ${actor}: ${reason}`, heldBack);
+		if (!hold)
+			await this.#attempt(bead, `released by ${actor}: ${reason}`, heldBack);
 		this.#see({ kind: "done", actor, beadId });
 		this.#signal(bead);
 		return { ok: true };
+	}
+
+	/**
+	 * The agent's work is done but could not be delivered (mm-2oj): a new run
+	 * would fail the same way, so a human gets it at once. The reason says
+	 * where the work is kept (the patch on the runner).
+	 */
+	async #holdForHuman(bead: Bead, reason: string): Promise<void> {
+		if (bead.labels.includes(NEEDS_HUMAN_LABEL)) return;
+		try {
+			await this.#work.comment(
+				bead.id,
+				this.#actor,
+				`not dispatched: the work is done but could not be delivered; ${reason}. Deliver it by hand or fix the cause, then reopen to run it again.`,
+			);
+			await this.#work.setLabels(bead.id, this.#actor, [
+				...bead.labels,
+				NEEDS_HUMAN_LABEL,
+			]);
+		} catch (error) {
+			this.#opts.onError?.(error);
+		}
 	}
 
 	/** Too many failed starts: label the bead and say why. */

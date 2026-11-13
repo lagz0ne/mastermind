@@ -817,6 +817,7 @@ export async function runInBox(
 				}
 				step(`output failed: ${why}`);
 				result.status = "failed";
+				result.hold = true;
 				const kept = result.patch
 					? ` The work is kept on the runner as a patch: ${result.patch}`
 					: "";

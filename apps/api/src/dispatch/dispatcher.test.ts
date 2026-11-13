@@ -433,6 +433,34 @@ describe("max attempts, then needs a human (mm-210.65)", () => {
 		expect(labels).not.toContain(NEEDS_HUMAN_LABEL);
 	});
 
+	test("hold (done, not delivered): needs:human after ONE run, with the reason and patch path (mm-2oj)", async () => {
+		const { d, work, advance } = setup();
+		work.add({ id: "mm-1" }, "build");
+		expect(await take(d, "a")).toBe("mm-1");
+		const reason =
+			"output failed after 3 tries: push refused. The work is kept on the runner as a patch: /out/x.patch";
+		await d.release("alice", "mm-1", {
+			actor: "alice/a",
+			reason,
+			hold: true,
+		});
+		const bead = work.beads.get("mm-1");
+		expect(bead?.status).toBe("open");
+		expect(bead?.labels).toContain(NEEDS_HUMAN_LABEL);
+		expect(work.comments.map((c) => c.text)).toContain(
+			`not dispatched: the work is done but could not be delivered; ${reason}. Deliver it by hand or fix the cause, then reopen to run it again.`,
+		);
+		advance(24 * 3600_000);
+		expect(await take(d, "b")).toBeUndefined();
+		// Reopen removes the label: it runs again.
+		await work.setLabels(
+			"mm-1",
+			"rocky",
+			(bead?.labels ?? []).filter((l) => l !== NEEDS_HUMAN_LABEL),
+		);
+		expect(await take(d, "b")).toBe("mm-1");
+	});
+
 	test("the maximum is a setting", async () => {
 		const { d, work } = setup({ maxAttempts: () => 4 });
 		work.add({ id: "mm-1" }, "build");

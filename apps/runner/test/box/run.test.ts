@@ -541,6 +541,8 @@ describe("runInBox", () => {
 			"output failed after 3 tries: git push mm/mm-1: exited 128: Permission denied.",
 		);
 		expect(res.summary).toContain("kept on the runner as a patch:");
+		// Mastermind holds the item for a human; no new agent run (mm-2oj).
+		expect(res.hold).toBe(true);
 		// The agent ran once; the push three times.
 		expect(d.execs.filter((e) => e.cmd[1] === "run")).toHaveLength(1);
 		expect(host.calls.filter((c) => c.cmd[1] === "push")).toHaveLength(3);

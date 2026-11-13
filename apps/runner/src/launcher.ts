@@ -51,6 +51,11 @@ export type AgentResult = {
 	status: "done" | "failed";
 	summary: string;
 	output?: WorkOutput;
+	/**
+	 * The agent finished but its work could not be delivered (push or pull
+	 * request failed for good): Mastermind holds the item for a human.
+	 */
+	hold?: boolean;
 };
 
 export interface AgentLauncher {

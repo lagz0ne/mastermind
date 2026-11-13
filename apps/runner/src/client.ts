@@ -40,12 +40,15 @@ export interface MastermindClient {
 		summary: string,
 		output?: WorkOutput,
 	): Promise<void>;
-	/** `startFailed`: the agent did not start (Mastermind backs off, then holds the bead). */
+	/**
+	 * `startFailed`: the agent did not start (Mastermind backs off, then holds the bead).
+	 * `hold`: the work is done but could not be delivered (Mastermind holds the bead for a human at once).
+	 */
 	release(
 		beadId: string,
 		actor: string,
 		reason: string,
-		opts?: { startFailed?: boolean },
+		opts?: { startFailed?: boolean; hold?: boolean },
 	): Promise<void>;
 	/** Mastermind says a queue has work. Returns an unsubscribe. */
 	onReady(queue: string, listener: (n: ReadyNotice) => void): () => void;
@@ -120,6 +123,7 @@ export function natsClient(
 				actor,
 				reason,
 				...(o?.startFailed ? { startFailed: true } : {}),
+				...(o?.hold ? { hold: true } : {}),
 			});
 		},
 		onReady(queue, listener) {
