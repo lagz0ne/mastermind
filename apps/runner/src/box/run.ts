@@ -148,6 +148,8 @@ export type BoxRunOptions = {
 	fetch?: typeof fetch;
 	/** GitHub REST API base; default https://api.github.com. */
 	githubApi?: string;
+	/** Tries of the delivery (push, PR) after the agent; default {@link OUTPUT_ATTEMPTS}, wait {@link outputWaitMs}. */
+	outputRetry?: { attempts: number; waitMs: (attempt: number) => number };
 	/** Git on this machine, for the push after the agent; default: spawn. */
 	hostRun?: HostRun;
 	/**
@@ -205,6 +207,29 @@ export class BoxStepError extends LaunchError {
  * The Paseo daemon in the box listens only inside the box, without its web UI
  * and without speech (no local speech model download), in any image.
  */
+/**
+ * Tries of the delivery (mm-210.87), as actions/checkout retries a failed
+ * git fetch: 3 tries, a random 10-20 s between them.
+ */
+export const OUTPUT_ATTEMPTS = 3;
+export function outputWaitMs(_attempt: number): number {
+	return 10_000 + Math.floor(Math.random() * 10_000);
+}
+
+/** Wait `ms`, or less when `signal` aborts. */
+function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+	return new Promise((resolve) => {
+		if (signal.aborted) return resolve();
+		const t = setTimeout(done, ms);
+		function done() {
+			clearTimeout(t);
+			signal.removeEventListener("abort", done);
+			resolve();
+		}
+		signal.addEventListener("abort", done, { once: true });
+	});
+}
+
 export const BOX_ENV: Record<string, string> = {
 	...QUIET_PASEO_ENV,
 	PASEO_LISTEN: "127.0.0.1:6767",
@@ -726,7 +751,11 @@ export async function runInBox(
 		await sendOut(true);
 
 		// Code leaves through the git host: branch mm/<item>, pull request.
-		if (base && result.status === "done") {
+		// A failed delivery is tried again, alone, on the same work (mm-210.87):
+		// the agent does not run again for a push or PR API failure.
+		const tries = opts.outputRetry?.attempts ?? OUTPUT_ATTEMPTS;
+		const wait = opts.outputRetry?.waitMs ?? outputWaitMs;
+		for (let attempt = 1; base && result.status === "done"; attempt++) {
 			try {
 				// A long task: the app token needs 10 min left for the push.
 				if (app && app.expiresAt - now() < APP_TOKEN_MIN_LEFT_MS) {
@@ -773,12 +802,25 @@ export async function runInBox(
 					result.output = out;
 					step(out.line);
 				}
+				break;
 			} catch (error) {
 				if (all.aborted) throw stopped();
 				const why = error instanceof Error ? error.message : String(error);
+				if (attempt < tries) {
+					const ms = wait(attempt);
+					step(
+						`output failed (try ${attempt} of ${tries}): ${why}; the push alone again in ${Math.round(ms / 1000)} s`,
+					);
+					await abortableSleep(ms, all);
+					if (all.aborted) throw stopped();
+					continue;
+				}
 				step(`output failed: ${why}`);
 				result.status = "failed";
-				result.summary = `${result.summary}\n\noutput failed: ${why}`;
+				const kept = result.patch
+					? ` The work is kept on the runner as a patch: ${result.patch}`
+					: "";
+				result.summary = `${result.summary}\n\noutput failed after ${tries} tries: ${why}.${kept}`;
 			}
 		}
 		return result;

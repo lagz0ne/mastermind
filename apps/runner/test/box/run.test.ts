@@ -504,7 +504,7 @@ describe("runInBox", () => {
 		expect(d.boxes.size).toBe(0);
 	});
 
-	test("a failing push fails the task with the reason; the box is deleted", async () => {
+	test("a failing push is tried again alone (3 tries), then fails the task with the reason; the box is deleted", async () => {
 		const d = new FakeDriver();
 		d.handler = (cmd) =>
 			cmd[0] === "git" && cmd[1] === "rev-list"
@@ -517,13 +517,67 @@ describe("runInBox", () => {
 		);
 		const base = task();
 		const t = task({ env: { ...base.env, output: { kind: "branch" } } });
-		const res = await runInBox(t, { ...opts(d), hostRun: host.run }, never);
+		const waits: number[] = [];
+		const steps: string[] = [];
+		const res = await runInBox(
+			t,
+			{
+				...opts(d),
+				hostRun: host.run,
+				onStep: (l) => steps.push(l),
+				outputRetry: {
+					attempts: 3,
+					waitMs: (n) => {
+						waits.push(n);
+						return 0;
+					},
+				},
+			},
+			never,
+		);
 		expect(res.status).toBe("failed");
 		expect(res.summary).toContain("did it");
 		expect(res.summary).toContain(
-			"output failed: git push mm/mm-1: exited 128: Permission denied",
+			"output failed after 3 tries: git push mm/mm-1: exited 128: Permission denied.",
+		);
+		expect(res.summary).toContain("kept on the runner as a patch:");
+		// The agent ran once; the push three times.
+		expect(d.execs.filter((e) => e.cmd[1] === "run")).toHaveLength(1);
+		expect(host.calls.filter((c) => c.cmd[1] === "push")).toHaveLength(3);
+		expect(waits).toEqual([1, 2]);
+		expect(steps).toContain(
+			"output failed (try 1 of 3): git push mm/mm-1: exited 128: Permission denied; the push alone again in 0 s",
 		);
 		expect(d.boxes.size).toBe(0);
+	});
+
+	test("a push that fails once and then works: the task is done, the agent ran once (mm-210.87)", async () => {
+		const d = new FakeDriver();
+		d.handler = (cmd) =>
+			cmd[0] === "git" && cmd[1] === "rev-list"
+				? { code: 0, stdout: "1\n", stderr: "" }
+				: undefined;
+		let pushes = 0;
+		const host = fakeHost((cmd) =>
+			cmd[1] === "push" && ++pushes === 1
+				? { code: 128, stdout: "", stderr: "Could not resolve host" }
+				: undefined,
+		);
+		const base = task();
+		const t = task({ env: { ...base.env, output: { kind: "branch" } } });
+		const res = await runInBox(
+			t,
+			{
+				...opts(d),
+				hostRun: host.run,
+				outputRetry: { attempts: 3, waitMs: () => 0 },
+			},
+			never,
+		);
+		expect(res.status).toBe("done");
+		expect(res.output?.branch).toBe("mm/mm-1");
+		expect(pushes).toBe(2);
+		expect(d.execs.filter((e) => e.cmd[1] === "run")).toHaveLength(1);
 	});
 
 	test("a failed agent pushes nothing", async () => {
